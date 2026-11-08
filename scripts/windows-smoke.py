@@ -78,7 +78,7 @@ def application():
 
 window = wait_for("SteadDesk main window", application, 120)
 window.set_focus()
-entry = wait_for("remote ID placeholder", lambda: by_name(window, "Enter remote ID"))
+wait_for("remote ID placeholder", lambda: by_name(window, "Enter remote ID"))
 main_labels = {"Enter remote ID", "Your Desktop", "Control Remote Desktop", "Connect",
                "Powered by RustDesk", "Recent sessions", "SteadDesk", "Install"}
 save_evidence(window, "main", controls(window, main_labels.__contains__))
@@ -106,17 +106,30 @@ press(window, "Network")
 press(window, "ID/Relay Server")
 expected = [
     "SteadDesk · 🔒",
-    "ID Server: relay.steaddesk.com",
-    "Relay Server: relay.steaddesk.com",
-    "API Server: https://api.steaddesk.com",
+    "ID server: relay.steaddesk.com",
+    "Relay server: relay.steaddesk.com",
+    "API server: https://api.steaddesk.com",
     "Key: J1e7eHb4p8PaTnIc7Ihk+t7JNQi0xBVBGfI+sRr3CfA=",
 ]
 
 
 def profile_fields():
-    found = controls(window, lambda s: bool(s) and all(line.strip() in expected for line in s.splitlines()))
-    lines = {line.strip() for c in found for line in c.window_text().strip().splitlines()}
-    return found if lines == set(expected) else None
+    fields = []
+    lines = set()
+    for control in controls(window, lambda s: True):
+        values = [control.window_text()]
+        if control.element_info.control_type == "Edit":
+            try:
+                values.append(control.iface_value.CurrentValue or "")
+            except Exception:
+                pass
+        for value in values:
+            parts = {line.strip() for line in value.strip().splitlines()}
+            if parts and parts.issubset(expected):
+                fields.append(control)
+                lines.update(parts)
+                break
+    return fields if lines == set(expected) else None
 
 
 fields = wait_for("read-only preset values", profile_fields)
