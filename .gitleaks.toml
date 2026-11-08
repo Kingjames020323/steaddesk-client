@@ -1,0 +1,7 @@
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Exact public relay verification key displayed in the client"
+regexTarget = "secret"
+regexes = ['''^J1e7eHb4p8PaTnIc7Ihk\+t7JNQi0xBVBGfI\+sRr3CfA=?$''']

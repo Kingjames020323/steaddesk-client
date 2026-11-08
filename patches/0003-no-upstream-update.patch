@@ -1,0 +1,52 @@
+Subject: Keep manual and background upstream update discovery and downloads disabled
+
+diff --git a/src/common.rs b/src/common.rs
+index 0d46baf..01c3a71 100644
+--- a/src/common.rs
++++ b/src/common.rs
+@@ -1031,6 +1031,9 @@ pub fn check_software_update() {
+ // Because the url is always `https://api.rustdesk.com/version/latest`.
+ #[tokio::main(flavor = "current_thread")]
+ pub async fn do_check_software_update() -> hbb_common::ResultType<()> {
++    if is_custom_client() {
++        return Ok(());
++    }
+     let (request, url) =
+         hbb_common::version_check_request(hbb_common::VER_TYPE_RUSTDESK_CLIENT.to_string());
+     let proxy_conf = Config::get_socks();
+diff --git a/src/updater.rs b/src/updater.rs
+index 0c17840..9b64bec 100644
+--- a/src/updater.rs
++++ b/src/updater.rs
+@@ -86,11 +86,17 @@ pub fn update_controlling_session_count(count: usize) {
+ 
+ #[allow(dead_code)]
+ pub fn start_auto_update() {
++    if crate::is_custom_client() {
++        return;
++    }
+     let _sender = TX_MSG.lock().unwrap();
+ }
+ 
+ #[allow(dead_code)]
+ pub fn manually_check_update() -> ResultType<()> {
++    if crate::is_custom_client() {
++        return Ok(());
++    }
+     let sender = TX_MSG.lock().unwrap();
+     sender.send(UpdateMsg::CheckUpdate)?;
+     Ok(())
+diff --git a/src/flutter_ffi.rs b/src/flutter_ffi.rs
+index f9cc2d6..3963e36 100644
+--- a/src/flutter_ffi.rs
++++ b/src/flutter_ffi.rs
+@@ -2774,6 +2774,9 @@ pub fn main_get_common_sync(key: String) -> SyncReturn<String> {
+ }
+ 
+ pub fn main_set_common(_key: String, _value: String) {
++    if crate::is_custom_client() && matches!(_key.as_str(), "download-new-version" | "update-me") {
++        return;
++    }
+     #[cfg(target_os = "windows")]
+     if _key == "install-printer" && crate::platform::is_win_10_or_greater() {
+         std::thread::spawn(move || {

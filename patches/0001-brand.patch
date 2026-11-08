@@ -1,0 +1,178 @@
+Subject: Brand the native launcher, Flutter About views and Android application
+
+diff --git a/flutter/android/app/build.gradle b/flutter/android/app/build.gradle
+index 07f029c..be7946a 100644
+--- a/flutter/android/app/build.gradle
++++ b/flutter/android/app/build.gradle
+@@ -99,7 +99,7 @@ android {
+ 
+     defaultConfig {
+         // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
+-        applicationId "com.carriez.flutter_hbb"
++        applicationId "com.steaddesk.remote"
+         minSdkVersion 22
+         targetSdkVersion 36
+         versionCode flutterVersionCode.toInteger()
+diff --git a/flutter/android/app/src/main/AndroidManifest.xml b/flutter/android/app/src/main/AndroidManifest.xml
+index e078818..34e6e43 100644
+--- a/flutter/android/app/src/main/AndroidManifest.xml
++++ b/flutter/android/app/src/main/AndroidManifest.xml
+@@ -29,7 +29,7 @@
+     <application
+         android:name=".MainApplication"
+         android:icon="@mipmap/ic_launcher"
+-        android:label="RustDesk"
++        android:label="SteadDesk"
+         android:roundIcon="@mipmap/ic_launcher"
+         android:supportsRtl="true">
+ 
+@@ -49,7 +49,7 @@
+             android:name=".InputService"
+             android:enabled="true"
+             android:exported="false"
+-            android:label="RustDesk Input"
++            android:label="SteadDesk Input"
+             android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+             <intent-filter>
+                 <action android:name="android.accessibilityservice.AccessibilityService" />
+diff --git a/flutter/android/app/src/main/res/values/strings.xml b/flutter/android/app/src/main/res/values/strings.xml
+index eae55d5..9099575 100644
+--- a/flutter/android/app/src/main/res/values/strings.xml
++++ b/flutter/android/app/src/main/res/values/strings.xml
+@@ -1,5 +1,5 @@
+ <resources>
+-    <string name="app_name">RustDesk</string>
+-    <string name="accessibility_service_description">Allow other devices to control your phone using virtual touch, when RustDesk screen sharing is established</string>
+-    <string name="foreground_service_special_use_subtype">Keeps the RustDesk remote desktop host available for authorized unattended connections and foreground notifications without starting screen capture before user approval.</string>
++    <string name="app_name">SteadDesk</string>
++    <string name="accessibility_service_description">Allow other devices to control your phone using virtual touch, when SteadDesk screen sharing is established</string>
++    <string name="foreground_service_special_use_subtype">Keeps the SteadDesk remote desktop host available for authorized unattended connections and foreground notifications without starting screen capture before user approval.</string>
+ </resources>
+diff --git a/flutter/lib/desktop/pages/desktop_setting_page.dart b/flutter/lib/desktop/pages/desktop_setting_page.dart
+index 82f038c..acfe383 100644
+--- a/flutter/lib/desktop/pages/desktop_setting_page.dart
++++ b/flutter/lib/desktop/pages/desktop_setting_page.dart
+@@ -2532,7 +2532,7 @@ class _AboutState extends State<_About> {
+       final scrollController = ScrollController();
+       return SingleChildScrollView(
+         controller: scrollController,
+-        child: _Card(title: translate('About RustDesk'), children: [
++        child: _Card(title: 'SteadDesk', children: [
+           Column(
+             crossAxisAlignment: CrossAxisAlignment.start,
+             children: [
+@@ -2562,10 +2562,10 @@ class _AboutState extends State<_About> {
+                   ).marginSymmetric(vertical: 4.0)),
+               InkWell(
+                   onTap: () {
+-                    launchUrlString('https://rustdesk.com');
++                    launchUrlString('https://github.com/Kingjames020323/steaddesk-client');
+                   },
+                   child: Text(
+-                    translate('Website'),
++                    '基于 RustDesk（AGPL-3.0） · Source code',
+                     style: linkStyle,
+                   ).marginSymmetric(vertical: 4.0)),
+               Container(
+diff --git a/flutter/lib/mobile/pages/settings_page.dart b/flutter/lib/mobile/pages/settings_page.dart
+index 198613a..6d44ef8 100644
+--- a/flutter/lib/mobile/pages/settings_page.dart
++++ b/flutter/lib/mobile/pages/settings_page.dart
+@@ -36,7 +36,7 @@ class SettingsPage extends StatefulWidget implements PageShape {
+   State<SettingsPage> createState() => _SettingsState();
+ }
+ 
+-const url = 'https://rustdesk.com/';
++const url = 'https://github.com/Kingjames020323/steaddesk-client';
+ 
+ enum KeepScreenOn {
+   never,
+@@ -1030,7 +1030,7 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
+                 title: Text(translate("Version: ") + version),
+                 value: Padding(
+                   padding: EdgeInsets.symmetric(vertical: 8),
+-                  child: Text('rustdesk.com',
++                  child: Text('基于 RustDesk（AGPL-3.0） · Source code',
+                       style: TextStyle(
+                         decoration: TextDecoration.underline,
+                       )),
+@@ -1171,17 +1171,17 @@ void showThemeSettings(OverlayDialogManager dialogManager) async {
+ void showAbout(OverlayDialogManager dialogManager) {
+   dialogManager.show((setState, close, context) {
+     return CustomAlertDialog(
+-      title: Text(translate('About RustDesk')),
++      title: Text('SteadDesk'),
+       content: Wrap(direction: Axis.vertical, spacing: 12, children: [
+         Text('Version: $version'),
+         InkWell(
+             onTap: () async {
+-              const url = 'https://rustdesk.com/';
++              const url = 'https://github.com/Kingjames020323/steaddesk-client';
+               await launchUrl(Uri.parse(url));
+             },
+             child: Padding(
+               padding: EdgeInsets.symmetric(vertical: 8),
+-              child: Text('rustdesk.com',
++              child: Text('基于 RustDesk（AGPL-3.0） · Source code',
+                   style: TextStyle(
+                     decoration: TextDecoration.underline,
+                   )),
+diff --git a/flutter/windows/runner/Runner.rc b/flutter/windows/runner/Runner.rc
+index 88d1854..6469af2 100644
+--- a/flutter/windows/runner/Runner.rc
++++ b/flutter/windows/runner/Runner.rc
+@@ -90,12 +90,12 @@ BEGIN
+         BLOCK "040904e4"
+         BEGIN
+             VALUE "CompanyName", "Purslane Tech Pte. Ltd." "\0"
+-            VALUE "FileDescription", "RustDesk Remote Desktop" "\0"
++            VALUE "FileDescription", "SteadDesk Remote Desktop" "\0"
+             VALUE "FileVersion", VERSION_AS_STRING "\0"
+-            VALUE "InternalName", "rustdesk" "\0"
++            VALUE "InternalName", "SteadDesk" "\0"
+             VALUE "LegalCopyright", "Copyright © 2026 Purslane Tech Pte. Ltd. All rights reserved." "\0"
+             VALUE "OriginalFilename", "rustdesk.exe" "\0"
+-            VALUE "ProductName", "RustDesk" "\0"
++            VALUE "ProductName", "SteadDesk" "\0"
+             VALUE "ProductVersion", VERSION_AS_STRING "\0"
+         END
+     END
+diff --git a/flutter/windows/runner/main.cpp b/flutter/windows/runner/main.cpp
+index 747d6f5..8ad0fcf 100644
+--- a/flutter/windows/runner/main.cpp
++++ b/flutter/windows/runner/main.cpp
+@@ -80,7 +80,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
+         command_line_arguments.end());
+   }
+ 
+-  std::wstring app_name = L"RustDesk";
++  std::wstring app_name = L"SteadDesk";
+   FUNC_RUSTDESK_GET_APP_NAME get_rustdesk_app_name = (FUNC_RUSTDESK_GET_APP_NAME)GetProcAddress(hInstance, "get_rustdesk_app_name");
+   if (get_rustdesk_app_name) {
+     wchar_t app_name_buffer[512] = {0};
+diff --git a/libs/hbb_common/src/config.rs b/libs/hbb_common/src/config.rs
+index 6fe1004..41a0524 100644
+--- a/libs/hbb_common/src/config.rs
++++ b/libs/hbb_common/src/config.rs
+@@ -69,7 +69,7 @@ lazy_static::lazy_static! {
+     static ref ONLINE: Mutex<HashMap<String, i64>> = Default::default();
+     pub static ref PROD_RENDEZVOUS_SERVER: RwLock<String> = RwLock::new("".to_owned());
+     pub static ref EXE_RENDEZVOUS_SERVER: RwLock<String> = Default::default();
+-    pub static ref APP_NAME: RwLock<String> = RwLock::new("RustDesk".to_owned());
++    pub static ref APP_NAME: RwLock<String> = RwLock::new("SteadDesk".to_owned());
+     static ref KEY_PAIR: Mutex<Option<KeyPair>> = Default::default();
+     static ref USER_DEFAULT_CONFIG: RwLock<(UserDefaultConfig, Instant)> = RwLock::new((UserDefaultConfig::load(), Instant::now()));
+     pub static ref NEW_STORED_PEER_CONFIG: Mutex<HashSet<String>> = Default::default();
+diff --git a/flutter/lib/desktop/widgets/tabbar_widget.dart b/flutter/lib/desktop/widgets/tabbar_widget.dart
+index 9ef7d38..b51110c 100644
+--- a/flutter/lib/desktop/widgets/tabbar_widget.dart
++++ b/flutter/lib/desktop/widgets/tabbar_widget.dart
+@@ -641,7 +641,7 @@ class _DesktopTabState extends State<DesktopTab>
+                         Offstage(
+                             offstage: !showTitle,
+                             child: const Text(
+-                              "RustDesk",
++                              "SteadDesk",
+                               style: TextStyle(fontSize: 13),
+                             ).marginOnly(left: 2))
+                       ]).marginOnly(
