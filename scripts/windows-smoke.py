@@ -113,26 +113,50 @@ expected = [
 ]
 
 
+def public_fields(control):
+    values = [control.window_text()]
+    for probe in (lambda: control.iface_value.CurrentValue,
+                  lambda: control.iface_text.DocumentRange.GetText(-1),
+                  lambda: control.iface_legacy_iaccessible.CurrentValue):
+        try:
+            values.append(probe() or "")
+        except Exception:
+            pass
+    return values
+
+
 def profile_fields():
     fields = []
-    lines = set()
+    matched = set()
     for control in controls(window, lambda s: True):
-        values = [control.window_text()]
-        if control.element_info.control_type == "Edit":
-            try:
-                values.append(control.iface_value.CurrentValue or "")
-            except Exception:
-                pass
-        for value in values:
-            parts = {line.strip() for line in value.strip().splitlines()}
-            if parts and parts.issubset(expected):
+        for value in public_fields(control):
+            normalized = " ".join(value.replace("\ufe0f", "").split())
+            present = {line for line in expected if line in normalized}
+            residue = normalized
+            for line in expected:
+                residue = residue.replace(line, "")
+            if present and not residue.strip():
                 fields.append(control)
-                lines.update(parts)
+                matched.update(present)
                 break
-    return fields if lines == set(expected) else None
+    return fields if matched == set(expected) else None
 
 
-fields = wait_for("read-only preset values", profile_fields)
+try:
+    fields = wait_for("read-only preset values", profile_fields, 15)
+except RuntimeError:
+    # Output only indexes into this public list, never raw provider text.
+    probes = expected + ["ID/Relay server", "Close", "Unlock Network Settings",
+                         "OK", "SteadDesk", "relay.steaddesk.com", "https://api.steaddesk.com",
+                         "J1e7eHb4p8PaTnIc7Ihk+t7JNQi0xBVBGfI+sRr3CfA=", "Key:", "🔒", "Cancel"]
+    for control in controls(window, lambda s: True):
+        ids = [i for i, token in enumerate(probes)
+               if any(token.casefold() in v.casefold() for v in public_fields(control))]
+        if ids:
+            print("Known profile label indexes", ids,
+                  "control type", control.element_info.control_type,
+                  "rectangle", control.rectangle(), flush=True)
+    raise
 wait_for("Close action", lambda: by_name(window, "Close"))
 if by_name(window, "OK") or by_name(window, "Apply") or by_name(window, "Save"):
     raise RuntimeError("An edit confirmation is visible")
