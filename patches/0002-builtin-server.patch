@@ -1,0 +1,74 @@
+Subject: Pin the service endpoints and public key and show them read-only
+
+diff --git a/flutter/lib/mobile/widgets/dialog.dart b/flutter/lib/mobile/widgets/dialog.dart
+index f1ff855..d07e511 100644
+--- a/flutter/lib/mobile/widgets/dialog.dart
++++ b/flutter/lib/mobile/widgets/dialog.dart
+@@ -61,8 +61,20 @@ void showServerSettings(OverlayDialogManager dialogManager,
+   } catch (e) {
+     print("Invalid server config: $e");
+   }
+-  showServerSettingsWithValue(
+-      ServerConfig.fromOptions(options), dialogManager, setState);
++  final config = ServerConfig.fromOptions(options);
++  if (isOptionFixed('custom-rendezvous-server')) {
++    dialogManager.show((setState, close, context) => CustomAlertDialog(
++      title: Text(translate('ID/Relay Server')),
++      content: SelectableText('SteadDesk · 🔒\n'
++          '${translate("ID Server")}: ${config.idServer}\n'
++          '${translate("Relay Server")}: ${config.relayServer}\n'
++          '${translate("API Server")}: ${config.apiServer}\n'
++          '${translate("Key")}: ${config.key}'),
++      actions: [dialogButton('Close', onPressed: close)],
++    ));
++    return;
++  }
++  showServerSettingsWithValue(config, dialogManager, setState);
+ }
+ 
+ void showServerSettingsWithValue(
+diff --git a/libs/hbb_common/src/config.rs b/libs/hbb_common/src/config.rs
+index 41a0524..ba7c840 100644
+--- a/libs/hbb_common/src/config.rs
++++ b/libs/hbb_common/src/config.rs
+@@ -74,7 +74,14 @@ lazy_static::lazy_static! {
+     static ref USER_DEFAULT_CONFIG: RwLock<(UserDefaultConfig, Instant)> = RwLock::new((UserDefaultConfig::load(), Instant::now()));
+     pub static ref NEW_STORED_PEER_CONFIG: Mutex<HashSet<String>> = Default::default();
+     pub static ref DEFAULT_SETTINGS: RwLock<HashMap<String, String>> = Default::default();
+-    pub static ref OVERWRITE_SETTINGS: RwLock<HashMap<String, String>> = Default::default();
++    pub static ref OVERWRITE_SETTINGS: RwLock<HashMap<String, String>> = RwLock::new(
++        [
++            ("custom-rendezvous-server", RENDEZVOUS_SERVERS[0]),
++            ("relay-server", RENDEZVOUS_SERVERS[0]),
++            ("api-server", "https://api.steaddesk.com"),
++            ("key", RS_PUB_KEY),
++        ].iter().map(|&(k, v)| (k.to_owned(), v.to_owned())).collect()
++    );
+     pub static ref DEFAULT_DISPLAY_SETTINGS: RwLock<HashMap<String, String>> = Default::default();
+     pub static ref OVERWRITE_DISPLAY_SETTINGS: RwLock<HashMap<String, String>> = Default::default();
+     pub static ref DEFAULT_LOCAL_SETTINGS: RwLock<HashMap<String, String>> = Default::default();
+@@ -114,8 +121,8 @@ const CHARS: &[char] = &[
+     'm', 'n', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z',
+ ];
+ 
+-pub const RENDEZVOUS_SERVERS: &[&str] = &["rs-ny.rustdesk.com"];
+-pub const RS_PUB_KEY: &str = "OeVuKk5nlHiXp+APNn0Y3pC1Iwpwn44JGqrQCsWqmBw=";
++pub const RENDEZVOUS_SERVERS: &[&str] = &["relay.steaddesk.com"];
++pub const RS_PUB_KEY: &str = "J1e7eHb4p8PaTnIc7Ihk+t7JNQi0xBVBGfI+sRr3CfA=";
+ 
+ pub const RENDEZVOUS_PORT: i32 = 21116;
+ pub const RELAY_PORT: i32 = 21117;
+diff --git a/src/platform/windows.rs b/src/platform/windows.rs
+index a3c3d68..0922e7d 100644
+--- a/src/platform/windows.rs
++++ b/src/platform/windows.rs
+@@ -2101,6 +2101,9 @@ pub fn prepare_custom_client_update() -> ResultType<bool> {
+ }
+ 
+ pub fn get_license_from_exe_name() -> ResultType<CustomServer> {
++    if crate::is_custom_client() {
++        hbb_common::bail!("Server configuration is fixed in this distribution");
++    }
+     let mut exe = std::env::current_exe()?.to_str().unwrap_or("").to_owned();
+     // if defined portable appname entry, replace original executable name with it.
+     if let Ok(portable_exe) = std::env::var(PORTABLE_APPNAME_RUNTIME_ENV_KEY) {
