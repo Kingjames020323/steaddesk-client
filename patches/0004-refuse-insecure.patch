@@ -1,12 +1,13 @@
 Subject: Refuse unencrypted streams before session login and reject raw direct-address connections
 
 diff --git a/flutter/lib/common.dart b/flutter/lib/common.dart
-index b80e0b5..a319409 100644
 --- a/flutter/lib/common.dart
 +++ b/flutter/lib/common.dart
-@@ -1184,45 +1184,15 @@ void msgBox(SessionID sessionId, String type, String title, String text,
+@@ -1182,49 +1182,15 @@ void msgBox(SessionID sessionId, String type, String title, String text,
+     int? reconnectTimeout,
+     VoidCallback? onSubmit,
      int? submitTimeout}) {
-   dialogManager.dismissAll();
+-  dialogManager.dismissAll();
    if (type.contains('insecure-connection')) {
 -    Future<void> closeSession() async {
 -      await bind.sessionSetCommon(
@@ -46,19 +47,17 @@ index b80e0b5..a319409 100644
 -      ),
 -      tag: '$sessionId-$type-$title-$text-$link',
 -    );
--    return;
-+    // An older event producer must never offer an unencrypted session.
++    // Older event producers receive the same one-way refusal dialog.
 +    unawaited(bind.sessionClose(sessionId: sessionId));
-+    type = 'error';
-+    title = 'Connection Error';
-+    text = '连接未加密，已拒绝，请联系管理员';
-+    link = '';
-+    reconnect = null;
-+    onSubmit = null;
-+    hasCancel = false;
++    msgBox(sessionId, 'error', 'Connection Error', '连接未加密，已拒绝，请联系管理员',
++        '', dialogManager, hasCancel: false);
+     return;
    }
  
++  dialogManager.dismissAll();
    List<Widget> buttons = [];
+   bool hasOk = false;
+   submit() {
 diff --git a/src/client.rs b/src/client.rs
 index d3e66e7..8e2377a 100644
 --- a/src/client.rs
