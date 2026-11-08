@@ -36,3 +36,17 @@ index 0c17840..9b64bec 100644
      let sender = TX_MSG.lock().unwrap();
      sender.send(UpdateMsg::CheckUpdate)?;
      Ok(())
+diff --git a/src/flutter_ffi.rs b/src/flutter_ffi.rs
+index f9cc2d6..3963e36 100644
+--- a/src/flutter_ffi.rs
++++ b/src/flutter_ffi.rs
+@@ -2774,6 +2774,9 @@ pub fn main_get_common_sync(key: String) -> SyncReturn<String> {
+ }
+ 
+ pub fn main_set_common(_key: String, _value: String) {
++    if crate::is_custom_client() && matches!(_key.as_str(), "download-new-version" | "update-me") {
++        return;
++    }
+     #[cfg(target_os = "windows")]
+     if _key == "install-printer" && crate::platform::is_win_10_or_greater() {
+         std::thread::spawn(move || {

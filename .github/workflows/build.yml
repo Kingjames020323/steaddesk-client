@@ -583,3 +583,45 @@ jobs:
         name: SteadDesk-Windows-x64
         path: dist
         if-no-files-found: error
+  windows-smoke:
+    name: Offline Windows UI
+    needs: windows
+    runs-on: windows-2022
+    steps:
+    - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      with:
+        persist-credentials: false
+    - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      with:
+        name: SteadDesk-Windows-x64
+        path: package
+    - name: Prepare UI automation
+      run: python -m pip install pywinauto==0.6.9 Pillow==11.3.0
+    - name: Isolate both service names and executables before launch
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $names = 'relay.steaddesk.com','api.steaddesk.com'
+        $hostsFile = "$env:WINDIR\System32\drivers\etc\hosts"
+        foreach ($name in $names) {
+          Add-Content -Path $hostsFile -Value "`n127.0.0.1 $name`n::1 $name" -Encoding ascii
+        }
+        Clear-DnsClientCache
+        foreach ($name in $names) {
+          foreach ($ip in [Net.Dns]::GetHostAddresses($name)) {
+            if (![Net.IPAddress]::IsLoopback($ip)) { throw 'Service name is not isolated' }
+          }
+        }
+        $package = (Resolve-Path package/SteadDesk-1.5.0-x64.exe).Path
+        $expected = ((Get-Content package/SHA256SUMS) -split '\s+')[0]
+        if ((Get-FileHash $package).Hash -ne $expected) { throw 'Package checksum mismatch' }
+        foreach ($binary in @($package, "$env:LOCALAPPDATA\rustdesk\rustdesk.exe")) {
+          New-NetFirewallRule -DisplayName "Offline UI $binary" -Program $binary -Direction Outbound -Action Block | Out-Null
+        }
+        python scripts/windows-smoke.py $package screenshots
+    - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      if: always()
+      with:
+        name: Windows-UI-evidence
+        path: screenshots/*.png
+        if-no-files-found: ignore
