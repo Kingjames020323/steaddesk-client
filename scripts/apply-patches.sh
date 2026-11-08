@@ -13,6 +13,7 @@ done
 for icon in res/icon.ico res/tray-icon.ico flutter/windows/runner/resources/app_icon.ico; do
   install -m 644 "$queue/branding/steaddesk.ico" "$icon"
 done
+install -m 644 "$queue/branding/png/256.png" flutter/assets/icon.png
 for spec in mdpi:48:108 hdpi:72:162 xhdpi:96:216 xxhdpi:144:324 xxxhdpi:192:432; do
   IFS=: read -r density size adaptive <<< "$spec"
   dest="flutter/android/app/src/main/res/mipmap-$density"
