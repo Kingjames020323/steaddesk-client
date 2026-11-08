@@ -2,7 +2,7 @@
 param([Parameter(Mandatory)][string]$Package)
 $ErrorActionPreference = 'Stop'
 $installed = Join-Path $env:ProgramFiles 'SteadDesk\SteadDesk.exe'
-Start-Process -FilePath $Package -ArgumentList '--silent-install'
+$installer = Start-Process -PassThru -FilePath $Package -ArgumentList '--silent-install'
 $deadline = [DateTime]::UtcNow.AddMinutes(2)
 do {
     $service = Get-Service -Name SteadDesk -ErrorAction SilentlyContinue
@@ -10,12 +10,14 @@ do {
     Start-Sleep -Seconds 1
 } while ([DateTime]::UtcNow -lt $deadline)
 if ($service.Status -ne 'Running' -or !(Test-Path -LiteralPath $installed)) {
+    Write-Output "Installer exited: $($installer.HasExited); installed EXE: $(Test-Path -LiteralPath $installed); service: $($service.Status)"
     throw 'Timed out waiting for the installed service'
 }
 
 $start = [Diagnostics.ProcessStartInfo]::new($installed)
 $start.UseShellExecute = $false
 $start.RedirectStandardInput = $true
+$start.StandardInputEncoding = [Text.UTF8Encoding]::new($false)
 $start.RedirectStandardOutput = $true
 $start.RedirectStandardError = $true
 $start.ArgumentList.Add('--password-stdin')
@@ -38,7 +40,7 @@ try {
     $pipe.Write($secret, 0, $secret.Length)
     $pipe.WriteByte(10)
     $pipe.Flush()
-    $child.StandardInput.Close()
+    $pipe.Close()
     if (!$child.WaitForExit(30000)) { throw 'Password command timed out' }
     if ($child.ExitCode -ne 0 -or $stdout.Result -notmatch '(?m)^Done!\r?$') {
         throw 'The installed service did not acknowledge the new password'
