@@ -44,12 +44,18 @@ def press(window, name):
     click(coords=(point.x, point.y))
 
 
-def save_evidence(window, name, visible_controls):
+def save_evidence(window, name, visible_controls, public_regions=()):
     # Default-deny pixels. Never write the original desktop, nearby fields, or
     # the accessibility tree to disk or stdout, including on error.
     original = window.capture_as_image().convert("RGB")
     frame = window.rectangle()
     visible = Image.new("RGB", original.size, "#e3e6e9")
+    # These additional regions are anchored to known public page landmarks.
+    # The Home credential pane and About identity rows always stay masked.
+    for box in public_regions:
+        if (0 <= box[0] < box[2] <= original.width
+                and 0 <= box[1] < box[3] <= original.height):
+            visible.paste(original.crop(box), box[:2])
     count = 0
     for control in visible_controls:
         rect = control.rectangle()
@@ -78,10 +84,17 @@ def application():
 
 window = wait_for("SteadDesk main window", application, 120)
 window.set_focus()
-wait_for("remote ID placeholder", lambda: by_name(window, "Enter remote ID"))
+entry = wait_for("remote ID placeholder", lambda: by_name(window, "Enter remote ID"))
 main_labels = {"Enter remote ID", "Your Desktop", "Control Remote Desktop", "Connect",
                "Powered by RustDesk", "Recent sessions", "SteadDesk", "Install"}
-save_evidence(window, "main", controls(window, main_labels.__contains__))
+frame = window.rectangle()
+entry_box = entry.rectangle()
+connect = wait_for("Connect", lambda: by_name(window, "Connect")).rectangle()
+public_regions = [(0, 0, frame.width(), 28)]
+if entry_box.left - frame.left > frame.width() / 4:
+    public_regions.append((entry_box.left - frame.left, 32, frame.width(),
+                           connect.bottom - frame.top + 5))
+save_evidence(window, "main", controls(window, main_labels.__contains__), public_regions)
 print("PASS main window", flush=True)
 
 settings = by_name(window, "Settings")
@@ -98,8 +111,13 @@ source_name = "基于 RustDesk（AGPL-3.0） · Source code"
 wait_for("public source attribution", lambda: by_name(window, source_name))
 tabs = {"General", "Security", "Network", "Display", "Account", "About", "SteadDesk"}
 about_labels = tabs | {source_name, "Privacy Statement"}
+privacy = wait_for("privacy link", lambda: by_name(window, "Privacy Statement")).rectangle()
+# In the pinned About widget every row below Privacy Statement is public
+# attribution or licensing. Fingerprint and ID appear above that link.
+public_regions = [(0, 0, frame.width(), 28),
+                  (0, privacy.top - frame.top, frame.width(), frame.height())]
 save_evidence(window, "about", controls(window, lambda s:
-              s in about_labels or re.fullmatch(r"Version: [\w.()+ -]{1,30}", s) is not None))
+              s in about_labels or re.fullmatch(r"Version: [\w.()+ -]{1,30}", s) is not None), public_regions)
 print("PASS public About attribution", flush=True)
 
 press(window, "Network")
@@ -142,21 +160,7 @@ def profile_fields():
     return fields if matched == set(expected) else None
 
 
-try:
-    fields = wait_for("read-only preset values", profile_fields, 15)
-except RuntimeError:
-    # Output only indexes into this public list, never raw provider text.
-    probes = expected + ["ID/Relay server", "Close", "Unlock Network Settings",
-                         "OK", "SteadDesk", "relay.steaddesk.com", "https://api.steaddesk.com",
-                         "J1e7eHb4p8PaTnIc7Ihk+t7JNQi0xBVBGfI+sRr3CfA=", "Key:", "🔒", "Cancel"]
-    for control in controls(window, lambda s: True):
-        ids = [i for i, token in enumerate(probes)
-               if any(token.casefold() in v.casefold() for v in public_fields(control))]
-        if ids:
-            print("Known profile label indexes", ids,
-                  "control type", control.element_info.control_type,
-                  "rectangle", control.rectangle(), flush=True)
-    raise
+fields = wait_for("read-only preset values", profile_fields)
 wait_for("Close action", lambda: by_name(window, "Close"))
 if by_name(window, "OK") or by_name(window, "Apply") or by_name(window, "Save"):
     raise RuntimeError("An edit confirmation is visible")
@@ -164,5 +168,5 @@ for field in fields:
     if field.element_info.control_type == "Edit":
         if not field.iface_value.CurrentIsReadOnly:
             raise RuntimeError("A preset field is editable")
-save_evidence(window, "network", fields + controls(window, {"ID/Relay Server", "Close"}.__contains__))
+save_evidence(window, "network", fields + controls(window, {"ID/Relay server", "Close"}.__contains__))
 print("PASS fixed ID, relay, API and public key in read-only profile", flush=True)
