@@ -308,7 +308,6 @@ jobs:
     needs:
     - android-native
     name: Android universal APK
-    if: "${{ inputs.upload-artifact }}"
     runs-on: ubuntu-24.04
     env:
       reltype: release
