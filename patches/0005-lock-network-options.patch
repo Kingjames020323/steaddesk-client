@@ -1,0 +1,176 @@
+Subject: Lock network capabilities in native policy, permissions, discovery and Flutter settings
+
+diff --git a/flutter/lib/desktop/pages/desktop_setting_page.dart b/flutter/lib/desktop/pages/desktop_setting_page.dart
+index acfe383..b2c6842 100644
+--- a/flutter/lib/desktop/pages/desktop_setting_page.dart
++++ b/flutter/lib/desktop/pages/desktop_setting_page.dart
+@@ -2683,7 +2683,7 @@ Widget _OptionCheckBox(
+     }
+   }
+ 
+-  if (fakeValue != null) {
++  if (fakeValue != null && !isOptFixed) {
+     ref.value = fakeValue;
+     enabled = false;
+   }
+diff --git a/flutter/lib/mobile/widgets/dialog.dart b/flutter/lib/mobile/widgets/dialog.dart
+index d07e511..6b110d5 100644
+--- a/flutter/lib/mobile/widgets/dialog.dart
++++ b/flutter/lib/mobile/widgets/dialog.dart
+@@ -63,13 +63,19 @@ void showServerSettings(OverlayDialogManager dialogManager,
+   }
+   final config = ServerConfig.fromOptions(options);
+   if (isOptionFixed('custom-rendezvous-server')) {
++    String state(String key) =>
++        option2bool(key, bind.mainGetOptionSync(key: key)) ? 'On' : 'Off';
+     dialogManager.show((setState, close, context) => CustomAlertDialog(
+       title: Text(translate('ID/Relay Server')),
+       content: SelectableText('SteadDesk · 🔒\n'
+           '${translate("ID Server")}: ${config.idServer}\n'
+           '${translate("Relay Server")}: ${config.relayServer}\n'
+           '${translate("API Server")}: ${config.apiServer}\n'
+-          '${translate("Key")}: ${config.key}'),
++          '${translate("Key")}: ${config.key}\n'
++          'Direct IP access: ${state("direct-server")}\n'
++          'LAN discovery: ${state("enable-lan-discovery")}\n'
++          'TCP tunneling: ${state("enable-tunnel")}\n'
++          'Remote configuration modification: ${state("allow-remote-config-modification")}'),
+       actions: [dialogButton('Close', onPressed: close)],
+     ));
+     return;
+diff --git a/libs/hbb_common/src/config.rs b/libs/hbb_common/src/config.rs
+index ba7c840..10e6c1e 100644
+--- a/libs/hbb_common/src/config.rs
++++ b/libs/hbb_common/src/config.rs
+@@ -52,6 +52,13 @@ pub const REG_INTERVAL: i64 = 15_000;
+ pub const COMPRESS_LEVEL: i32 = 3;
+ const SERIAL: i32 = 3;
+ 
++pub const DISABLED_NETWORK_OPTIONS: [&str; 4] = [
++    keys::OPTION_DIRECT_SERVER,
++    "enable-lan-discovery",
++    "enable-tunnel",
++    "allow-remote-config-modification",
++];
++
+ #[cfg(target_os = "macos")]
+ lazy_static::lazy_static! {
+     pub static ref ORG: RwLock<String> = RwLock::new("com.carriez".to_owned());
+@@ -80,7 +87,8 @@ lazy_static::lazy_static! {
+             ("relay-server", RENDEZVOUS_SERVERS[0]),
+             ("api-server", "https://api.steaddesk.com"),
+             ("key", RS_PUB_KEY),
+-        ].iter().map(|&(k, v)| (k.to_owned(), v.to_owned())).collect()
++        ].iter().copied().chain(DISABLED_NETWORK_OPTIONS.iter().map(|&key| (key, "N")))
++         .map(|(k, v)| (k.to_owned(), v.to_owned())).collect()
+     );
+     pub static ref DEFAULT_DISPLAY_SETTINGS: RwLock<HashMap<String, String>> = Default::default();
+     pub static ref OVERWRITE_DISPLAY_SETTINGS: RwLock<HashMap<String, String>> = Default::default();
+diff --git a/src/common.rs b/src/common.rs
+index 01c3a71..4a84691 100644
+--- a/src/common.rs
++++ b/src/common.rs
+@@ -2409,6 +2409,9 @@ fn read_custom_client_advanced_settings(
+ 
+     if let Some(settings) = settings.as_object() {
+         for (k, v) in settings {
++            if is_override && config::DISABLED_NETWORK_OPTIONS.contains(&k.replace('_', "-").as_str()) {
++                continue;
++            }
+             let Some(v) = v.as_str() else {
+                 continue;
+             };
+diff --git a/src/lan.rs b/src/lan.rs
+index 2a648aa..1be0a3c 100644
+--- a/src/lan.rs
++++ b/src/lan.rs
+@@ -23,8 +23,16 @@ use std::{
+ 
+ type Message = RendezvousMessage;
+ 
++fn discovery_enabled() -> bool {
++    let key = base::config::keys::OPTION_ENABLE_LAN_DISCOVERY;
++    config::option2bool(key, &Config::get_option(key))
++}
++
+ #[cfg(not(target_os = "ios"))]
+ pub(super) fn start_listening() -> ResultType<()> {
++    if !discovery_enabled() {
++        return Ok(());
++    }
+     let addr = SocketAddr::from(([0, 0, 0, 0], get_broadcast_port()));
+     let socket = std::net::UdpSocket::bind(addr)?;
+     socket.set_read_timeout(Some(std::time::Duration::from_millis(1000)))?;
+@@ -35,12 +43,7 @@ pub(super) fn start_listening() -> ResultType<()> {
+             if let Ok(msg_in) = Message::parse_from_bytes(&buf[0..len]) {
+                 match msg_in.union {
+                     Some(rendezvous_message::Union::PeerDiscovery(p)) => {
+-                        if p.cmd == "ping"
+-                            && config::option2bool(
+-                                "enable-lan-discovery",
+-                                &Config::get_option("enable-lan-discovery"),
+-                            )
+-                        {
++                        if p.cmd == "ping" && discovery_enabled() {
+                             let id = Config::get_id();
+                             if p.id == id {
+                                 continue;
+@@ -75,6 +78,9 @@ pub(super) fn start_listening() -> ResultType<()> {
+ 
+ #[tokio::main(flavor = "current_thread")]
+ pub async fn discover() -> ResultType<()> {
++    if !discovery_enabled() {
++        return Ok(());
++    }
+     let sockets = send_query()?;
+     let rx = spawn_wait_responses(sockets);
+     handle_received_peers(rx).await?;
+diff --git a/src/port_forward.rs b/src/port_forward.rs
+index ed19669..c94a314 100644
+--- a/src/port_forward.rs
++++ b/src/port_forward.rs
+@@ -81,6 +81,10 @@ pub async fn listen(
+     remote_host: String,
+     remote_port: i32,
+ ) -> ResultType<()> {
++    let key_name = base::config::keys::OPTION_ENABLE_TUNNEL;
++    if !hbb_common::config::option2bool(key_name, &hbb_common::config::Config::get_option(key_name)) {
++        bail!("No permission of IP tunneling");
++    }
+     let listener = tcp::new_listener(format!("127.0.0.1:{}", port), true).await?;
+     let addr = listener.local_addr()?;
+     log::info!("listening on port {:?}", addr);
+diff --git a/src/server/connection.rs b/src/server/connection.rs
+index 7f31832..e7d8d09 100644
+--- a/src/server/connection.rs
++++ b/src/server/connection.rs
+@@ -2648,6 +2648,12 @@ impl Connection {
+         control_permissions: &Option<ControlPermissions>,
+     ) -> bool {
+         use hbb_common::rendezvous_proto::control_permissions::Permission;
++        // A controller grant or the Full Access preset cannot enable a fixed-off tunnel.
++        if enable_prefix_option == keys::OPTION_ENABLE_TUNNEL
++            && !config::option2bool(enable_prefix_option, &Config::get_option(enable_prefix_option))
++        {
++            return false;
++        }
+         if let Some(control_permissions) = control_permissions {
+             let permission = match enable_prefix_option {
+                 keys::OPTION_ENABLE_KEYBOARD => Some(Permission::keyboard),
+diff --git a/src/ui_interface.rs b/src/ui_interface.rs
+index b1eeefd..a5a401c 100644
+--- a/src/ui_interface.rs
++++ b/src/ui_interface.rs
+@@ -1734,6 +1734,12 @@ pub fn max_encrypt_len() -> usize {
+ }
+ 
+ pub fn is_remote_modify_enabled_by_control_permissions() -> Option<bool> {
++    if is_option_fixed(OPTION_ALLOW_REMOTE_CONFIG_MODIFICATION)
++        && !config::option2bool(OPTION_ALLOW_REMOTE_CONFIG_MODIFICATION,
++                               &Config::get_option(OPTION_ALLOW_REMOTE_CONFIG_MODIFICATION))
++    {
++        return Some(false);
++    }
+     *IS_REMOTE_MODIFY_ENABLED_BY_CONTROL_PERMISSIONS
+         .lock()
+         .unwrap()
