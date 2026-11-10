@@ -118,3 +118,32 @@ index eff06fc..ff0972f 100644
  }
  
  pub fn main_get_fav() -> Vec<String> {
+diff --git a/flutter/lib/desktop/pages/desktop_setting_page.dart b/flutter/lib/desktop/pages/desktop_setting_page.dart
+--- a/flutter/lib/desktop/pages/desktop_setting_page.dart
++++ b/flutter/lib/desktop/pages/desktop_setting_page.dart
+@@ -2524,7 +2524,7 @@
+       };
+     }(), hasData: (data) {
+       final license = data['license'].toString();
+-      final version = data['version'].toString();
++      final versionLabel = "${translate('Version')}: ${data['version']}";
+       final buildDate = data['buildDate'].toString();
+       final fingerprint = data['fingerprint'].toString();
+       final myId = data['myId'].toString();
+@@ -2539,9 +2539,13 @@
+               const SizedBox(
+                 height: 8.0,
+               ),
+-              SelectionArea(
+-                  child: Text('${translate('Version')}: $version')
+-                      .marginSymmetric(vertical: 4.0)),
++              Semantics(
++                container: true,
++                excludeSemantics: true,
++                label: versionLabel,
++                child: SelectionArea(
++                    child: Text(versionLabel).marginSymmetric(vertical: 4.0)),
++              ),
+               SelectionArea(
+                   child: Text('${translate('Build Date')}: $buildDate')
+                       .marginSymmetric(vertical: 4.0)),
