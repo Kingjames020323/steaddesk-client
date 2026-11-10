@@ -141,12 +141,16 @@ diff --git a/src/lang/en.rs b/src/lang/en.rs
 diff --git a/flutter/lib/desktop/widgets/tabbar_widget.dart b/flutter/lib/desktop/widgets/tabbar_widget.dart
 --- a/flutter/lib/desktop/widgets/tabbar_widget.dart
 +++ b/flutter/lib/desktop/widgets/tabbar_widget.dart
-@@ -641,7 +641,7 @@
+@@ -640,9 +640,9 @@
+                         ),
                          Offstage(
                              offstage: !showTitle,
-                             child: const Text(
+-                            child: const Text(
 -                              "SteadDesk",
+-                              style: TextStyle(fontSize: 13),
++                            child: Text(
 +                              bind.mainGetAppNameSync(),
-                               style: TextStyle(fontSize: 13),
++                              style: const TextStyle(fontSize: 13),
                              ).marginOnly(left: 2))
                        ]).marginOnly(
+                         left: 5,
