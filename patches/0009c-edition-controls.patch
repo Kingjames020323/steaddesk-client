@@ -1,0 +1,152 @@
+Subject: Expose the support admission switch and lock merchant authentication controls
+
+diff --git a/flutter/lib/desktop/pages/desktop_setting_page.dart b/flutter/lib/desktop/pages/desktop_setting_page.dart
+--- a/flutter/lib/desktop/pages/desktop_setting_page.dart
++++ b/flutter/lib/desktop/pages/desktop_setting_page.dart
+@@ -1255,7 +1255,7 @@
+                     value: value,
+                     groupValue: currentValue,
+                     label: value,
+-                    onChanged: locked
++                    onChanged: locked || isOptionFixed(kOptionVerificationMethod)
+                         ? null
+                         : ((value) async {
+                             callback() async {
+@@ -2532,7 +2532,7 @@
+       final scrollController = ScrollController();
+       return SingleChildScrollView(
+         controller: scrollController,
+-        child: _Card(title: 'SteadDesk', children: [
++        child: _Card(title: bind.mainGetAppNameSync(), children: [
+           Column(
+             crossAxisAlignment: CrossAxisAlignment.start,
+             children: [
+diff --git a/flutter/lib/mobile/pages/server_page.dart b/flutter/lib/mobile/pages/server_page.dart
+--- a/flutter/lib/mobile/pages/server_page.dart
++++ b/flutter/lib/mobile/pages/server_page.dart
+@@ -111,18 +111,21 @@
+             if (showPasswordOption) const PopupMenuDivider(),
+             if (showPasswordOption)
+               PopupMenuItem(
++                enabled: !isOptionFixed(kOptionVerificationMethod),
+                 value: kUseTemporaryPassword,
+                 child: listTile('Use one-time password',
+                     verificationMethod == kUseTemporaryPassword),
+               ),
+             if (showPasswordOption)
+               PopupMenuItem(
++                enabled: !isOptionFixed(kOptionVerificationMethod),
+                 value: kUsePermanentPassword,
+                 child: listTile('Use permanent password',
+                     verificationMethod == kUsePermanentPassword),
+               ),
+             if (showPasswordOption)
+               PopupMenuItem(
++                enabled: !isOptionFixed(kOptionVerificationMethod),
+                 value: kUseBothPasswords,
+                 child: listTile(
+                     'Use both passwords',
+diff --git a/flutter/lib/desktop/pages/desktop_home_page.dart b/flutter/lib/desktop/pages/desktop_home_page.dart
+--- a/flutter/lib/desktop/pages/desktop_home_page.dart
++++ b/flutter/lib/desktop/pages/desktop_home_page.dart
+@@ -25,6 +25,8 @@
+ import 'package:window_size/window_size.dart' as window_size;
+ import '../widgets/button.dart';
+ 
++import '../../steaddesk/incoming_switch.dart';
++
+ class DesktopHomePage extends StatefulWidget {
+   const DesktopHomePage({Key? key}) : super(key: key);
+ 
+@@ -91,7 +93,10 @@
+       ),
+       buildTip(context),
+       if (!isOutgoingOnly) buildIDBoard(context),
+-      if (!isOutgoingOnly) buildPasswordBoard(context),
++      if (bind.mainGetAppNameSync() == 'SteadDesk Support')
++        const SupportIncomingSwitch()
++      else if (!isOutgoingOnly)
++        buildPasswordBoard(context),
+       FutureBuilder<Widget>(
+         future: Future.value(
+             Obx(() => buildHelpCards(stateGlobal.updateUrl.value))),
+diff --git a/flutter/lib/steaddesk/incoming_switch.dart b/flutter/lib/steaddesk/incoming_switch.dart
+new file mode 100644
+--- /dev/null
++++ b/flutter/lib/steaddesk/incoming_switch.dart
+@@ -0,0 +1,41 @@
++import 'package:flutter/material.dart';
++import '../common.dart';
++import '../models/platform_model.dart';
++
++class SupportIncomingSwitch extends StatefulWidget {
++  const SupportIncomingSwitch({super.key});
++  @override
++  State<SupportIncomingSwitch> createState() => _SupportIncomingSwitchState();
++}
++
++class _SupportIncomingSwitchState extends State<SupportIncomingSwitch> {
++  static const keyName = 'allow-support-incoming';
++  bool? allowed;
++
++  @override
++  void initState() {
++    super.initState();
++    _read();
++  }
++
++  Future<void> _read() async {
++    final value = await bind.mainGetOption(key: keyName);
++    if (mounted) setState(() => allowed = value == 'Y');
++  }
++
++  @override
++  Widget build(BuildContext context) {
++    return SwitchListTile(
++      title: Text(translate('Allow incoming connections')),
++      value: allowed ?? false,
++      onChanged: allowed == null ? null : (value) async {
++        setState(() => allowed = null);
++        try {
++          await bind.mainSetOption(key: keyName, value: value ? 'Y' : '');
++        } finally {
++          await _read();
++        }
++      },
++    );
++  }
++}
+diff --git a/src/lang/cn.rs b/src/lang/cn.rs
+--- a/src/lang/cn.rs
++++ b/src/lang/cn.rs
+@@ -1,6 +1,7 @@
+ lazy_static::lazy_static! {
+ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
+     [
++        ("Allow incoming connections", "允许连入"),
+         ("Status", "状态"),
+         ("Your Desktop", "你的桌面"),
+         ("desk_tip", "你的桌面可以通过下面的 ID 和密码访问。"),
+diff --git a/src/lang/en.rs b/src/lang/en.rs
+--- a/src/lang/en.rs
++++ b/src/lang/en.rs
+@@ -1,6 +1,7 @@
+ lazy_static::lazy_static! {
+ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
+     [
++        ("Allow incoming connections", "Allow incoming connections"),
+         ("desk_tip", "Your desktop can be accessed with this ID and password."),
+         ("connecting_status", "Connecting to the RustDesk network..."),
+         ("not_ready_status", "Not ready. Please check your connection"),
+diff --git a/flutter/lib/desktop/widgets/tabbar_widget.dart b/flutter/lib/desktop/widgets/tabbar_widget.dart
+--- a/flutter/lib/desktop/widgets/tabbar_widget.dart
++++ b/flutter/lib/desktop/widgets/tabbar_widget.dart
+@@ -641,7 +641,7 @@
+                         Offstage(
+                             offstage: !showTitle,
+                             child: const Text(
+-                              "SteadDesk",
++                              bind.mainGetAppNameSync(),
+                               style: TextStyle(fontSize: 13),
+                             ).marginOnly(left: 2))
+                       ]).marginOnly(
