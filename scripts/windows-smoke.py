@@ -39,6 +39,18 @@ def by_name(window, name):
     return matches[0] if matches else None
 
 
+def public_fields(control):
+    values = [control.window_text()]
+    for probe in (lambda: control.iface_value.CurrentValue,
+                  lambda: control.iface_text.DocumentRange.GetText(-1),
+                  lambda: control.iface_legacy_iaccessible.CurrentValue):
+        try:
+            values.append(probe() or "")
+        except Exception:
+            pass
+    return values
+
+
 def press(window, name):
     control = wait_for(name, lambda: by_name(window, name))
     point = control.rectangle().mid_point()
@@ -110,6 +122,19 @@ else:
 press(window, "About")
 source_name = "基于 RustDesk（AGPL-3.0） · Source code"
 wait_for("public source attribution", lambda: by_name(window, source_name))
+version = (Path(__file__).resolve().parents[1] / "RELEASE_VERSION").read_text().strip()
+version_label = "Version: " + version
+
+
+def about_version():
+    for control in controls(window, lambda s: True):
+        if any(value.strip() == version_label for value in public_fields(control)):
+            return control
+    return None
+
+
+wait_for("distribution About version " + version, about_version)
+print("PASS About " + version_label, flush=True)
 tabs = {"General", "Security", "Network", "Display", "Account", "About", "SteadDesk"}
 about_labels = tabs | {source_name, "Privacy Statement"}
 privacy = wait_for("privacy link", lambda: by_name(window, "Privacy Statement")).rectangle()
@@ -134,18 +159,6 @@ expected = [
     "TCP tunneling: Off",
     "Remote configuration modification: Off",
 ]
-
-
-def public_fields(control):
-    values = [control.window_text()]
-    for probe in (lambda: control.iface_value.CurrentValue,
-                  lambda: control.iface_text.DocumentRange.GetText(-1),
-                  lambda: control.iface_legacy_iaccessible.CurrentValue):
-        try:
-            values.append(probe() or "")
-        except Exception:
-            pass
-    return values
 
 
 def profile_fields():

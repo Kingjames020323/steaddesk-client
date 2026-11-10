@@ -14,6 +14,11 @@ if ($service.Status -ne 'Running' -or !(Test-Path -LiteralPath $installed)) {
     throw 'Timed out waiting for the installed service'
 }
 
+$releaseVersion = (Get-Content -LiteralPath "$PSScriptRoot/../RELEASE_VERSION" -Raw).Trim()
+$resource = (Get-Item -LiteralPath $installed).VersionInfo
+if ($resource.FileVersion -cne $releaseVersion -or $resource.ProductVersion -cne $releaseVersion) { throw 'Installed executable version mismatch' }
+$cliVersion = (& $installed --version | Out-String).Trim()
+if ($LASTEXITCODE -ne 0 -or $cliVersion -cne '1.5.0') { throw 'Unexpected CLI protocol version' }
 $start = [Diagnostics.ProcessStartInfo]::new($installed)
 $start.UseShellExecute = $false
 $start.RedirectStandardInput = $true

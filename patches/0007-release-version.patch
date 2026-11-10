@@ -1,0 +1,149 @@
+Subject: Embed the distribution version in Windows resources and platform About views
+
+diff --git a/flutter/android/app/build.gradle b/flutter/android/app/build.gradle
+index be7946a..6b5cbe8 100644
+--- a/flutter/android/app/build.gradle
++++ b/flutter/android/app/build.gradle
+@@ -14,23 +14,9 @@ if (keystorePropertiesFile.exists()) {
+     keystoreProperties.load(new FileInputStream(keystorePropertiesFile))
+ }
+ 
+-def localProperties = new Properties()
+-def localPropertiesFile = rootProject.file('local.properties')
+-if (localPropertiesFile.exists()) {
+-    localPropertiesFile.withReader('UTF-8') { reader ->
+-        localProperties.load(reader)
+-    }
+-}
+-
+-def flutterVersionCode = localProperties.getProperty('flutter.versionCode')
+-if (flutterVersionCode == null) {
+-    flutterVersionCode = '1'
+-}
+-
+-def flutterVersionName = localProperties.getProperty('flutter.versionName')
+-if (flutterVersionName == null) {
+-    flutterVersionName = '1.0'
+-}
++def releaseVersion = rootProject.file('../../RELEASE_VERSION').getText('UTF-8').trim()
++// The previous distribution used Android versionCode 68.
++def releaseCode = 68 + releaseVersion.tokenize('.').last().toInteger()
+ 
+ // Add rustls-platform-verifier Android support
+ String findRustlsPlatformVerifierMavenDir() {
+@@ -102,8 +88,8 @@ android {
+         applicationId "com.steaddesk.remote"
+         minSdkVersion 22
+         targetSdkVersion 36
+-        versionCode flutterVersionCode.toInteger()
+-        versionName flutterVersionName
++        versionCode releaseCode
++        versionName releaseVersion
+     }
+ 
+     signingConfigs {
+diff --git a/flutter/windows/runner/Runner.rc b/flutter/windows/runner/Runner.rc
+index 6469af2..dfdf37a 100644
+--- a/flutter/windows/runner/Runner.rc
++++ b/flutter/windows/runner/Runner.rc
+@@ -60,17 +60,7 @@ IDI_APP_ICON            ICON                    "resources\\app_icon.ico"
+ // Version
+ //
+ 
+-#if defined(FLUTTER_VERSION_MAJOR) && defined(FLUTTER_VERSION_MINOR) && defined(FLUTTER_VERSION_PATCH) && defined(FLUTTER_VERSION_BUILD)
+-#define VERSION_AS_NUMBER FLUTTER_VERSION_MAJOR,FLUTTER_VERSION_MINOR,FLUTTER_VERSION_PATCH,FLUTTER_VERSION_BUILD
+-#else
+-#define VERSION_AS_NUMBER 1,0,0,0
+-#endif
+-
+-#if defined(FLUTTER_VERSION)
+-#define VERSION_AS_STRING FLUTTER_VERSION
+-#else
+-#define VERSION_AS_STRING "1.0.0"
+-#endif
++#include "steaddesk_version.h"
+ 
+ VS_VERSION_INFO VERSIONINFO
+  FILEVERSION VERSION_AS_NUMBER
+diff --git a/libs/portable/build.rs b/libs/portable/build.rs
+index 74e7cc7..2125567 100644
+--- a/libs/portable/build.rs
++++ b/libs/portable/build.rs
+@@ -1,20 +1,25 @@
+-fn main() {
++fn main() -> Result<(), Box<dyn std::error::Error>> {
+     #[cfg(windows)]
+     {
+-        use std::io::Write;
++        use winres::VersionInfo;
++
++        let release = include_str!("../../RELEASE_VERSION").trim();
++        let mut numeric = 0u64;
++        for component in release.replace("-sd.", ".").split('.') {
++            numeric = (numeric << 16) | u64::from(component.parse::<u16>()?);
++        }
+         let mut res = winres::WindowsResource::new();
+-        res.set_icon("../../res/icon.ico")
++        res.set("FileVersion", release)
++            .set("ProductVersion", release)
++            .set_version_info(VersionInfo::FILEVERSION, numeric)
++            .set_version_info(VersionInfo::PRODUCTVERSION, numeric)
++            .set_icon("../../res/icon.ico")
+             .set_language(winapi::um::winnt::MAKELANGID(
+                 winapi::um::winnt::LANG_ENGLISH,
+                 winapi::um::winnt::SUBLANG_ENGLISH_US,
+             ))
+             .set_manifest_file("../../res/manifest.xml");
+-        match res.compile() {
+-            Err(e) => {
+-                write!(std::io::stderr(), "{}", e).unwrap();
+-                std::process::exit(1);
+-            }
+-            Ok(_) => {}
+-        }
++        res.compile()?;
+     }
++    Ok(())
+ }
+diff --git a/src/flutter_ffi.rs b/src/flutter_ffi.rs
+index eff06fc..ff0972f 100644
+--- a/src/flutter_ffi.rs
++++ b/src/flutter_ffi.rs
+@@ -1134,7 +1134,7 @@ pub fn main_get_license() -> String {
+ }
+ 
+ pub fn main_get_version() -> String {
+-    get_version()
++    include_str!("../RELEASE_VERSION").trim().to_owned()
+ }
+ 
+ pub fn main_get_fav() -> Vec<String> {
+diff --git a/flutter/lib/desktop/pages/desktop_setting_page.dart b/flutter/lib/desktop/pages/desktop_setting_page.dart
+--- a/flutter/lib/desktop/pages/desktop_setting_page.dart
++++ b/flutter/lib/desktop/pages/desktop_setting_page.dart
+@@ -2524,7 +2524,7 @@
+       };
+     }(), hasData: (data) {
+       final license = data['license'].toString();
+-      final version = data['version'].toString();
++      final versionLabel = "${translate('Version')}: ${data['version']}";
+       final buildDate = data['buildDate'].toString();
+       final fingerprint = data['fingerprint'].toString();
+       final myId = data['myId'].toString();
+@@ -2539,9 +2539,13 @@
+               const SizedBox(
+                 height: 8.0,
+               ),
+-              SelectionArea(
+-                  child: Text('${translate('Version')}: $version')
+-                      .marginSymmetric(vertical: 4.0)),
++              Semantics(
++                container: true,
++                excludeSemantics: true,
++                label: versionLabel,
++                child: SelectionArea(
++                    child: Text(versionLabel).marginSymmetric(vertical: 4.0)),
++              ),
+               SelectionArea(
+                   child: Text('${translate('Build Date')}: $buildDate')
+                       .marginSymmetric(vertical: 4.0)),

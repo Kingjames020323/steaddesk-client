@@ -11,7 +11,11 @@ foreach ($name in $names) {
     if (![Net.IPAddress]::IsLoopback($ip)) { throw 'Service name is not isolated' }
   }
 }
-$package = (Resolve-Path package/SteadDesk-1.5.0-x64.exe).Path
+$releaseVersion = (Get-Content -LiteralPath "$PSScriptRoot/../RELEASE_VERSION" -Raw).Trim()
+$package = (Resolve-Path "package/SteadDesk-$releaseVersion-x64.unsigned.exe").Path
+$resource = (Get-Item -LiteralPath $package).VersionInfo
+if ($resource.FileVersion -cne $releaseVersion -or $resource.ProductVersion -cne $releaseVersion) { throw 'Unexpected package version resource' }
+if ((Get-AuthenticodeSignature -LiteralPath $package).Status -ne 'NotSigned') { throw 'Expected an unsigned EXE' }
 $expected = ((Get-Content package/SHA256SUMS) -split '\s+')[0]
 if ((Get-FileHash $package).Hash -ne $expected) { throw 'Package checksum mismatch' }
 if ((Get-Item $package).VersionInfo.ProductName -cne 'SteadDesk') { throw 'Unexpected package ProductName' }
