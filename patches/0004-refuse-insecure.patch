@@ -1,0 +1,392 @@
+Subject: Refuse unencrypted streams before session login and reject raw direct-address connections
+
+diff --git a/flutter/lib/common.dart b/flutter/lib/common.dart
+--- a/flutter/lib/common.dart
++++ b/flutter/lib/common.dart
+@@ -1182,49 +1182,15 @@ void msgBox(SessionID sessionId, String type, String title, String text,
+     int? reconnectTimeout,
+     VoidCallback? onSubmit,
+     int? submitTimeout}) {
+-  dialogManager.dismissAll();
+   if (type.contains('insecure-connection')) {
+-    Future<void> closeSession() async {
+-      await bind.sessionSetCommon(
+-        sessionId: sessionId,
+-        key: 'continue-insecure-connection',
+-        value: 'N',
+-      );
+-      dialogManager.dismissAll();
+-      closeConnection();
+-    }
+-
+-    void continueSession() {
+-      unawaited(
+-        bind.sessionSetCommon(
+-          sessionId: sessionId,
+-          key: 'continue-insecure-connection',
+-          value: 'Y',
+-        ),
+-      );
+-      dialogManager.dismissAll();
+-    }
+-
+-    dialogManager.show(
+-      (setState, close, context) => CustomAlertDialog(
+-        title: null,
+-        content: SelectionArea(child: msgboxContent(type, title, text)),
+-        actions: [
+-          dialogButton(
+-            'Continue',
+-            onPressed: continueSession,
+-            isOutline: true,
+-          ),
+-          dialogButton('Disconnect', onPressed: closeSession),
+-        ],
+-        onSubmit: closeSession,
+-        onCancel: closeSession,
+-      ),
+-      tag: '$sessionId-$type-$title-$text-$link',
+-    );
++    // Older event producers receive the same one-way refusal dialog.
++    unawaited(bind.sessionClose(sessionId: sessionId));
++    msgBox(sessionId, 'error', 'Connection Error', '连接未加密，已拒绝，请联系管理员',
++        '', dialogManager, hasCancel: false);
+     return;
+   }
+ 
++  dialogManager.dismissAll();
+   List<Widget> buttons = [];
+   bool hasOk = false;
+   submit() {
+diff --git a/src/client.rs b/src/client.rs
+index d3e66e7..8e2377a 100644
+--- a/src/client.rs
++++ b/src/client.rs
+@@ -148,6 +148,8 @@ pub(crate) struct ClientClipboardContext {
+ /// Client of the remote desktop.
+ pub struct Client;
+ 
++const INSECURE_CONNECTION_DENIED: &str = "连接未加密，已拒绝，请联系管理员";
++
+ #[cfg(not(target_os = "ios"))]
+ struct ClipboardState {
+     #[cfg(feature = "flutter")]
+@@ -424,34 +426,9 @@ impl Client {
+         if config::is_incoming_only() && !is_switch_sides_back(conn_type, &interface).await {
+             bail!("Incoming only mode");
+         }
+-        // to-do: remember the port for each peer, so that we can retry easier
+-        if hbb_common::is_ip_str(peer) {
+-            return Ok((
+-                (
+-                    connect_tcp_local(check_port(peer, RELAY_PORT + 1), None, CONNECT_TIMEOUT)
+-                        .await?,
+-                    true,
+-                    None,
+-                    None,
+-                    "TCP",
+-                ),
+-                (0, "".to_owned()),
+-                false,
+-            ));
+-        }
+-        // Allow connect to {domain}:{port}
+-        if hbb_common::is_domain_port_str(peer) {
+-            return Ok((
+-                (
+-                    connect_tcp_local(peer, None, CONNECT_TIMEOUT).await?,
+-                    true,
+-                    None,
+-                    None,
+-                    "TCP",
+-                ),
+-                (0, "".to_owned()),
+-                false,
+-            ));
++        // Upstream direct-address sessions skip the authenticated handshake.
++        if crate::common::is_direct_ip_access(peer) {
++            bail!(INSECURE_CONNECTION_DENIED);
+         }
+ 
+         let other_server = interface.get_lch().read().unwrap().other_server.clone();
+@@ -4928,6 +4905,10 @@ pub trait Interface: Send + Clone + 'static + Sized {
+     }
+ 
+     fn on_establish_connection_error(&self, err: String) {
++        if err == INSECURE_CONNECTION_DENIED {
++            self.msgbox("error", "Connection Error", INSECURE_CONNECTION_DENIED, "");
++            return;
++        }
+         let title = "Connection Error";
+         let text = err.to_string();
+         let lch = self.get_lch();
+@@ -4973,7 +4954,6 @@ pub trait Interface: Send + Clone + 'static + Sized {
+ #[derive(Clone)]
+ pub enum Data {
+     Close,
+-    RejectInsecureConnection,
+     Login((String, String, String, bool)),
+     Message(Message),
+     #[cfg(not(any(target_os = "android", target_os = "ios")))]
+@@ -4999,31 +4979,13 @@ pub enum Data {
+     ElevateWithLogon(String, String),
+     NewVoiceCall,
+     CloseVoiceCall,
+-    ContinueInsecureConnection,
+     ResetDecoder(Option<usize>),
+     RenameFile((i32, String, String, bool)),
+     TakeScreenshot((i32, String)),
+ }
+ 
+-pub async fn confirm_insecure_connection(
+-    interface: &impl Interface,
+-    receiver: &mut UnboundedReceiver<Data>,
+-) -> bool {
+-    interface.msgbox(
+-        "insecure-connection-nocancel-hasclose",
+-        "Insecure Connection",
+-        "conn-e2ee-unavailable-tip",
+-        "",
+-    );
+-    while let Some(data) = receiver.recv().await {
+-        match data {
+-            Data::ContinueInsecureConnection => return true,
+-            Data::RejectInsecureConnection => return false,
+-            Data::Close => return false,
+-            _ => {}
+-        }
+-    }
+-    false
++pub fn refuse_insecure_connection(interface: &impl Interface) {
++    interface.msgbox("error", "Connection Error", INSECURE_CONNECTION_DENIED, "");
+ }
+ 
+ /// Keycode for key events.
+@@ -5168,6 +5130,7 @@ lazy_static::lazy_static! {
+ #[inline]
+ pub fn check_if_retry(msgtype: &str, title: &str, text: &str, retry_for_relay: bool) -> bool {
+     msgtype == "error"
++        && text != INSECURE_CONNECTION_DENIED
+         && title == "Connection Error"
+         && ((text.contains("10054") || text.contains("104")) && retry_for_relay
+             || (!text.to_lowercase().contains("offline")
+diff --git a/src/client/io_loop.rs b/src/client/io_loop.rs
+index fcbc090..98463dc 100644
+--- a/src/client/io_loop.rs
++++ b/src/client/io_loop.rs
+@@ -201,12 +201,20 @@ impl<T: InvokeUiSession> Remote<T> {
+         .await
+         {
+             Ok(((mut peer, direct, pk, kcp, stream_type), (feedback, rendezvous_server))) => {
++                if !peer.is_secured() {
++                    client::refuse_insecure_connection(&self.handler);
++                    self.send_close_reason(&mut peer, "").await;
++                    if kcp.is_some() {
++                        tokio::time::sleep(KCP_CLOSE_REASON_FLUSH_DELAY).await;
++                    }
++                    self.handle_disconnected(round);
++                    return;
++                }
+                 self.handler
+                     .connection_round_state
+                     .lock()
+                     .unwrap()
+                     .set_connected();
+-                let is_secured = peer.is_secured();
+                 // Only WebRTC needs refining: its label names the transport that won the race,
+                 // not the family ICE ended up nominating, and it is the one path where the two
+                 // can disagree with the address the rendezvous observed.
+@@ -216,18 +224,7 @@ impl<T: InvokeUiSession> Remote<T> {
+                     stream_type
+                 };
+                 self.handler
+-                    .set_connection_type(is_secured, direct, stream_type); // flutter -> connection_ready
+-                if !is_secured
+-                    && !crate::common::is_direct_ip_access(&self.handler.get_id())
+-                    && !client::confirm_insecure_connection(&self.handler, &mut self.receiver).await
+-                {
+-                    self.send_close_reason(&mut peer, "").await;
+-                    if kcp.is_some() {
+-                        tokio::time::sleep(KCP_CLOSE_REASON_FLUSH_DELAY).await;
+-                    }
+-                    self.handle_disconnected(round);
+-                    return;
+-                }
++                    .set_connection_type(true, direct, stream_type); // flutter -> connection_ready
+                 self.handler.update_direct(Some(direct));
+                 if conn_type == ConnType::DEFAULT_CONN || conn_type == ConnType::VIEW_CAMERA {
+                     self.handler
+diff --git a/src/flutter_ffi.rs b/src/flutter_ffi.rs
+index 3963e36..eff06fc 100644
+--- a/src/flutter_ffi.rs
++++ b/src/flutter_ffi.rs
+@@ -2906,12 +2906,9 @@ pub fn main_set_common(_key: String, _value: String) {
+ }
+ 
+ pub fn session_set_common(session_id: SessionID, key: String, value: String) {
+-    if let Some(s) = sessions::get_session_by_session_id(&session_id) {
+-        if key == "continue-insecure-connection"
+-        {
+-            s.continue_insecure_connection(value == "Y");
+-            return;
+-        }
++    let _ = value;
++    if key == "continue-insecure-connection" {
++        session_close(session_id);
+     }
+ }
+ 
+diff --git a/src/port_forward.rs b/src/port_forward.rs
+index d1f4df4..ed19669 100644
+--- a/src/port_forward.rs
++++ b/src/port_forward.rs
+@@ -177,11 +177,10 @@ async fn connect_and_login(
+     let ((mut stream, direct, _pk, _kcp, _stream_type), (feedback, rendezvous_server)) =
+         Client::start(id, key, token, conn_type, interface.clone()).await?;
+     interface.update_direct(Some(direct));
+-    if !stream.is_secured() && !crate::common::is_direct_ip_access(id) {
+-        if !confirm_insecure_connection(&interface, ui_receiver).await {
+-            *close_port_forward = true;
+-            return Ok(None);
+-        }
++    if !stream.is_secured() {
++        refuse_insecure_connection(&interface);
++        *close_port_forward = true;
++        return Ok(None);
+     }
+     let mut buffer = Vec::new();
+     let mut received = false;
+@@ -418,11 +417,10 @@ async fn connect_and_login_mux(
+     let ((mut stream, direct, _pk, _kcp, _stream_type), (feedback, rendezvous_server)) =
+         Client::start(id, key, token, conn_type, interface.clone()).await?;
+     interface.update_direct(Some(direct));
+-    if !stream.is_secured() && !crate::common::is_direct_ip_access(id) {
+-        if !confirm_insecure_connection(&interface, ui_receiver).await {
+-            *close_port_forward = true;
+-            return Ok(None);
+-        }
++    if !stream.is_secured() {
++        refuse_insecure_connection(&interface);
++        *close_port_forward = true;
++        return Ok(None);
+     }
+     let mut buffer = Vec::new();
+     let mut local_eof = false;
+diff --git a/src/ui/common.tis b/src/ui/common.tis
+index 8b90b4a..1b09c18 100644
+--- a/src/ui/common.tis
++++ b/src/ui/common.tis
+@@ -240,6 +240,14 @@ function msgbox(type, title, content, link="", callback=null, height=180, width=
+         closeMsgbox();
+         return;
+     }
++    if (type.indexOf("insecure-connection") >= 0) {
++        type = "error";
++        title = "Connection Error";
++        content = "连接未加密，已拒绝，请联系管理员";
++        hasRetry = false;
++        link = "";
++        callback = function() { view.close(); };
++    }
+     var remember = false;
+     try { remember = handler.get_remember(); } catch(e) {}
+     var autoLogin = false;
+@@ -272,15 +280,6 @@ function msgbox(type, title, content, link="", callback=null, height=180, width=
+             handler.send2fa(res.code, res.trust_this_device || false); 
+             msgbox("connecting", "Connecting...", "Logging in...");
+         };
+-    } else if (type.indexOf("insecure-connection") >= 0) {
+-        callback = function (res) {
+-            if (!res) {
+-                handler.continue_insecure_connection(false);
+-                view.close();
+-                return;
+-            }
+-            handler.continue_insecure_connection(true);
+-        };
+     } else if (type.indexOf("custom") < 0 && !is_port_forward && !callback) {
+         callback = function() { view.close(); }
+     } else if (type == 'wait-remote-accept-nook') {
+diff --git a/src/ui/msgbox.tis b/src/ui/msgbox.tis
+index 14b0bae..bb18f6c 100644
+--- a/src/ui/msgbox.tis
++++ b/src/ui/msgbox.tis
+@@ -126,7 +126,6 @@ class MsgboxComponent: Reactor.Component {
+         var hasOk = this.type != "connecting" && this.type != "success" && this.type.indexOf("nook") < 0;
+         var hasLink = this.link != "";
+         var hasClose = this.type.indexOf("hasclose") >= 0;
+-        var isInsecureConnection = this.type.indexOf("insecure-connection") >= 0;
+         var show_progress = this.type == "connecting";
+         var me = this;
+         self.timer(0, msgboxTimerFunc);
+@@ -151,12 +150,11 @@ class MsgboxComponent: Reactor.Component {
+                 <div style="text-align: right;">
+                     <span style="display:inline-block; max-width: 250px; font-size:12px;" #error />
+                     <progress #progress style={"color:" + color + "; display: " + (show_progress ? "inline-block" : "none")} />
+-                    {isInsecureConnection && hasOk ? <button .button #submit .outline>{translate('Continue')}</button> : ""}
+                     {hasCancel || this.hasRetry ? <button .button #cancel .outline>{translate(this.hasRetry ? "OK" : "Cancel")}</button> : ""}
+                     {this.hasSkip() ? <button .button #skip .outline>{translate('Skip')}</button> : ""}
+-                    {!isInsecureConnection && (hasOk || this.hasRetry) ? <button .button #submit>{translate(this.hasRetry ? "Retry" : "OK")}</button> : ""}
++                    {hasOk || this.hasRetry ? <button .button #submit>{translate(this.hasRetry ? "Retry" : "OK")}</button> : ""}
+                     {hasLink ? <button .button #jumplink .outline>{translate('JumpLink')}</button> : ""}
+-                    {hasClose ? (isInsecureConnection ? <button .button #cancel>{translate('Disconnect')}</button> : <button .button #cancel .outline>{translate('Close')}</button>) : ""}
++                    {hasClose ? <button .button #cancel .outline>{translate('Close')}</button> : ""}
+                     {this.getScreenshotButtons()}
+                 </div>
+             </div>
+@@ -169,10 +167,6 @@ class MsgboxComponent: Reactor.Component {
+     }
+     
+     function submit() {
+-        if (this.type.indexOf("insecure-connection") >= 0) {
+-            this.cancel();
+-            return;
+-        }
+         var submit_btn = this.$(button#submit);
+         if (submit_btn) {
+             if (submit_btn.state.disabled) return;
+@@ -331,11 +325,7 @@ class MsgboxComponent: Reactor.Component {
+             var el = me.$(.outline-focus);
+             if (el) view.focus = el;
+             else {
+-                if (me.type.indexOf("insecure-connection") >= 0) {
+-                    el = me.$(#cancel);
+-                } else {
+-                    el = me.$(#submit);
+-                }
++                el = me.$(#submit);
+                 if (el) {
+                     view.focus = el;
+                 }
+diff --git a/src/ui/remote.rs b/src/ui/remote.rs
+index 1bdf90a..ad9e822 100644
+--- a/src/ui/remote.rs
++++ b/src/ui/remote.rs
+@@ -517,7 +517,6 @@ impl sciter::EventHandler for SciterSession {
+         fn is_rdp();
+         fn login(String, String, String, bool);
+         fn send2fa(String, bool);
+-        fn continue_insecure_connection(bool);
+         fn get_enable_trusted_devices();
+         fn new_rdp();
+         fn send_mouse(i32, i32, i32, bool, bool, bool, bool);
+diff --git a/src/ui_session_interface.rs b/src/ui_session_interface.rs
+index f28752e..7bc91aa 100644
+--- a/src/ui_session_interface.rs
++++ b/src/ui_session_interface.rs
+@@ -1418,15 +1418,6 @@ impl<T: InvokeUiSession> Session<T> {
+         self.send(Data::Close);
+     }
+ 
+-    pub fn continue_insecure_connection(&self, continue_insecure: bool) {
+-        let data = if continue_insecure {
+-            Data::ContinueInsecureConnection
+-        } else {
+-            Data::RejectInsecureConnection
+-        };
+-        self.send(data);
+-    }
+-
+     fn try_auto_start_job_str(is_reconnected: bool, job_str: &str) -> Option<String> {
+         if is_reconnected {
+             let job_str = job_str.trim();

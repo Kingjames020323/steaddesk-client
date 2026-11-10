@@ -8,6 +8,7 @@ from pathlib import Path
 
 from PIL import Image, ImageStat
 from pywinauto import Desktop
+from pywinauto.keyboard import send_keys
 from pywinauto.mouse import click
 
 
@@ -128,6 +129,10 @@ expected = [
     "Relay server: relay.steaddesk.com",
     "API server: https://api.steaddesk.com",
     "Key: J1e7eHb4p8PaTnIc7Ihk+t7JNQi0xBVBGfI+sRr3CfA=",
+    "Direct IP access: Off",
+    "LAN discovery: Off",
+    "TCP tunneling: Off",
+    "Remote configuration modification: Off",
 ]
 
 
@@ -170,3 +175,29 @@ for field in fields:
             raise RuntimeError("A preset field is editable")
 save_evidence(window, "network", fields + controls(window, {"ID/Relay server", "Close"}.__contains__))
 print("PASS fixed ID, relay, API and public key in read-only profile", flush=True)
+
+press(window, "Close")
+press(window, "Home")
+press(window, "Enter remote ID")
+send_keys("127.0.0.1", pause=0.05)
+press(window, "Connect")
+notice = "连接未加密，已拒绝，请联系管理员"
+
+
+def refusal_dialog():
+    for view in desktop.windows():
+        # Remote-session windows are separate Flutter windows on Windows.
+        if view.process_id() != window.process_id() and "steaddesk" not in view.window_text().lower():
+            continue
+        public = controls(view, lambda s: True)
+        matches = [c for c in public if any(v.strip() == notice for v in public_fields(c))]
+        if matches:
+            return view, matches
+    return None
+
+
+dialog, message = wait_for("unencrypted connection refusal", refusal_dialog)
+if by_name(dialog, "Continue"):
+    raise RuntimeError("Insecure connection offers a continuation")
+save_evidence(dialog, "refusal", message + controls(dialog, {"Connection Error", "Close", "OK"}.__contains__))
+print("PASS direct connection refused before transport; no Continue action", flush=True)
