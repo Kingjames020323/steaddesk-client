@@ -110,6 +110,8 @@ else:
 press(window, "About")
 source_name = "基于 RustDesk（AGPL-3.0） · Source code"
 wait_for("public source attribution", lambda: by_name(window, source_name))
+version = (Path(__file__).resolve().parents[1] / "RELEASE_VERSION").read_text().strip()
+wait_for("distribution About version", lambda: by_name(window, "Version: " + version))
 tabs = {"General", "Security", "Network", "Display", "Account", "About", "SteadDesk"}
 about_labels = tabs | {source_name, "Privacy Statement"}
 privacy = wait_for("privacy link", lambda: by_name(window, "Privacy Statement")).rectangle()

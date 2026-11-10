@@ -2,6 +2,13 @@
 set -euo pipefail
 queue=$(cd "$(dirname "$0")/.." && pwd)
 source_tree=${1:-"$queue/upstream"}
+release_version=$(<"$queue/RELEASE_VERSION")
+# Each fixed Windows version component is an unsigned 16-bit word.
+if [[ ! $release_version =~ ^1\.5\.0-sd\.([1-9][0-9]{0,4})$ ]] || (( BASH_REMATCH[1] > 65535 )); then
+  echo "Expected RELEASE_VERSION 1.5.0-sd.N, with N between 1 and 65535" >&2
+  exit 1
+fi
+windows_version=${release_version/-sd./.}
 cd "$source_tree"
 test "$(git rev-parse HEAD)" = fada664df7a294d1d1a9ca3e7cd3637069122f17
 test "$(git -C libs/hbb_common rev-parse HEAD)" = 229b904508364c8997aad0fb5af57effac859f60
@@ -31,6 +38,9 @@ for ((i=${#patches[@]}-1; i>=0; i--)); do
 done
 for patch in "${patches[@]}"; do git -C "$scratch" apply --cached "$patch"; done
 for ((i=applied; i<${#patches[@]}; i++)); do git apply "${patches[i]}"; done
+printf '%s\n' "$release_version" > RELEASE_VERSION
+printf '#define VERSION_AS_NUMBER %s\n#define VERSION_AS_STRING "%s"\n' \
+  "${windows_version//./,}" "$release_version" > flutter/windows/runner/steaddesk_version.h
 for icon in res/icon.ico res/tray-icon.ico flutter/windows/runner/resources/app_icon.ico; do
   install -m 644 "$queue/branding/steaddesk.ico" "$icon"
 done

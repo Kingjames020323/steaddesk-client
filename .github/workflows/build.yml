@@ -1,7 +1,9 @@
 ---
-name: Build SteadDesk demo
+name: Build SteadDesk
 'on':
   pull_request:
+  push:
+    tags: ['v1.5.0-sd.*']
   workflow_dispatch:
 permissions:
   contents: read
@@ -27,6 +29,16 @@ jobs:
       with:
         fetch-depth: 0
         persist-credentials: false
+    - name: Validate distribution version and tag
+      shell: bash
+      run: |
+        version=$(cat RELEASE_VERSION)
+        [[ $version =~ ^1\.5\.0-sd\.[1-9][0-9]*$ ]]
+        if [[ $GITHUB_REF_TYPE == tag ]]; then
+          test "$GITHUB_REF_NAME" = "v$version"
+        fi
+    - name: Test release packaging and signing handoff without credentials
+      run: python3 -B -m unittest discover -s scripts/tests -v
     - name: Scan the distribution repository history
       run: |
         archive="$RUNNER_TEMP/gitleaks.tar.gz"
@@ -421,8 +433,6 @@ jobs:
         export PATH=/usr/lib/jvm/java-17-openjdk-amd64/bin:$PATH
         # Increase Gradle JVM memory for CI builds
         sed -i "s/org.gradle.jvmargs=-Xmx1024M/org.gradle.jvmargs=-Xmx2g/g" ./flutter/android/gradle.properties
-        # temporary use debug sign config
-        sed -i "s/signingConfigs.release/signingConfigs.debug/g" ./flutter/android/app/build.gradle
         mv ./flutter/android/app/src/main/jniLibs/arm64-v8a/liblibrustdesk.so ./flutter/android/app/src/main/jniLibs/arm64-v8a/librustdesk.so
         cp ${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so ./flutter/android/app/src/main/jniLibs/arm64-v8a/
         mv ./flutter/android/app/src/main/jniLibs/armeabi-v7a/liblibrustdesk.so ./flutter/android/app/src/main/jniLibs/armeabi-v7a/librustdesk.so
@@ -433,10 +443,29 @@ jobs:
         pushd flutter
         flutter build apk "--${{ env.reltype }}" --target-platform android-arm64,android-arm,android-x64${{ env.x86_target }}
         popd
-        mkdir -p signed-apk
-        mv ./flutter/build/app/outputs/flutter-apk/app-${{ env.reltype }}.apk signed-apk/rustdesk-${{ env.VERSION }}-universal${{ env.suffix }}.apk
         mkdir -p dist
-        mv signed-apk/*-universal.apk dist/SteadDesk-1.5.0-universal.apk
+        version=$(cat .distribution/RELEASE_VERSION)
+        apk="dist/SteadDesk-$version-universal.unsigned.apk"
+        cp flutter/build/app/outputs/flutter-apk/app-release.apk "$apk"
+        build_tools=$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -1)
+        "$build_tools/aapt" dump badging "$apk" > "$RUNNER_TEMP/badging"
+        grep -F "package: name='com.steaddesk.remote'" "$RUNNER_TEMP/badging" | grep -F "versionName='$version'"
+        unzip -tq "$apk"
+        "$build_tools/apksigner" version
+        python3 - "$apk" <<'PYTHON'
+        import re, sys, zipfile
+        with open(sys.argv[1], "rb") as stream, zipfile.ZipFile(stream) as archive:
+            if any(re.fullmatch(r"META-INF/(?:[^/]+\.(?:SF|RSA|DSA|EC)|SIG-[^/]+)", name, re.I)
+                   for name in archive.namelist()):
+                raise SystemExit("Unexpected JAR signature in unsigned APK")
+            stream.seek(archive.start_dir - 16)
+            if stream.read(16) == b"APK Sig Block 42":
+                raise SystemExit("Unexpected APK signing block")
+        PYTHON
+        if "$build_tools/apksigner" verify "$apk"; then
+          echo "Expected an unsigned APK" >&2
+          exit 1
+        fi
         cd dist && sha256sum *.apk > SHA256SUMS
     - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
       with:
@@ -502,6 +531,9 @@ jobs:
         flutter doctor -v
         flutter precache --windows
         Invoke-WebRequest -Uri https://github.com/rustdesk/engine/releases/download/main/windows-x64-release.zip -OutFile windows-x64-release.zip
+        if ((Get-FileHash -Algorithm SHA256 windows-x64-release.zip).Hash -ne 'ec8cabf36ee4ff24c8d98de25b00e70781eb03876265aee84d0fe554a110036e') {
+          throw 'Custom Flutter engine ZIP checksum mismatch'
+        }
         Expand-Archive -Path windows-x64-release.zip -DestinationPath windows-x64-release
         mv -Force windows-x64-release/*  C:/hostedtoolcache/windows/flutter/stable-${{ env.FLUTTER_VERSION }}-x64/bin/cache/artifacts/engine/windows-x64-release/
     - name: Patch flutter
@@ -576,7 +608,8 @@ jobs:
         python3 ./generate.py -f ../../rustdesk/ -o . -e ../../rustdesk/SteadDesk.exe
         popd
         mkdir -p dist
-        mv target/release/rustdesk-portable-packer.exe dist/SteadDesk-1.5.0-x64.exe
+        version=$(cat .distribution/RELEASE_VERSION)
+        mv target/release/rustdesk-portable-packer.exe "dist/SteadDesk-$version-x64.unsigned.exe"
         cd dist && sha256sum *.exe > SHA256SUMS
     - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
       with:
@@ -625,3 +658,80 @@ jobs:
       run: |
         . ./scripts/windows-isolate.ps1
         & ./scripts/windows-password-smoke.ps1 -Package $package
+
+  source:
+    name: Corresponding source
+    needs: audit
+    runs-on: ubuntu-24.04
+    steps:
+    - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      with:
+        submodules: recursive
+        persist-credentials: false
+    - name: Archive the patched distribution
+      run: |
+        version=$(cat RELEASE_VERSION)
+        python3 scripts/archive-source.py "$RUNNER_TEMP/SteadDesk-$version-source.tar.gz"
+    - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: SteadDesk-source
+        path: ${{ runner.temp }}/SteadDesk-*-source.tar.gz
+        if-no-files-found: error
+
+  bundle:
+    name: Assemble unsigned release
+    needs: [source, android, windows-smoke, windows-password]
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.assemble.outputs.version }}
+    steps:
+    - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      with:
+        persist-credentials: false
+    - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      with:
+        pattern: SteadDesk-*
+        path: artifacts
+    - id: assemble
+      shell: bash
+      run: |
+        version=$(cat RELEASE_VERSION)
+        (cd artifacts/SteadDesk-Windows-x64 && sha256sum --strict -c SHA256SUMS)
+        (cd artifacts/SteadDesk-Android-universal && sha256sum --strict -c SHA256SUMS)
+        mkdir dist
+        cp "artifacts/SteadDesk-Windows-x64/SteadDesk-$version-x64.unsigned.exe" dist/
+        cp "artifacts/SteadDesk-Android-universal/SteadDesk-$version-universal.unsigned.apk" dist/
+        cp "artifacts/SteadDesk-source/SteadDesk-$version-source.tar.gz" dist/
+        (cd dist && sha256sum SteadDesk-* > SHA256SUMS && sha256sum --strict -c SHA256SUMS)
+        echo "version=$version" >> "$GITHUB_OUTPUT"
+    - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: Unsigned-release
+        path: dist
+        if-no-files-found: error
+
+  draft:
+    name: Create draft release
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    needs: bundle
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+    - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      with:
+        name: Unsigned-release
+        path: dist
+    - name: Upload unsigned assets to a new draft
+      working-directory: dist
+      env:
+        GH_TOKEN: ${{ github.token }}
+        VERSION: ${{ needs.bundle.outputs.version }}
+      run: |
+        test "$GITHUB_REF_NAME" = "v$VERSION"
+        sha256sum --strict -c SHA256SUMS
+        gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+          --verify-tag --draft --title "SteadDesk $VERSION" \
+          --notes 'Unsigned build for offline signing and review.' \
+          "SteadDesk-$VERSION-x64.unsigned.exe" "SteadDesk-$VERSION-universal.unsigned.apk" \
+          "SteadDesk-$VERSION-source.tar.gz" SHA256SUMS

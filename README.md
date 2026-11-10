@@ -1,9 +1,27 @@
 # SteadDesk
 
-SteadDesk is a remote support client based on RustDesk 1.5.0. This distribution targets Windows x64 and Android (arm64-v8a, armeabi-v7a and x86_64). It keeps the upstream remote control engine and publishes its changes as a numbered patch queue under AGPL-3.0.
+SteadDesk is an AGPL-3.0 remote support client based on RustDesk 1.5.0 for Windows x64 and Android (arm64-v8a, armeabi-v7a and x86_64). Clone with `git clone --recurse-submodules` and run `bash scripts/apply-patches.sh` before building in `upstream/`. The script checks the pinned upstream revisions. [Source pins and patch notes](UPSTREAM.md)
 
-Clone with Git submodules and run `bash scripts/apply-patches.sh` before building in `upstream/`. The script checks both source revisions before applying changes. Run it again to verify an already patched tree. See [UPSTREAM.md](UPSTREAM.md) for the source pins and downstream choices.
+## Release procedure
 
-The Actions build produces a Windows executable and a universal APK, each bundled with SHA256SUMS. Use the Windows executable's normal install dialog. Windows has no publisher signature at this stage. Android uses the ephemeral runner's debug keystore; a later demo may require uninstalling the earlier build. Intermediate native and bridge files expire after one day. There is no automatic update channel.
+1. Update `RELEASE_VERSION` by pull request. Start at `1.5.0-sd.1` and increase the final number for each release. The version appears in Windows file properties, About and Android's versionName. The installed Windows CLI continues to print `1.5.0` for `--version` so existing provisioning scripts can verify the upstream protocol. Review the PR build, including the offline Windows tests and the assembled release bundle.
+2. After review and merge, the release owner tags the reviewed commit with the exact version from `RELEASE_VERSION`. For example, push `v1.5.0-sd.1` to trigger the release build. CI checks the tag against the file, builds unsigned Windows and Android packages, and attaches both packages, the patched source archive and `SHA256SUMS` to a **draft** GitHub Release. A pull request or manual CI run produces a downloadable `Unsigned-release` artifact. If a draft upload was interrupted, inspect the existing draft and reconcile its assets before retrying.
+3. Jason downloads all four draft assets into an empty directory named `unsigned`, copies them to the signing workstation and checks the hashes. Run `sha256sum -c SHA256SUMS` inside that directory, or `shasum -a 256 -c SHA256SUMS` on macOS. Keep the signing tools from the same reviewed tag. Each signing step takes a complete four-file bundle and writes to a new directory under an existing parent. Use Python 3.10+, PowerShell 7 and Windows SDK SignTool 10.0.22000 or later on Windows, and Bash plus Android SDK Build-Tools 35 or later on the Android signing host. The Windows tool accepts an RSA code-signing PFX and verifies the publisher trust chain.
+4. On Windows, run the command below. Use the local or removable drive containing the PFX. The tool prompts for its password, signs with SHA-256, time-stamps the signature, verifies it and writes a new bundle. RFC 3161 timestamping requires access to the chosen timestamp service; an isolated workstation can use a reachable internal timestamp service via `-TimestampUrl`.
 
-Builds use the pinned RustDesk workflow's Flutter and Rust toolchains and vcpkg baseline. Hosted runner images, OS packages, Flutter pub resolution, upstream's custom Windows engine download, and the transient Android debug certificate can vary between runs. Verify the checksum from the specific workflow run you downloaded.
+   ```powershell
+   ./scripts/sign-windows.ps1 -ReleaseDir ./unsigned -OutputDir ./windows-signed -PfxPath E:\release.pfx
+   ```
+
+5. Transfer the complete Windows-signed bundle to the Android signing workstation. Run the command below with the keystore path and key alias. The tool prompts for signing credentials, verifies the APK and prints the signing certificate. Compare the certificate identity with the release owner's trusted record. The signed bundle includes the Windows EXE, APK, corresponding source and a new `SHA256SUMS`.
+
+   ```bash
+   scripts/sign-android.sh ./windows-signed ./signed /media/usb/release.jks release
+   (cd signed && sha256sum -c SHA256SUMS)
+   ```
+
+6. Jason uploads the signed EXE, signed APK and final checksum file to the **existing draft**. Keep the verified source archive and remove the two unsigned draft assets. Download the four final assets into a fresh directory and verify `SHA256SUMS` again. Claude reviews the version, signatures, checksums and source archive. The release owner publishes the draft after that review.
+
+Store the signing material on the signing workstation or its removable media. The workflow only needs a GitHub token to create the draft. Windows builds without a publisher signature and unsigned APKs are staging artifacts; Android installation requires a signed APK. Earlier demo APKs used a temporary signing certificate, so Android may reject an in-place upgrade to the offline-signed release.
+
+The source archive includes the distribution tools, patches and the patched upstream source with its pinned submodules. After extraction the source under `upstream/` is already patched. Hosted runner images, OS packages, Flutter dependency resolution and upstream's custom Windows engine download can vary between runs. Verify the assets from the release under test.

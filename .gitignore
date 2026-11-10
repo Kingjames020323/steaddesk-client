@@ -1,0 +1,7 @@
+# Offline signing material belongs outside the distribution checkout.
+*.pfx
+*.p12
+*.jks
+*.keystore
+key.properties
+__pycache__/

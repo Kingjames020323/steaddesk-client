@@ -1,3 +1,4 @@
 patches/*.patch -whitespace
 *.sh text eol=lf
 *.yml text eol=lf
+RELEASE_VERSION text eol=lf
