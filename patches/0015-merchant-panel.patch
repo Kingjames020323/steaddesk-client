@@ -120,10 +120,9 @@ index 5f234cb..05a1888 100644
      windowManager.setOpacity(0);
      await windowManager.waitUntilReadyToShow(windowOptions, null);
      bind.mainHideDock();
-@@ -500,8 +510,8 @@ class _AppState extends State<App> with WidgetsBindingObserver {
+@@ -479,7 +489,7 @@ class _AppState extends State<App> with WidgetsBindingObserver {
                : bind.mainGetAppNameSync(),
            theme: MyTheme.lightTheme,
-           darkTheme: MyTheme.darkTheme,
 -          themeMode: MyTheme.currentThemeMode(),
 -          home: isDesktop
 +          themeMode: merchantAndroid || merchantWindows ? ThemeMode.light : MyTheme.currentThemeMode(),
