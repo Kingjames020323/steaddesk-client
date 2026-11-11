@@ -3,7 +3,18 @@ Subject: Give the Windows editions independent installer and service identities
 diff --git a/src/platform/windows.rs b/src/platform/windows.rs
 --- a/src/platform/windows.rs
 +++ b/src/platform/windows.rs
-@@ -1317,6 +1317,7 @@
+@@ -128,6 +128,10 @@
+ const HKLM_PREFIX: &str = "HKEY_LOCAL_MACHINE\\";
+ 
+ fn validate_install_app_name(app_name: &str) -> ResultType<()> {
++    // The distribution controls this exact identity, including the support edition's space.
++    if app_name == hbb_common::config::PRODUCT_NAME {
++        return Ok(());
++    }
+     if app_name.is_empty()
+         || !app_name
+             .chars()
+@@ -1317,6 +1321,7 @@
      if !get_reg_of(&subkey, "InstallLocation").is_empty() {
          return subkey;
      }
@@ -11,7 +22,7 @@ diff --git a/src/platform/windows.rs b/src/platform/windows.rs
      let subkey = get_subkey(IS1, false);
      if !get_reg_of(&subkey, "InstallLocation").is_empty() {
          return subkey;
-@@ -1335,7 +1336,7 @@
+@@ -1335,7 +1340,7 @@
  // Return install options other than InstallLocation.
  pub fn get_install_options() -> String {
      let app_name = crate::get_app_name();
@@ -20,7 +31,7 @@ diff --git a/src/platform/windows.rs b/src/platform/windows.rs
      let mut opts = HashMap::new();
  
      let desktop_shortcuts = get_reg_of_hkcr(&subkey, REG_NAME_INSTALL_DESKTOPSHORTCUTS);
-@@ -1358,7 +1359,7 @@
+@@ -1358,7 +1363,7 @@
          Some(override_value) => override_value,
          None => {
              let app_name = crate::get_app_name();
@@ -29,7 +40,7 @@ diff --git a/src/platform/windows.rs b/src/platform/windows.rs
              let printer = get_reg_of_hkcr(&subkey, REG_NAME_INSTALL_PRINTER);
              printer.as_deref() == Some("1")
          }
-@@ -1527,7 +1528,7 @@
+@@ -1527,7 +1532,7 @@
      reg_value_printer: Option<String>,
  ) -> String {
      let app_name = crate::get_app_name();
@@ -38,7 +49,7 @@ diff --git a/src/platform/windows.rs b/src/platform/windows.rs
      let nested_exe = escape_nested_cmd_ampersands(exe);
  
      // reg delete HKEY_CURRENT_USER\Software\Classes for
-@@ -1727,20 +1728,20 @@
+@@ -1727,20 +1732,20 @@
  chcp 65001
  md \"{path}\"
  {copy_exe}
@@ -73,7 +84,7 @@ diff --git a/src/platform/windows.rs b/src/platform/windows.rs
  {mk_shortcut_commands}
  {uninstall_shortcut_commands}
  {tray_shortcuts}
-@@ -1787,7 +1788,7 @@
+@@ -1787,7 +1792,7 @@
  
  fn get_before_uninstall(kill_self: bool) -> String {
      let app_name = crate::get_app_name();
@@ -82,7 +93,7 @@ diff --git a/src/platform/windows.rs b/src/platform/windows.rs
      let filter = if kill_self {
          "".to_string()
      } else {
-@@ -1796,10 +1797,10 @@
+@@ -1796,10 +1801,10 @@
      format!(
          "
      chcp 65001
@@ -96,7 +107,7 @@ diff --git a/src/platform/windows.rs b/src/platform/windows.rs
      reg delete HKEY_CLASSES_ROOT\\.{ext} /f
      reg delete HKEY_CLASSES_ROOT\\{ext} /f
      netsh advfirewall firewall delete rule name=\"{app_name} Service\"
-@@ -1845,7 +1846,7 @@
+@@ -1845,7 +1850,7 @@
      {before_uninstall}
      {uninstall_printer_cmd}
      {uninstall_cert_cmd}
@@ -105,7 +116,7 @@ diff --git a/src/platform/windows.rs b/src/platform/windows.rs
      {uninstall_amyuni_idd}
      if exist \"{path}\" rd /s /q \"{path}\"
      if exist \"{start_menu}\" rd /s /q \"{start_menu}\"
-@@ -2123,7 +2124,7 @@
+@@ -2123,7 +2128,7 @@
          return Ok(());
      }
      let app_name = crate::get_app_name();
@@ -114,7 +125,7 @@ diff --git a/src/platform/windows.rs b/src/platform/windows.rs
      let cmds =
          format!("chcp 65001 && reg add HKEY_CLASSES_ROOT\\.{ext} /f /v {k} /t REG_SZ /d \"{v}\"");
      run_cmds(cmds, false, "update_install_option")?;
-@@ -3291,11 +3292,11 @@
+@@ -3291,11 +3296,11 @@
      let cmds = format!(
          "
      chcp 65001
@@ -129,7 +140,7 @@ diff --git a/src/platform/windows.rs b/src/platform/windows.rs
      ",
          app_name = crate::get_app_name(),
          broker_exe = WIN_TOPMOST_INJECTED_PROCESS_EXE,
-@@ -3330,7 +3331,7 @@
+@@ -3330,7 +3335,7 @@
      Ok(format!(
          "
  chcp 65001
@@ -138,7 +149,7 @@ diff --git a/src/platform/windows.rs b/src/platform/windows.rs
  {tray_shortcut_commands}
  copy /Y \"%RUSTDESK_OUTPUT_DIR%\\{app_name} Tray.lnk\" \"%PROGRAMDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\Startup\\\"
  {import_config}
-@@ -3485,13 +3486,13 @@
+@@ -3485,13 +3490,13 @@
          format!(
              "
  {reg_display_icon}
@@ -159,7 +170,7 @@ diff --git a/src/platform/windows.rs b/src/platform/windows.rs
          "
          )
      }
-@@ -3520,7 +3521,7 @@
+@@ -3520,7 +3525,7 @@
  
      let filter = format!(" /FI \"PID ne {}\"", get_current_pid());
      let restore_service_cmd = if is_service_running {
@@ -168,7 +179,7 @@ diff --git a/src/platform/windows.rs b/src/platform/windows.rs
      } else {
          "".to_owned()
      };
-@@ -3552,8 +3553,8 @@
+@@ -3552,8 +3557,8 @@
      let cmds = format!(
          "
  chcp 65001
@@ -179,7 +190,7 @@ diff --git a/src/platform/windows.rs b/src/platform/windows.rs
  {reg_cmd}
  {copy_exe}
  {rename_exe}
-@@ -3928,12 +3929,12 @@
+@@ -3928,12 +3933,12 @@
      let config_path = Config::file();
      let config_path = escape_nested_cmd_ampersands(config_path.to_str().unwrap_or(""));
      format!("
@@ -198,7 +209,7 @@ diff --git a/src/platform/windows.rs b/src/platform/windows.rs
  ",
      app_name = crate::get_app_name(),
  )
-@@ -3951,8 +3952,8 @@
+@@ -3951,8 +3956,8 @@
      } else {
          let exe = escape_nested_cmd_ampersands(exe);
          format!("
@@ -209,6 +220,16 @@ diff --git a/src/platform/windows.rs b/src/platform/windows.rs
  ",
      app_name = crate::get_app_name())
      }
+@@ -4849,6 +4854,9 @@
+     #[test]
+     fn install_app_names_enforce_ascii_command_safety() {
+         assert!(validate_install_app_name("RustDesk-Admin1").is_ok());
++        assert!(validate_install_app_name(hbb_common::config::PRODUCT_NAME).is_ok());
++        assert!(validate_install_app_name("SteadDesk Support ").is_err());
++        assert!(validate_install_app_name("SteadDesk Support&other").is_err());
+         for app_name in ["", "RustDesk_Admin", "RustDesk&whoami", "RustDesk应用"] {
+             assert!(
+                 validate_install_app_name(app_name).is_err(),
 diff --git a/src/common.rs b/src/common.rs
 --- a/src/common.rs
 +++ b/src/common.rs

@@ -686,8 +686,10 @@ jobs:
           if ($svc.State -eq 'Running') { break }
           Start-Sleep -Seconds 1
         } while ([datetime]::UtcNow -lt $deadline)
-        $installed = Join-Path $env:ProgramFiles 'SteadDesk Support/SteadDesk Support.exe'
-        if ($svc.State -ne 'Running' -or $svc.PathName -notlike "*${installed}*") { throw 'Support service path or state mismatch' }
+        $installed = Join-Path $env:ProgramFiles 'SteadDesk Support' 'SteadDesk Support.exe'
+        if (-not $svc) { throw "Support service was not registered. Installed EXE present: $(Test-Path -LiteralPath $installed)" }
+        if ($svc.State -ne 'Running') { throw "Support service state: $($svc.State), exit code: $($svc.ExitCode)" }
+        if ($svc.PathName -ine ('"' + $installed + '" --service')) { throw "Unexpected support service ImagePath: $($svc.PathName)" }
         if ((Get-Service -Name SteadDesk).Status -ne 'Running') { throw 'Merchant service was replaced' }
         if ((Get-Item $installed).VersionInfo.ProductName -cne 'SteadDesk Support') { throw 'Installed support identity mismatch' }
         if ((& $installed --option approve-mode | Out-String).Trim() -cne 'click') { throw 'Support approval is not click-only' }
