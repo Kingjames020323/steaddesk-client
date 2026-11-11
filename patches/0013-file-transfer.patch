@@ -1,0 +1,1102 @@
+U-04: Desktop file-transfer workspace, sortable columns and persistent split panes.
+
+diff --git a/flutter/lib/desktop/pages/file_manager_page.dart b/flutter/lib/desktop/pages/file_manager_page.dart
+index 17674c2..94893af 100644
+--- a/flutter/lib/desktop/pages/file_manager_page.dart
++++ b/flutter/lib/desktop/pages/file_manager_page.dart
+@@ -7,6 +7,7 @@ import 'package:flutter_hbb/common/widgets/dialog.dart';
+ import 'package:flutter_hbb/desktop/widgets/dragable_divider.dart';
+ import 'package:percent_indicator/percent_indicator.dart';
+ import 'package:desktop_drop/desktop_drop.dart';
++import 'package:path_provider_windows/path_provider_windows.dart' show PathProviderWindows;
+ import 'package:flutter/gestures.dart';
+ import 'package:flutter/material.dart';
+ import 'package:flutter/services.dart';
+@@ -27,6 +28,8 @@ import '../../models/model.dart';
+ import '../../models/platform_model.dart';
+ import '../widgets/popup_menu.dart';
+ 
++part '../../steaddesk/file_transfer.dart';
++
+ /// status of location bar
+ enum LocationStatus {
+   /// normal bread crumb bar
+@@ -164,20 +167,24 @@ class _FileManagerPageState extends State<FileManagerPage>
+       OverlayEntry(builder: (_) {
+         return willPopScope(Scaffold(
+           backgroundColor: Theme.of(context).scaffoldBackgroundColor,
+-          body: Row(
+-            children: [
+-              if (!isWeb)
+-                Flexible(
+-                    flex: 3,
+-                    child: dropArea(FileManagerView(
+-                        model.localController, _ffi, _mouseFocusScope))),
+-              Flexible(
+-                  flex: 3,
+-                  child: dropArea(FileManagerView(
+-                      model.remoteController, _ffi, _mouseFocusScope))),
+-              Flexible(flex: 2, child: statusList())
+-            ],
+-          ),
++          body: isWeb
++              ? Row(children: [
++                  Flexible(
++                      flex: 3,
++                      child: dropArea(FileManagerView(
++                          model.remoteController, _ffi, _mouseFocusScope))),
++                  Flexible(flex: 2, child: statusList()),
++                ])
++              : Theme(
++                  data: MyTheme.lightTheme,
++                  child: _TransferWorkspace(
++                    local: FileManagerView(
++                        model.localController, _ffi, _mouseFocusScope),
++                    remote: FileManagerView(
++                        model.remoteController, _ffi, _mouseFocusScope),
++                    jobs: jobController,
++                  ),
++                ),
+         ));
+       })
+     ]);
+@@ -460,7 +467,9 @@ class _FileManagerViewState extends State<FileManagerView> {
+     super.initState();
+     // register location listener
+     _locationNode.addListener(onLocationFocusChanged);
+-    controller.directory.listen((e) => breadCrumbScrollToEnd());
++    if (isWeb) {
++      controller.directory.listen((e) => breadCrumbScrollToEnd());
++    }
+   }
+ 
+   @override
+@@ -475,6 +484,16 @@ class _FileManagerViewState extends State<FileManagerView> {
+ 
+   @override
+   Widget build(BuildContext context) {
++    if (!isWeb) {
++      return _TransferPane(
++        controller: controller,
++        ffi: _ffi,
++        select: (entries, entry) =>
++            _onSelectedChanged(selectedItems, entries, entry, isLocal),
++        createFolder: _createFolder,
++        menu: menu(isLocal: isLocal),
++      );
++    }
+     _handleColumnPorportions();
+     return Container(
+       margin: const EdgeInsets.all(16.0),
+@@ -761,82 +780,7 @@ class _FileManagerViewState extends State<FileManagerView> {
+                     ),
+                     MenuButton(
+                       tooltip: translate('Create Folder'),
+-                      onPressed: () {
+-                        final name = TextEditingController();
+-                        String? errorText;
+-                        _ffi.dialogManager.show((setState, close, context) {
+-                          name.addListener(() {
+-                            if (errorText != null) {
+-                              setState(() {
+-                                errorText = null;
+-                              });
+-                            }
+-                          });
+-                          submit() {
+-                            if (name.value.text.isNotEmpty) {
+-                              if (!PathUtil.validName(name.value.text,
+-                                  controller.options.value.isWindows)) {
+-                                setState(() {
+-                                  errorText = translate("Invalid folder name");
+-                                });
+-                                return;
+-                              }
+-                              controller.createDir(PathUtil.join(
+-                                controller.directory.value.path,
+-                                name.value.text,
+-                                controller.options.value.isWindows,
+-                              ));
+-                              close();
+-                            }
+-                          }
+-
+-                          cancel() => close(false);
+-                          return CustomAlertDialog(
+-                            title: Row(
+-                              mainAxisAlignment: MainAxisAlignment.center,
+-                              children: [
+-                                SvgPicture.asset("assets/folder_new.svg",
+-                                    colorFilter: svgColor(MyTheme.accent)),
+-                                Text(
+-                                  translate("Create Folder"),
+-                                ).paddingOnly(
+-                                  left: 10,
+-                                ),
+-                              ],
+-                            ),
+-                            content: Column(
+-                              mainAxisSize: MainAxisSize.min,
+-                              children: [
+-                                TextFormField(
+-                                  decoration: InputDecoration(
+-                                    labelText: translate(
+-                                      "Please enter the folder name",
+-                                    ),
+-                                    errorText: errorText,
+-                                  ),
+-                                  controller: name,
+-                                  autofocus: true,
+-                                ).workaroundFreezeLinuxMint(),
+-                              ],
+-                            ),
+-                            actions: [
+-                              dialogButton(
+-                                "Cancel",
+-                                icon: Icon(Icons.close_rounded),
+-                                onPressed: cancel,
+-                                isOutline: true,
+-                              ),
+-                              dialogButton(
+-                                "Ok",
+-                                icon: Icon(Icons.done_rounded),
+-                                onPressed: submit,
+-                              ),
+-                            ],
+-                            onSubmit: submit,
+-                            onCancel: cancel,
+-                          );
+-                        });
+-                      },
++                      onPressed: _createFolder,
+                       child: SvgPicture.asset(
+                         "assets/folder_new.svg",
+                         colorFilter:
+@@ -1004,6 +948,83 @@ class _FileManagerViewState extends State<FileManagerView> {
+     );
+   }
+ 
++  void _createFolder() {
++    final name = TextEditingController();
++    String? errorText;
++    _ffi.dialogManager.show((setState, close, context) {
++      name.addListener(() {
++        if (errorText != null) {
++          setState(() {
++            errorText = null;
++          });
++        }
++      });
++      submit() {
++        if (name.value.text.isNotEmpty) {
++          if (!PathUtil.validName(name.value.text,
++              controller.options.value.isWindows)) {
++            setState(() {
++              errorText = translate("Invalid folder name");
++            });
++            return;
++          }
++          controller.createDir(PathUtil.join(
++            controller.directory.value.path,
++            name.value.text,
++            controller.options.value.isWindows,
++          ));
++          close();
++        }
++      }
++
++      cancel() => close(false);
++      return CustomAlertDialog(
++        title: Row(
++          mainAxisAlignment: MainAxisAlignment.center,
++          children: [
++            SvgPicture.asset("assets/folder_new.svg",
++                colorFilter: svgColor(MyTheme.accent)),
++            Text(
++              translate("Create Folder"),
++            ).paddingOnly(
++              left: 10,
++            ),
++          ],
++        ),
++        content: Column(
++          mainAxisSize: MainAxisSize.min,
++          children: [
++            TextFormField(
++              decoration: InputDecoration(
++                labelText: translate(
++                  "Please enter the folder name",
++                ),
++                errorText: errorText,
++              ),
++              controller: name,
++              autofocus: true,
++            ).workaroundFreezeLinuxMint(),
++          ],
++        ),
++        actions: [
++          dialogButton(
++            "Cancel",
++            icon: Icon(Icons.close_rounded),
++            onPressed: cancel,
++            isOutline: true,
++          ),
++          dialogButton(
++            "Ok",
++            icon: Icon(Icons.done_rounded),
++            onPressed: submit,
++          ),
++        ],
++        onSubmit: submit,
++        onCancel: cancel,
++      );
++    });
++  }
++
+   Widget menu({bool isLocal = false}) {
+     var menuPos = RelativeRect.fill;
+ 
+diff --git a/flutter/lib/steaddesk/file_transfer.dart b/flutter/lib/steaddesk/file_transfer.dart
+new file mode 100644
+index 0000000..ad8d438
+--- /dev/null
++++ b/flutter/lib/steaddesk/file_transfer.dart
+@@ -0,0 +1,838 @@
++part of '../desktop/pages/file_manager_page.dart';
++
++// TODO(U-01): reference the shared SteadDesk theme after its PR lands.
++const _ftBlue = Color(0xFF0A6FA8);
++const _ftSelection = Color(0xFFDFF2FA);
++const _ftInk = Color(0xFF17324A);
++const _ftMuted = Color(0xFF4B5563);
++const _ftLine = Color(0xFFE5E7EB);
++const _ftRowLine = Color(0xFFEEF0F2);
++const _ftHover = Color(0xFFF3F4F6);
++const _ftRowHeight = 27.0;
++
++// Prefer the upstream translation. These page-only labels are absent from its
++// catalog; follow the same saved language / platform locale when falling back.
++String _ftLabel(String english, String chinese) {
++  final translated = translate(english);
++  if (translated != english) return translated;
++  final saved = bind.mainGetLocalOption(key: 'lang');
++  final lang = (saved.isEmpty ? localeName.toString() : saved).toLowerCase();
++  return lang.startsWith('zh') ? chinese : english;
++}
++
++double _fraction(String key, double fallback) {
++  final value = double.tryParse(bind.mainGetLocalOption(key: key));
++  return value != null && value.isFinite && value > 0 && value < 1
++      ? value
++      : fallback;
++}
++
++Widget _splitter(Axis axis, ValueChanged<double> move, VoidCallback save) {
++  final vertical = axis == Axis.vertical;
++  return MouseRegion(
++    cursor: vertical
++        ? SystemMouseCursors.resizeLeftRight
++        : SystemMouseCursors.resizeUpDown,
++    child: GestureDetector(
++      behavior: HitTestBehavior.opaque,
++      onHorizontalDragUpdate: vertical ? (e) => move(e.delta.dx) : null,
++      onHorizontalDragEnd: vertical ? (_) => save() : null,
++      onVerticalDragUpdate: vertical ? null : (e) => move(e.delta.dy),
++      onVerticalDragEnd: vertical ? null : (_) => save(),
++      child: SizedBox(
++        width: vertical ? 7 : null,
++        height: vertical ? null : 7,
++        child: Center(
++            child: Container(
++                width: vertical ? 1 : null,
++                height: vertical ? null : 1,
++                color: _ftLine)),
++      ),
++    ),
++  );
++}
++
++class _TransferWorkspace extends StatefulWidget {
++  const _TransferWorkspace(
++      {required this.local, required this.remote, required this.jobs});
++  final Widget local, remote;
++  final JobController jobs;
++  @override
++  State<_TransferWorkspace> createState() => _TransferWorkspaceState();
++}
++
++class _TransferWorkspaceState extends State<_TransferWorkspace> {
++  static const splitKey = 'file-transfer-pane-share';
++  static const queueKey = 'file-transfer-queue-share';
++  static const collapsedKey = 'file-transfer-queue-collapsed';
++  late double split = _fraction(splitKey, .5);
++  late double queue = _fraction(queueKey, .14);
++  late final String initialPreference =
++      bind.mainGetLocalOption(key: collapsedKey);
++  late bool collapsed = initialPreference == 'Y' ||
++      (initialPreference.isEmpty && widget.jobs.jobTable.isEmpty);
++  late bool automatic = initialPreference.isEmpty;
++  late final Worker queueListener;
++
++  @override
++  void initState() {
++    super.initState();
++    queueListener = ever(widget.jobs.jobTable, (_) {
++      if (automatic && collapsed && widget.jobs.jobTable.isNotEmpty) {
++        setState(() => collapsed = false);
++      }
++    });
++  }
++
++  @override
++  void dispose() {
++    queueListener.dispose();
++    super.dispose();
++  }
++
++  @override
++  Widget build(BuildContext context) => Material(
++        color: Colors.white,
++        child: LayoutBuilder(builder: (context, box) {
++          final width = max(1.0, box.maxWidth - 7);
++          final minShare = min(.5, 250 / width);
++          final share = split.clamp(minShare, 1 - minShare).toDouble();
++          const bar = 32.0;
++          final available = max(0.0, box.maxHeight - bar - 7);
++          final maxQueue = max(0.0, available - 122);
++          final queueHeight = collapsed
++              ? 0.0
++              : (box.maxHeight * queue)
++                  .clamp(min(36.0, maxQueue), maxQueue)
++                  .toDouble();
++          final jobs = widget.jobs;
++          return Column(children: [
++            Expanded(
++                child: Row(
++                    crossAxisAlignment: CrossAxisAlignment.stretch,
++                    children: [
++                  SizedBox(width: width * share, child: widget.local),
++                  _splitter(
++                      Axis.vertical,
++                      (dx) => setState(() {
++                            split = (share + dx / width)
++                                .clamp(minShare, 1 - minShare)
++                                .toDouble();
++                          }),
++                      () => bind.mainSetLocalOption(
++                          key: splitKey, value: split.toString())),
++                  Expanded(child: widget.remote),
++                ])),
++            _splitter(
++                Axis.horizontal,
++                (dy) => setState(() {
++                      if (maxQueue < 1 || box.maxHeight < 1) return;
++                      automatic = false;
++                      final start = collapsed && dy < 0
++                          ? min(36.0, maxQueue)
++                          : queueHeight;
++                      final h = (start - dy).clamp(0.0, maxQueue);
++                      collapsed = h < 10;
++                      if (!collapsed) queue = h / box.maxHeight;
++                    }), () {
++              bind.mainSetLocalOption(key: queueKey, value: queue.toString());
++              bind.mainSetLocalOption(
++                  key: collapsedKey, value: collapsed ? 'Y' : 'N');
++            }),
++            SizedBox(
++                height: bar,
++                child: Row(children: [
++                  Obx(() => TextButton.icon(
++                        onPressed: () {
++                          automatic = false;
++                          setState(() => collapsed = !collapsed);
++                          bind.mainSetLocalOption(
++                              key: collapsedKey, value: collapsed ? 'Y' : 'N');
++                        },
++                        icon: Icon(
++                            collapsed ? Icons.expand_less : Icons.expand_more,
++                            size: 17),
++                        label: Text(
++                            '${_ftLabel("Transfer queue", "传输队列")}  ${jobs.jobTable.length}'),
++                        style: TextButton.styleFrom(foregroundColor: _ftBlue),
++                      )),
++                  const Spacer(),
++                  Obx(() => TextButton(
++                        onPressed: jobs.jobTable
++                                .any((j) => j.state == JobState.done)
++                            ? () => jobs.jobTable
++                                .removeWhere((j) => j.state == JobState.done)
++                            : null,
++                        child: Text(_ftLabel('Clear completed', '清除已完成')),
++                      )),
++                ])),
++            if (queueHeight > 0)
++              SizedBox(
++                  height: queueHeight,
++                  child: Obx(() {
++                    final list = jobs.jobTable.toList();
++                    if (list.isEmpty)
++                      return Center(
++                          child: Text(translate('No transfers in progress')));
++                    return ListView.builder(
++                        itemExtent: 32,
++                        itemCount: list.length,
++                        itemBuilder: (context, i) {
++                          final j = list[i];
++                          return Row(children: [
++                            Icon(
++                                j.type != JobType.transfer
++                                    ? Icons.delete_outline
++                                    : j.isRemoteToLocal
++                                        ? Icons.arrow_back
++                                        : Icons.arrow_forward,
++                                size: 16,
++                                color: _ftBlue),
++                            const SizedBox(width: 8),
++                            Expanded(
++                                child: Tooltip(
++                                    message: j.jobName,
++                                    child: Text(j.jobName,
++                                        maxLines: 1,
++                                        overflow: TextOverflow.ellipsis))),
++                            Expanded(
++                                child: Tooltip(
++                                    message: j.getStatus(),
++                                    child: Text(j.getStatus(),
++                                        maxLines: 1,
++                                        overflow: TextOverflow.ellipsis))),
++                            if (j.type == JobType.transfer &&
++                                j.state == JobState.inProgress)
++                              SizedBox(
++                                  width: 96,
++                                  child: Column(
++                                      mainAxisAlignment:
++                                          MainAxisAlignment.center,
++                                      children: [
++                                        Text(
++                                            j.recvJobRes
++                                                ? '${j.percentText} · ${readableFileSize(j.speed)}/s'
++                                                : j.percentText,
++                                            maxLines: 1,
++                                            overflow: TextOverflow.ellipsis,
++                                            style:
++                                                const TextStyle(fontSize: 11)),
++                                        LinearProgressIndicator(
++                                            value: j.percent
++                                                .clamp(0.0, 1.0)
++                                                .toDouble(),
++                                            color: const Color(0xFF1FA7E0),
++                                            backgroundColor: _ftSelection),
++                                      ])),
++                            if (j.state == JobState.paused)
++                              _tool(Icons.play_arrow, translate('Resume'),
++                                  () => jobs.resumeJob(j.id)),
++                            _tool(Icons.close, translate('Delete'), () {
++                              jobs.jobTable.remove(j);
++                              jobs.cancelJob(j.id);
++                            }),
++                          ]);
++                        });
++                  })),
++          ]);
++        }),
++      );
++}
++
++Widget _tool(IconData icon, String label, VoidCallback? action) => IconButton(
++      tooltip: label,
++      onPressed: action,
++      iconSize: 17,
++      color: _ftBlue,
++      constraints: const BoxConstraints.tightFor(width: 29, height: 28),
++      padding: EdgeInsets.zero,
++      icon: Icon(icon),
++    );
++
++class _TransferDrag {
++  const _TransferDrag(this.source, this.entries);
++  final FileController source;
++  final List<Entry> entries;
++}
++
++class _TransferPane extends StatefulWidget {
++  const _TransferPane(
++      {required this.controller,
++      required this.ffi,
++      required this.select,
++      required this.createFolder,
++      required this.menu});
++  final FileController controller;
++  final FFI ffi;
++  final void Function(List<Entry>, Entry) select;
++  final VoidCallback createFolder;
++  final Widget menu;
++  @override
++  State<_TransferPane> createState() => _TransferPaneState();
++}
++
++class _TransferPaneState extends State<_TransferPane> {
++  FileController get c => widget.controller;
++  final path = TextEditingController();
++  final pathFocus = FocusNode();
++  final listFocus = FocusNode();
++  final scroll = ScrollController();
++  final tableScroll = ScrollController();
++  final buffer = TimeoutStringBuffer();
++  late final Worker directoryListener;
++  String filter = '';
++  bool searching = false;
++  bool ascending = true;
++  SortBy sort = SortBy.name;
++  String get colsKey =>
++      'file-transfer-columns-${c.isLocal ? "local" : "remote"}';
++  late List<double> shares;
++  static const columns = [
++    SortBy.name,
++    SortBy.size,
++    SortBy.type,
++    SortBy.modified
++  ];
++
++  @override
++  void initState() {
++    super.initState();
++    final parsed = bind
++        .mainGetLocalOption(key: colsKey)
++        .split(',')
++        .map(double.tryParse)
++        .toList();
++    shares = parsed.length == 4 &&
++            parsed.every((n) => n != null && n.isFinite && n >= 0) &&
++            (parsed.fold<double>(0, (sum, n) => sum + n!) - 1).abs() < .001
++        ? parsed.cast<double>()
++        : [.37, .16, .16, .31];
++    path.text = c.directory.value.path;
++    directoryListener = ever<FileDirectory>(c.directory, (dir) {
++      if (!pathFocus.hasFocus) path.text = dir.path;
++    });
++    pathFocus.addListener(_syncPath);
++  }
++
++  void _syncPath() {
++    if (!pathFocus.hasFocus) path.text = c.directory.value.path;
++  }
++
++  @override
++  void dispose() {
++    directoryListener.dispose();
++    pathFocus.removeListener(_syncPath);
++    pathFocus.dispose();
++    path.dispose();
++    listFocus.dispose();
++    scroll.dispose();
++    tableScroll.dispose();
++    super.dispose();
++  }
++
++  Future<void> _open(String target) async {
++    final ok = await c.openDirectory(target);
++    if (!mounted) return;
++    if (!ok) {
++      ScaffoldMessenger.of(context).showSnackBar(
++          SnackBar(content: Text('${translate("Failed")}: $target')));
++    }
++    path.text = c.directory.value.path;
++  }
++
++  bool _transfer(FileController source, List<Entry> entries) {
++    final selection = SelectedItems(isLocal: source.isLocal);
++    for (final e in entries) {
++      selection.add(e);
++    }
++    if (!SelectedItems.valid(selection.items)) return false;
++    final destination = source.getOtherSideDirectoryData();
++    if (destination.directory.path.isEmpty) return false;
++    source.sendFiles(selection, destination);
++    return true;
++  }
++
++  String get transferLabel {
++    final label = translate(c.isLocal ? 'Send' : 'Receive');
++    return !c.isLocal && label == '接受' ? '接收' : label;
++  }
++
++  void _transferSelection() {
++    if (_transfer(c, c.selectedItems.items.toList())) c.selectedItems.clear();
++  }
++
++  Future<void> _dropExternal(DropDoneDetails drop) async {
++    if (c.isLocal) return;
++    final entries = <Entry>[];
++    try {
++      for (final f in drop.files) {
++        final stat = await FileStat.stat(f.path);
++        if (stat.type != FileSystemEntityType.directory &&
++            stat.type != FileSystemEntityType.file) continue;
++        entries.add(Entry()
++          ..path = f.path
++          ..name = f.name
++          ..entryType = stat.type == FileSystemEntityType.directory ? 1 : 4
++          ..size = stat.size);
++      }
++      if (mounted) _transfer(widget.ffi.fileModel.localController, entries);
++    } on FileSystemException catch (e) {
++      if (mounted)
++        ScaffoldMessenger.of(context)
++            .showSnackBar(SnackBar(content: Text(e.message)));
++    }
++  }
++
++  String _extension(Entry e) {
++    final dot = e.name.lastIndexOf('.');
++    return dot > 0 && dot + 1 < e.name.length
++        ? e.name.substring(dot + 1).toUpperCase()
++        : '';
++  }
++
++  String _kind(Entry e) {
++    if (e.isDrive) return translate('This PC');
++    if (!e.isFile) return translate('Directory');
++    final ext = _extension(e);
++    return ext.isEmpty ? _ftLabel('File', '文件') : ext;
++  }
++
++  (List<Entry>, String, SortBy, bool)? _viewKey;
++  List<Entry> _viewRows = const [];
++
++  List<Entry> _visible() {
++    final entries = c.directory.value.entries;
++    final needle = filter.toLowerCase();
++    // The controller replaces the entry list on directory reads and refresh.
++    final key = (entries, needle, sort, ascending);
++    if (key == _viewKey) return _viewRows;
++    final rows =
++        entries.where((e) => e.name.toLowerCase().contains(needle)).toList();
++    rows.sort((a, b) {
++      if (a.isFile != b.isFile) return a.isFile ? 1 : -1;
++      int result;
++      switch (sort) {
++        case SortBy.name:
++          result = 0;
++          break;
++        case SortBy.size:
++          result = a.size.compareTo(b.size);
++          break;
++        case SortBy.type:
++          result = a.isFile
++              ? _extension(a).compareTo(_extension(b))
++              : a.entryType.compareTo(b.entryType);
++          break;
++        case SortBy.modified:
++          result = a.modifiedTime.compareTo(b.modifiedTime);
++          break;
++      }
++      if (result == 0)
++        result = a.name.toLowerCase().compareTo(b.name.toLowerCase());
++      return ascending ? result : -result;
++    });
++    _viewKey = key;
++    return _viewRows = rows;
++  }
++
++  Future<void> _windowsPlace(String name) async {
++    // SHGetKnownFolderPath honors redirected folders on the operator's PC.
++    const ids = {
++      'Desktop': '{B4BFCC3A-DB2C-424C-B029-7FE99A87C641}',
++      'Downloads': '{374DE290-123F-4565-9164-39C4925E467B}',
++      'Documents': '{FDD39AD0-238F-46AF-ADB4-6C85480369C7}',
++    };
++    final known = c.isLocal && isWindows
++        ? await PathProviderWindows().getPath(ids[name]!)
++        : null;
++    if (mounted) await _open(known ?? PathUtil.join(c.homePath, name, true));
++  }
++
++  Widget _places() => Obx(() {
++        final dir = c.directory.value;
++        final home = c.homePath;
++        final windows = c.options.value.isWindows;
++        final android = !c.isLocal && widget.ffi.ffiModel.isPeerAndroid;
++        final places = <(IconData, String, VoidCallback?)>[];
++        if (windows) {
++          for (final (name, label, icon) in [
++            ('Desktop', '桌面', Icons.desktop_windows_outlined),
++            ('Downloads', '下载', Icons.download_outlined),
++            ('Documents', '文档', Icons.description_outlined),
++          ]) {
++            places.add((
++              icon,
++              _ftLabel(name, label),
++              home.isEmpty ? null : () => _windowsPlace(name)
++            ));
++          }
++        } else if (android) {
++          final scoped = home.contains('/Android/data/');
++          final root = scoped
++              ? home.split('/Android/data/').first
++              : (RegExp(r'^/storage/(?:emulated/\d+|[0-9a-fA-F]{4}-[0-9a-fA-F]{4})(?:/|$)')
++                      .firstMatch(home)
++                      ?.group(0)
++                      ?.replaceFirst(RegExp(r'/$'), '') ??
++                  '/sdcard');
++          for (final (name, label, path, icon) in [
++            ('Internal storage', '内部存储', root, Icons.storage),
++            ('Downloads', '下载', '$root/Download', Icons.download_outlined),
++            ('Pictures', '图片', '$root/Pictures', Icons.image_outlined),
++          ]) {
++            places.add((
++              icon,
++              _ftLabel(name, label),
++              dir.path.isEmpty ? null : () => _open(path)
++            ));
++          }
++          if (scoped)
++            places.add((
++              Icons.folder_outlined,
++              _ftLabel('App files', '应用文件'),
++              () => _open(home)
++            ));
++        }
++        if (places.isEmpty)
++          places.add(
++              (Icons.home_outlined, translate('Home'), c.goToHomeDirectory));
++        return ListView(children: [
++          for (final (icon, label, action) in places)
++            Tooltip(
++                message: label,
++                child: TextButton(
++                  onPressed: action,
++                  style: TextButton.styleFrom(
++                      alignment: Alignment.centerLeft,
++                      foregroundColor: _ftBlue,
++                      padding: const EdgeInsets.symmetric(horizontal: 5)),
++                  child: Row(children: [
++                    Icon(icon, size: 15),
++                    const SizedBox(width: 4),
++                    Expanded(
++                        child: Text(label,
++                            overflow: TextOverflow.ellipsis,
++                            maxLines: 1,
++                            style: const TextStyle(fontSize: 12)))
++                  ]),
++                )),
++        ]);
++      });
++
++  void _find(List<Entry> rows, String query, {bool next = false}) {
++    if (rows.isEmpty) return;
++    final selected = c.selectedItems.items;
++    final start =
++        next && selected.isNotEmpty ? rows.indexOf(selected.first) + 1 : 0;
++    for (int n = 0; n < rows.length; n++) {
++      final index = (start + n) % rows.length;
++      if (rows[index].name.toLowerCase().startsWith(query.toLowerCase())) {
++        c.selectedItems
++          ..clear()
++          ..add(rows[index]);
++        if (scroll.hasClients)
++          scroll.jumpTo((index * _ftRowHeight)
++              .clamp(0.0, scroll.position.maxScrollExtent)
++              .toDouble());
++        return;
++      }
++    }
++  }
++
++  List<Entry> _dragEntries(Entry e) => c.selectedItems.items.contains(e)
++      ? c.selectedItems.items.where((item) => !item.isDrive).toList()
++      : [e];
++
++  Future<void> _contextMenu(Entry e, Offset point) async {
++    final overlay = Overlay.of(context).context.findRenderObject() as RenderBox;
++    final pos = overlay.globalToLocal(point);
++    final entries = _dragEntries(e);
++    final allowRename =
++        !e.isDrive && versionCmp(widget.ffi.ffiModel.pi.version, '1.3.0') >= 0;
++    final action = await showMenu<String>(
++        context: context,
++        position:
++            RelativeRect.fromRect(pos & Size.zero, Offset.zero & overlay.size),
++        items: [
++          if (!e.isFile)
++            PopupMenuItem(value: 'open', child: Text(translate('Open'))),
++          if (!e.isDrive)
++            PopupMenuItem(value: 'transfer', child: Text(transferLabel)),
++          if (allowRename)
++            PopupMenuItem(value: 'rename', child: Text(translate('Rename'))),
++          if (!e.isDrive)
++            PopupMenuItem(value: 'delete', child: Text(translate('Delete'))),
++        ]);
++    if (!mounted) return;
++    switch (action) {
++      case 'open':
++        await _open(e.path);
++        break;
++      case 'rename':
++        await c.renameAction(e, c.isLocal);
++        break;
++      case 'transfer':
++        _transfer(c, entries);
++        break;
++      case 'delete':
++        final items = SelectedItems(isLocal: c.isLocal);
++        for (final entry in entries) {
++          items.add(entry);
++        }
++        await c.removeAction(items);
++        break;
++    }
++  }
++
++  Widget _fileRow(Entry e, List<Entry> rows, List<double> widths) {
++    final cells = [
++      e.name,
++      e.isFile ? readableFileSize(e.size.toDouble()) : '',
++      _kind(e),
++      e.isDrive ? '' : e.lastModified().toString().split('.').first
++    ];
++    return Obx(() {
++      final selected = c.selectedItems.items.contains(e);
++      final row = Material(
++        color: selected ? _ftSelection : Colors.white,
++        child: InkWell(
++          hoverColor: _ftHover,
++          onTap: () {
++            listFocus.requestFocus();
++            widget.select(rows, e);
++          },
++          onDoubleTap: e.isFile ? null : () => _open(e.path),
++          onSecondaryTapDown: (event) => _contextMenu(e, event.globalPosition),
++          child: Container(
++              decoration: const BoxDecoration(
++                  border: Border(bottom: BorderSide(color: _ftRowLine))),
++              child: Row(
++                children: [
++                  for (int i = 0; i < cells.length; i++)
++                    SizedBox(
++                        width: widths[i],
++                        child: Padding(
++                          padding: const EdgeInsets.symmetric(horizontal: 4),
++                          child: Row(children: [
++                            if (i == 0) ...[
++                              Icon(
++                                  e.isDrive
++                                      ? Icons.storage
++                                      : e.isFile
++                                          ? Icons.insert_drive_file_outlined
++                                          : Icons.folder_outlined,
++                                  size: 15,
++                                  color: _ftBlue),
++                              const SizedBox(width: 4)
++                            ],
++                            Expanded(
++                                child: Tooltip(
++                                    message: cells[i],
++                                    child: Text(cells[i],
++                                        maxLines: 1,
++                                        overflow: TextOverflow.ellipsis,
++                                        style: const TextStyle(
++                                            fontSize: 13, color: _ftInk)))),
++                          ]),
++                        )),
++                ],
++              )),
++        ),
++      );
++      if (e.isDrive) return row;
++      return Draggable<_TransferDrag>(
++        data: _TransferDrag(c, _dragEntries(e)),
++        feedback: Material(
++            elevation: 2,
++            child:
++                Padding(padding: const EdgeInsets.all(6), child: Text(e.name))),
++        child: row,
++      );
++    });
++  }
++
++  Widget _table() => LayoutBuilder(builder: (context, box) {
++        // Keep even a narrow pane navigable; both header and body share one scroll offset.
++        final width = max(350.0, box.maxWidth);
++        const minWidth = 52.0;
++        final extra = width - 4 * minWidth;
++        final widths = [for (final share in shares) minWidth + extra * share];
++        return Scrollbar(
++          controller: tableScroll,
++          scrollbarOrientation: ScrollbarOrientation.bottom,
++          notificationPredicate: (n) => n.metrics.axis == Axis.horizontal,
++          child: SingleChildScrollView(
++            controller: tableScroll,
++            scrollDirection: Axis.horizontal,
++            child: SizedBox(
++                width: width,
++                height: box.maxHeight,
++                child: Obx(() {
++                  final rows = _visible();
++                  return ListSearchActionListener(
++                    node: listFocus,
++                    buffer: buffer,
++                    onNext: (s) => _find(rows, s, next: true),
++                    onSearch: (s) => _find(rows, s),
++                    child: Column(children: [
++                      SizedBox(
++                          height: 28,
++                          child: Row(children: [
++                            for (int i = 0; i < columns.length; i++)
++                              SizedBox(
++                                  width: widths[i],
++                                  child: Row(children: [
++                                    Expanded(
++                                        child: InkWell(
++                                            onTap: () => setState(() {
++                                                  ascending = sort == columns[i]
++                                                      ? !ascending
++                                                      : true;
++                                                  sort = columns[i];
++                                                }),
++                                            child: Row(children: [
++                                              const SizedBox(width: 4),
++                                              Flexible(
++                                                  child: Text(
++                                                      translate(columns[i]
++                                                          .toString()),
++                                                      maxLines: 1,
++                                                      overflow:
++                                                          TextOverflow.ellipsis,
++                                                      style: const TextStyle(
++                                                          fontSize: 13,
++                                                          color: _ftMuted))),
++                                              if (sort == columns[i])
++                                                Icon(
++                                                    ascending
++                                                        ? Icons.arrow_drop_up
++                                                        : Icons.arrow_drop_down,
++                                                    size: 13,
++                                                    color: _ftBlue),
++                                            ]))),
++                                    if (i < 3)
++                                      _splitter(
++                                          Axis.vertical,
++                                          (dx) => setState(() {
++                                                final delta = (dx / extra)
++                                                    .clamp(-shares[i],
++                                                        shares[i + 1])
++                                                    .toDouble();
++                                                shares[i] += delta;
++                                                shares[i + 1] -= delta;
++                                              }),
++                                          () => bind.mainSetLocalOption(
++                                              key: colsKey,
++                                              value: shares.join(','))),
++                                  ])),
++                          ])),
++                      const Divider(height: 1, color: _ftLine),
++                      Expanded(
++                          child: ListView.builder(
++                              controller: scroll,
++                              itemExtent: _ftRowHeight,
++                              itemCount: rows.length,
++                              itemBuilder: (_, i) =>
++                                  _fileRow(rows[i], rows, widths))),
++                    ]),
++                  );
++                })),
++          ),
++        );
++      });
++
++  @override
++  Widget build(BuildContext context) {
++    return DragTarget<_TransferDrag>(
++      onWillAcceptWithDetails: (d) =>
++          !identical(d.data.source, c) &&
++          identical(d.data.source.jobController, c.jobController) &&
++          c.directory.value.path.isNotEmpty,
++      onAcceptWithDetails: (d) => _transfer(d.data.source, d.data.entries),
++      builder: (context, dragging, _) => DropTarget(
++        enable: !c.isLocal,
++        onDragDone: _dropExternal,
++        child: Container(
++            color: dragging.isEmpty ? Colors.white : _ftSelection,
++            padding: const EdgeInsets.symmetric(horizontal: 6),
++            child: Column(children: [
++              SizedBox(
++                  height: 32,
++                  child: Row(children: [
++                    Expanded(
++                        child: Text(
++                            translate(c.isLocal
++                                ? 'Local Computer'
++                                : 'Remote Computer'),
++                            maxLines: 1,
++                            overflow: TextOverflow.ellipsis,
++                            style: const TextStyle(
++                                fontWeight: FontWeight.w600, color: _ftInk))),
++                    Obx(() => TextButton.icon(
++                          onPressed:
++                              SelectedItems.valid(c.selectedItems.items) &&
++                                      c
++                                          .getOtherSideDirectoryData()
++                                          .directory
++                                          .path
++                                          .isNotEmpty
++                                  ? _transferSelection
++                                  : null,
++                          style: TextButton.styleFrom(foregroundColor: _ftBlue),
++                          icon: Icon(
++                              c.isLocal
++                                  ? Icons.arrow_forward
++                                  : Icons.arrow_back,
++                              size: 16),
++                          label: Text(transferLabel),
++                        )),
++                  ])),
++              Row(children: [
++                _tool(Icons.arrow_back, translate('Back'), c.goBack),
++                _tool(Icons.arrow_upward, translate('Parent directory'),
++                    c.goToParentDirectory),
++                Expanded(
++                    child: TextField(
++                        controller: path,
++                        focusNode: pathFocus,
++                        onEditingComplete: () {},
++                        onSubmitted: (value) {
++                          listFocus.requestFocus();
++                          _open(value);
++                        },
++                        maxLines: 1,
++                        style: const TextStyle(fontSize: 13),
++                        decoration: const InputDecoration(
++                            isDense: true,
++                            contentPadding: EdgeInsets.symmetric(
++                                horizontal: 5, vertical: 6),
++                            border: OutlineInputBorder()))),
++                _tool(Icons.refresh, translate('Refresh File'), c.refresh),
++                _tool(Icons.create_new_folder_outlined,
++                    translate('Create Folder'), widget.createFolder),
++                _tool(
++                    Icons.search,
++                    translate('Search'),
++                    () => setState(() {
++                          searching = !searching;
++                          filter = '';
++                        })),
++                widget.menu,
++              ]),
++              if (searching)
++                TextField(
++                    autofocus: true,
++                    onChanged: (s) => setState(() => filter = s),
++                    decoration: InputDecoration(
++                        isDense: true, hintText: translate('Search'))),
++              Expanded(
++                  child: Row(children: [
++                SizedBox(width: 78, child: _places()),
++                const VerticalDivider(width: 1, color: _ftLine),
++                Expanded(child: _table()),
++              ])),
++            ])),
++      ),
++    );
++  }
++}
