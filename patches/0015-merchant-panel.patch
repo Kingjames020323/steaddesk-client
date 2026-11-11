@@ -1,4 +1,4 @@
-Subject: Show device status and individual assistance sessions in the merchant panel
+Subject: Show merchant assistance panels, first-time password setup and Windows tray
 
 diff --git a/flutter/lib/desktop/pages/server_page.dart b/flutter/lib/desktop/pages/server_page.dart
 index eeb51b6..72cac57 100644
@@ -142,10 +142,10 @@ index 5f234cb..05a1888 100644
                    }
 diff --git a/flutter/lib/steaddesk/merchant_panel.dart b/flutter/lib/steaddesk/merchant_panel.dart
 new file mode 100644
-index 0000000..3c42659
+index 0000000..ccd8aba
 --- /dev/null
 +++ b/flutter/lib/steaddesk/merchant_panel.dart
-@@ -0,0 +1,359 @@
+@@ -0,0 +1,369 @@
 +import 'dart:async';
 +import 'package:device_info_plus/device_info_plus.dart';
 +import 'package:flutter/material.dart';
@@ -154,6 +154,7 @@ index 0000000..3c42659
 +
 +import '../common.dart';
 +import '../consts.dart';
++import '../desktop/pages/desktop_home_page.dart' show setPasswordDialog;
 +import '../models/platform_model.dart';
 +import '../models/server_model.dart';
 +import 'merchant_build.dart';
@@ -240,14 +241,18 @@ index 0000000..3c42659
 +      if (!mounted) return;
 +      setState(() => id = raw);
 +      if (merchantAndroid) {
-+        final has =
-+            await bind.mainGetCommon(key: 'local-permanent-password-set');
-+        if (!mounted) return;
-+        setState(() => configured = has == 'true'
-+            ? true
-+            : has == 'false'
-+                ? false
-+                : null);
++        if (configured != true) {
++          final has = await bind.mainGetCommon(key: 'permanent-password-set');
++          if (!mounted) return;
++          // A successful submission also completes setup while this read is pending.
++          if (configured != true) {
++            setState(() => configured = has == 'true'
++                ? true
++                : has == 'false'
++                    ? false
++                    : null);
++          }
++        }
 +        await gFFI.invokeMethod('check_service');
 +        if (configured == false) {
 +          final n = androidVersion < 33 ||
@@ -262,7 +267,7 @@ index 0000000..3c42659
 +        }
 +      }
 +    } catch (_) {
-+      if (mounted && merchantAndroid) {
++      if (mounted && merchantAndroid && configured != true) {
 +        setState(() => configured = null);
 +      }
 +    } finally {
@@ -324,7 +329,12 @@ index 0000000..3c42659
 +          battery,
 +          () => AndroidPermissionManager.request(
 +              kRequestIgnoreBatteryOptimizations)),
-+      permission('Permanent Password', configured, null),
++      TextButton(
++        onPressed: () => setPasswordDialog(notEmptyCallback: () {
++          if (mounted) setState(() => configured = true);
++        }),
++        child: Text(translate('Set permanent password')),
++      ),
 +    ]);
 +  }
 +
@@ -558,7 +568,7 @@ index 0000000..41bacfe
 +const merchantActiveTitle = 'SteadDesk · Remote assistance';
 +bool focusMerchantSession() => false;
 diff --git a/src/lang/cn.rs b/src/lang/cn.rs
-index a86d353..ad88e64 100644
+index a86d353..bd2f320 100644
 --- a/src/lang/cn.rs
 +++ b/src/lang/cn.rs
 @@ -3,6 +3,22 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
@@ -584,3 +594,51 @@ index a86d353..ad88e64 100644
          ("Your Desktop", "你的桌面"),
          ("desk_tip", "你的桌面可以通过下面的 ID 和密码访问。"),
          ("Password", "密码"),
+@@ -44,6 +60,7 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
+         ("allowed characters", "使用允许的字符"),
+         ("id_change_tip", "只可以使用字母 a-z, A-Z, 0-9, - (dash), _ (下划线)。首字母必须是 a-z, A-Z。长度在 6 与 16 之间。"),
+         ("Website", "网站"),
++        ("Show panel", "显示面板"),
+         ("About", "关于"),
+         ("Slogan_tip", "在这个混乱的世界中，用心制作！"),
+         ("Privacy Statement", "隐私声明"),
+diff --git a/src/tray.rs b/src/tray.rs
+index 50e2de0..8b01c52 100644
+--- a/src/tray.rs
++++ b/src/tray.rs
+@@ -64,18 +64,32 @@ fn make_tray() -> hbb_common::ResultType<()> {
+     let mut event_loop = EventLoopBuilder::new().build();
+ 
+     let tray_menu = Menu::new();
++    let merchant_panel = cfg!(windows) && !hbb_common::config::SUPPORT_EDITION;
+     let hide_stop_service = crate::ui_interface::get_builtin_option(
+         keys::OPTION_HIDE_STOP_SERVICE,
+     ) == "Y";
+     // The tray icon is only shown when the service is running, so we don't need to check
+     // the `stop-service` option here.
+-    let quit_i = if !hide_stop_service {
++    let quit_i = if !merchant_panel && !hide_stop_service {
+         Some(MenuItem::new(translate("Stop service".to_owned()), true, None))
+     } else {
+         None
+     };
+-    let open_i = MenuItem::new(translate("Open".to_owned()), true, None);
+-    if let Some(quit_i) = &quit_i {
++    let open_label = if merchant_panel { "Show panel" } else { "Open" };
++    let open_i = MenuItem::new(translate(open_label.to_owned()), true, None);
++    if merchant_panel {
++        use tray_icon::menu::{AboutMetadata, PredefinedMenuItem};
++
++        let about = PredefinedMenuItem::about(
++            Some(&translate("About".to_owned())),
++            Some(AboutMetadata {
++                name: Some(crate::get_app_name()),
++                version: Some(include_str!("../RELEASE_VERSION").trim().to_owned()),
++                ..Default::default()
++            }),
++        );
++        tray_menu.append_items(&[&open_i, &about])?;
++    } else if let Some(quit_i) = &quit_i {
+         tray_menu.append_items(&[&open_i, quit_i]).ok();
+     } else {
+         tray_menu.append_items(&[&open_i]).ok();
