@@ -1,0 +1,189 @@
+Subject: Lock merchant boot policy while preserving Android permission checks and capture consent
+
+diff --git a/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/BootReceiver.kt b/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/BootReceiver.kt
+--- a/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/BootReceiver.kt
++++ b/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/BootReceiver.kt
+@@ -9,7 +9,6 @@
+ import android.util.Log
+ import android.widget.Toast
+ import com.hjq.permissions.XXPermissions
+-import io.flutter.embedding.android.FlutterActivity
+ 
+ const val DEBUG_BOOT_COMPLETED = "com.carriez.flutter_hbb.DEBUG_BOOT_COMPLETED"
+ 
+@@ -20,12 +19,6 @@
+         Log.d(logTag, "onReceive ${intent.action}")
+ 
+         if (Intent.ACTION_BOOT_COMPLETED == intent.action || DEBUG_BOOT_COMPLETED == intent.action) {
+-            // check SharedPreferences config
+-            val prefs = context.getSharedPreferences(KEY_SHARED_PREFERENCES, FlutterActivity.MODE_PRIVATE)
+-            if (!prefs.getBoolean(KEY_START_ON_BOOT_OPT, false)) {
+-                Log.d(logTag, "KEY_START_ON_BOOT_OPT is false")
+-                return
+-            }
+             // check pre-permission
+             if (!XXPermissions.isGranted(context, REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, SYSTEM_ALERT_WINDOW)){
+                 Log.d(logTag, "REQUEST_IGNORE_BATTERY_OPTIMIZATIONS or SYSTEM_ALERT_WINDOW is not granted")
+diff --git a/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MainActivity.kt b/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MainActivity.kt
+--- a/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MainActivity.kt
++++ b/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MainActivity.kt
+@@ -368,21 +368,8 @@
+                     rdClipboardManager?.syncClipboard(true)
+                     result.success(true)
+                 }
+-                GET_START_ON_BOOT_OPT -> {
+-                    val prefs = getSharedPreferences(KEY_SHARED_PREFERENCES, MODE_PRIVATE)
+-                    result.success(prefs.getBoolean(KEY_START_ON_BOOT_OPT, false))
+-                }
+-                SET_START_ON_BOOT_OPT -> {
+-                    if (call.arguments is Boolean) {
+-                        val prefs = getSharedPreferences(KEY_SHARED_PREFERENCES, MODE_PRIVATE)
+-                        val edit = prefs.edit()
+-                        edit.putBoolean(KEY_START_ON_BOOT_OPT, call.arguments as Boolean)
+-                        edit.apply()
+-                        result.success(true)
+-                    } else {
+-                        result.success(false)
+-                    }
+-                }
++                GET_START_ON_BOOT_OPT -> result.success(true)
++                SET_START_ON_BOOT_OPT -> result.success(call.arguments == true)
+                 SYNC_APP_DIR_CONFIG_PATH -> {
+                     if (call.arguments is String) {
+                         val prefs = getSharedPreferences(KEY_SHARED_PREFERENCES, MODE_PRIVATE)
+diff --git a/flutter/lib/mobile/pages/settings_page.dart b/flutter/lib/mobile/pages/settings_page.dart
+--- a/flutter/lib/mobile/pages/settings_page.dart
++++ b/flutter/lib/mobile/pages/settings_page.dart
+@@ -30,7 +30,7 @@
+   final icon = Icon(Icons.settings);
+ 
+   @override
+-  final appBarActions = bind.isDisableSettings() ? [] : [ScanButton()];
++  final appBarActions = bind.isDisableSettings() || bind.isIncomingOnly() ? [] : [ScanButton()];
+ 
+   @override
+   State<SettingsPage> createState() => _SettingsState();
+@@ -70,7 +70,7 @@
+   final _hasIgnoreBattery =
+       false; //androidVersion >= 26; // remove because not work on every device
+   var _ignoreBatteryOpt = false;
+-  var _enableStartOnBoot = false;
++
+   var _checkUpdateOnStartup = false;
+   var _showTerminalExtraKeys = false;
+   var _floatingWindowDisabled = false;
+@@ -169,25 +169,6 @@
+         }
+       }
+ 
+-      if (await checkAndUpdateStartOnBoot()) {
+-        update = true;
+-      }
+-
+-      // start on boot depends on ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS and SYSTEM_ALERT_WINDOW
+-      var enableStartOnBoot =
+-          await gFFI.invokeMethod(AndroidChannel.kGetStartOnBootOpt);
+-      if (enableStartOnBoot) {
+-        if (!await canStartOnBoot()) {
+-          enableStartOnBoot = false;
+-          gFFI.invokeMethod(AndroidChannel.kSetStartOnBootOpt, false);
+-        }
+-      }
+-
+-      if (enableStartOnBoot != _enableStartOnBoot) {
+-        update = true;
+-        _enableStartOnBoot = enableStartOnBoot;
+-      }
+-
+       var checkUpdateOnStartup =
+           mainGetLocalBoolOptionSync(kOptionEnableCheckUpdate);
+       if (checkUpdateOnStartup != _checkUpdateOnStartup) {
+@@ -253,8 +234,7 @@
+     if (state == AppLifecycleState.resumed) {
+       () async {
+         final ibs = await checkAndUpdateIgnoreBatteryStatus();
+-        final sob = await checkAndUpdateStartOnBoot();
+-        if (ibs || sob) {
++        if (ibs) {
+           setState(() {});
+         }
+       }();
+@@ -272,17 +252,7 @@
+     }
+   }
+ 
+-  Future<bool> checkAndUpdateStartOnBoot() async {
+-    if (!await canStartOnBoot() && _enableStartOnBoot) {
+-      _enableStartOnBoot = false;
+-      debugPrint(
+-          "checkAndUpdateStartOnBoot and set _enableStartOnBoot -> false");
+-      gFFI.invokeMethod(AndroidChannel.kSetStartOnBootOpt, false);
+-      return true;
+-    } else {
+-      return false;
+-    }
+-  }
++
+ 
+   @override
+   Widget build(BuildContext context) {
+@@ -597,37 +567,10 @@
+               }));
+     }
+     enhancementsTiles.add(SettingsTile.switchTile(
+-        initialValue: _enableStartOnBoot,
+-        title: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+-          Text(translate('Start on boot')),
+-          Text(
+-              '* ${translate('Start the screen sharing service on boot, requires special permissions')}',
+-              style: Theme.of(context).textTheme.bodySmall),
+-        ]),
+-        onToggle: (toValue) async {
+-          if (toValue) {
+-            // 1. request kIgnoreBatteryOptimizations
+-            if (!await AndroidPermissionManager.check(
+-                kRequestIgnoreBatteryOptimizations)) {
+-              if (!await AndroidPermissionManager.request(
+-                  kRequestIgnoreBatteryOptimizations)) {
+-                return;
+-              }
+-            }
+-
+-            // 2. request kSystemAlertWindow
+-            if (!await AndroidPermissionManager.check(kSystemAlertWindow)) {
+-              if (!await AndroidPermissionManager.request(kSystemAlertWindow)) {
+-                return;
+-              }
+-            }
+-
+-            // (Optional) 3. request input permission
+-          }
+-          setState(() => _enableStartOnBoot = toValue);
+-
+-          gFFI.invokeMethod(AndroidChannel.kSetStartOnBootOpt, toValue);
+-        }));
++        initialValue: true,
++        title: Text(translate('Start on boot')),
++        description: Text(translate('Start the screen sharing service on boot, requires special permissions')),
++        onToggle: null));
+ 
+     if (!bind.isCustomClient()) {
+       enhancementsTiles.add(
+@@ -1073,17 +1016,6 @@
+     return settings;
+   }
+ 
+-  Future<bool> canStartOnBoot() async {
+-    // start on boot depends on ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS and SYSTEM_ALERT_WINDOW
+-    if (_hasIgnoreBattery && !_ignoreBatteryOpt) {
+-      return false;
+-    }
+-    if (!await AndroidPermissionManager.check(kSystemAlertWindow)) {
+-      return false;
+-    }
+-    return true;
+-  }
+-
+   defaultDisplaySection() {
+     return SettingsSection(
+       title: Text(translate("Display Settings")),

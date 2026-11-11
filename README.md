@@ -2,6 +2,12 @@
 
 SteadDesk is an AGPL-3.0 remote support client based on RustDesk 1.5.0 for Windows x64 and Android (arm64-v8a, armeabi-v7a and x86_64). Clone with `git clone --recurse-submodules` and run `bash scripts/apply-patches.sh` before building in `upstream/`. The script checks the pinned upstream revisions. [Source pins and patch notes](UPSTREAM.md)
 
+## Client editions
+
+`STEADDESK_EDITION=merchant bash scripts/apply-patches.sh` selects the incoming-only SteadDesk client (Windows or Android). Its remote sessions require a permanent password. `STEADDESK_EDITION=support bash scripts/apply-patches.sh` selects SteadDesk Support for Windows. The support client can initiate sessions. Its home screen has an **Allow incoming connections** switch, off by default. Each accepted inbound session requires a local click. Use separate build directories for the two Windows editions. In an extracted corresponding-source archive, run `bash scripts/configure-edition.sh upstream merchant` or `bash scripts/configure-edition.sh upstream support` before building.
+
+PR builds upload three packages with individual SHA256SUMS. Windows artifacts are named `SteadDesk-Windows-x64-merchant` and `SteadDesk-Windows-x64-support`. Android uses `SteadDesk-Android-universal`. The APK requires signing before installation. The existing offline release bundle contains the merchant packages.
+
 ## Release procedure
 
 1. Update `RELEASE_VERSION` by pull request. Start at `1.5.0-sd.1` and increase the final number for each release. The version appears in Windows file properties, About and Android's versionName. The installed Windows CLI continues to print `1.5.0` for `--version` so existing provisioning scripts can verify the upstream protocol. Review the PR build, including the offline Windows tests and the assembled release bundle.

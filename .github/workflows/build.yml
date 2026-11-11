@@ -445,7 +445,7 @@ jobs:
         popd
         mkdir -p dist
         version=$(cat .distribution/RELEASE_VERSION)
-        apk="dist/SteadDesk-$version-universal.unsigned.apk"
+        apk="dist/SteadDesk-$version-universal.apk"
         cp flutter/build/app/outputs/flutter-apk/app-release.apk "$apk"
         build_tools=$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -1)
         "$build_tools/aapt" dump badging "$apk" > "$RUNNER_TEMP/badging"
@@ -473,13 +473,16 @@ jobs:
         path: dist
         if-no-files-found: error
   windows:
-    name: "${{ matrix.job.target }}"
+    name: Windows x64 ${{ matrix.edition }}
+    env:
+      STEADDESK_EDITION: ${{ matrix.edition }}
     needs:
     - bridge
     runs-on: "${{ matrix.job.os }}"
     strategy:
       fail-fast: false
       matrix:
+        edition: [merchant, support]
         job:
         - target: x86_64-pc-windows-msvc
           os: windows-2022
@@ -602,22 +605,29 @@ jobs:
       shell: bash
       run: |
         sed -i '/dpiAware/d' res/manifest.xml
-        mv rustdesk/rustdesk.exe rustdesk/SteadDesk.exe
+        product=SteadDesk
+        if [[ "$STEADDESK_EDITION" == support ]]; then product="SteadDesk Support"; fi
+        mv rustdesk/rustdesk.exe "rustdesk/$product.exe"
         pushd ./libs/portable
         pip3 install -r requirements.txt
-        python3 ./generate.py -f ../../rustdesk/ -o . -e ../../rustdesk/SteadDesk.exe
+        python3 ./generate.py -f ../../rustdesk/ -o . -e "../../rustdesk/$product.exe"
         popd
         mkdir -p dist
         version=$(cat .distribution/RELEASE_VERSION)
-        mv target/release/rustdesk-portable-packer.exe "dist/SteadDesk-$version-x64.unsigned.exe"
+        mv target/release/rustdesk-portable-packer.exe "dist/${product// /}-$version-x64.exe"
         cd dist && sha256sum *.exe > SHA256SUMS
     - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
       with:
-        name: SteadDesk-Windows-x64
+        name: SteadDesk-Windows-x64-${{ matrix.edition }}
         path: dist
         if-no-files-found: error
   windows-smoke:
-    name: Offline Windows UI
+    name: Offline Windows UI ${{ matrix.edition }}
+    strategy:
+      matrix:
+        edition: [merchant, support]
+    env:
+      STEADDESK_EDITION: ${{ matrix.edition }}
     needs: windows
     runs-on: windows-2022
     steps:
@@ -626,7 +636,7 @@ jobs:
         persist-credentials: false
     - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
       with:
-        name: SteadDesk-Windows-x64
+        name: SteadDesk-Windows-x64-${{ matrix.edition }}
         path: package
     - name: Prepare UI automation
       run: python -m pip install pywinauto==0.6.9 Pillow==11.3.0
@@ -637,7 +647,7 @@ jobs:
         python scripts/windows-smoke.py $package screenshots
     - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
       with:
-        name: Windows-UI-evidence
+        name: Windows-UI-evidence-${{ matrix.edition }}
         path: screenshots/*.png
         if-no-files-found: error
 
@@ -651,13 +661,39 @@ jobs:
         persist-credentials: false
     - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
       with:
-        name: SteadDesk-Windows-x64
+        name: SteadDesk-Windows-x64-merchant
         path: package
     - name: Verify installed service and password command line
       shell: pwsh
       run: |
         . ./scripts/windows-isolate.ps1
         & ./scripts/windows-password-smoke.ps1 -Package $package
+
+    - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      with:
+        name: SteadDesk-Windows-x64-support
+        path: support-package
+    - name: Verify the support installation alongside the merchant service
+      shell: pwsh
+      env:
+        STEADDESK_EDITION: support
+      run: |
+        . ./scripts/windows-isolate.ps1 -PackageDir support-package
+        $null = Start-Process -PassThru -FilePath $package -ArgumentList '--silent-install'
+        $deadline = [datetime]::UtcNow.AddMinutes(2)
+        do {
+          $svc = Get-CimInstance Win32_Service -Filter "Name='SteadDesk Support'"
+          if ($svc.State -eq 'Running') { break }
+          Start-Sleep -Seconds 1
+        } while ([datetime]::UtcNow -lt $deadline)
+        $installed = Join-Path $env:ProgramFiles 'SteadDesk Support' 'SteadDesk Support.exe'
+        if (-not $svc) { throw "Support service was not registered. Installed EXE present: $(Test-Path -LiteralPath $installed)" }
+        if ($svc.State -ne 'Running') { throw "Support service state: $($svc.State), exit code: $($svc.ExitCode)" }
+        if ($svc.PathName -ine ('"' + $installed + '" --service')) { throw "Unexpected support service ImagePath: $($svc.PathName)" }
+        if ((Get-Service -Name SteadDesk).Status -ne 'Running') { throw 'Merchant service was replaced' }
+        if ((Get-Item $installed).VersionInfo.ProductName -cne 'SteadDesk Support') { throw 'Installed support identity mismatch' }
+        if ((& $installed --option approve-mode | Out-String).Trim() -cne 'click') { throw 'Support approval is not click-only' }
+        if ((& $installed --option allow-support-incoming | Out-String).Trim() -ceq 'Y') { throw 'Support unexpectedly allows incoming requests' }
 
   source:
     name: Corresponding source
@@ -696,11 +732,16 @@ jobs:
       shell: bash
       run: |
         version=$(cat RELEASE_VERSION)
-        (cd artifacts/SteadDesk-Windows-x64 && sha256sum --strict -c SHA256SUMS)
+        (cd artifacts/SteadDesk-Windows-x64-merchant && sha256sum --strict -c SHA256SUMS)
         (cd artifacts/SteadDesk-Android-universal && sha256sum --strict -c SHA256SUMS)
+        (cd artifacts/SteadDesk-Windows-x64-support && sha256sum --strict -c SHA256SUMS)
+        for dir in artifacts/SteadDesk-Windows-x64-{merchant,support} artifacts/SteadDesk-Android-universal; do
+          cat "$dir/SHA256SUMS" >> "$GITHUB_STEP_SUMMARY"
+          echo >> "$GITHUB_STEP_SUMMARY"
+        done
         mkdir dist
-        cp "artifacts/SteadDesk-Windows-x64/SteadDesk-$version-x64.unsigned.exe" dist/
-        cp "artifacts/SteadDesk-Android-universal/SteadDesk-$version-universal.unsigned.apk" dist/
+        cp "artifacts/SteadDesk-Windows-x64-merchant/SteadDesk-$version-x64.exe" "dist/SteadDesk-$version-x64.unsigned.exe"
+        cp "artifacts/SteadDesk-Android-universal/SteadDesk-$version-universal.apk" "dist/SteadDesk-$version-universal.unsigned.apk"
         cp "artifacts/SteadDesk-source/SteadDesk-$version-source.tar.gz" dist/
         (cd dist && sha256sum SteadDesk-* > SHA256SUMS && sha256sum --strict -c SHA256SUMS)
         echo "version=$version" >> "$GITHUB_OUTPUT"

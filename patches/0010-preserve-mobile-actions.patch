@@ -1,0 +1,14 @@
+Subject: Keep Android navigation visible by default and preserve the explicit toolbar choice
+
+diff --git a/flutter/lib/desktop/pages/remote_page.dart b/flutter/lib/desktop/pages/remote_page.dart
+--- a/flutter/lib/desktop/pages/remote_page.dart
++++ b/flutter/lib/desktop/pages/remote_page.dart
+@@ -667,7 +667,7 @@
+       _ffi.inputModel.enterOrLeave(false);
+     }
+     DesktopMultiWindow.removeListener(this);
+-    _ffi.dialogManager.hideMobileActionsOverlay();
++    _ffi.dialogManager.hideMobileActionsOverlay(store: false);
+     _ffi.imageModel.disposeImage();
+     _ffi.cursorModel.disposeImages();
+     _rawKeyFocusNode.dispose();

@@ -1,0 +1,119 @@
+Subject: Lock edition-specific host authentication and settings
+
+diff --git a/libs/hbb_common/src/config.rs b/libs/hbb_common/src/config.rs
+--- a/libs/hbb_common/src/config.rs
++++ b/libs/hbb_common/src/config.rs
+@@ -64,6 +64,11 @@
+     pub static ref ORG: RwLock<String> = RwLock::new("com.carriez".to_owned());
+ }
+ 
++pub const SUPPORT_EDITION: bool = include!("steaddesk_support.rs");
++#[cfg(target_os = "android")]
++const _: () = assert!(!SUPPORT_EDITION, "Android only supports the merchant edition");
++pub const PRODUCT_NAME: &str = if SUPPORT_EDITION { "SteadDesk Support" } else { "SteadDesk" };
++
+ type Size = (i32, i32, i32, i32);
+ type KeyPair = (Vec<u8>, Vec<u8>);
+ 
+@@ -76,7 +81,7 @@
+     static ref ONLINE: Mutex<HashMap<String, i64>> = Default::default();
+     pub static ref PROD_RENDEZVOUS_SERVER: RwLock<String> = RwLock::new("".to_owned());
+     pub static ref EXE_RENDEZVOUS_SERVER: RwLock<String> = Default::default();
+-    pub static ref APP_NAME: RwLock<String> = RwLock::new("SteadDesk".to_owned());
++    pub static ref APP_NAME: RwLock<String> = RwLock::new(PRODUCT_NAME.to_owned());
+     static ref KEY_PAIR: Mutex<Option<KeyPair>> = Default::default();
+     static ref USER_DEFAULT_CONFIG: RwLock<(UserDefaultConfig, Instant)> = RwLock::new((UserDefaultConfig::load(), Instant::now()));
+     pub static ref NEW_STORED_PEER_CONFIG: Mutex<HashSet<String>> = Default::default();
+@@ -87,15 +92,31 @@
+             ("relay-server", RENDEZVOUS_SERVERS[0]),
+             ("api-server", "https://api.steaddesk.com"),
+             ("key", RS_PUB_KEY),
++            ("verification-method", "use-permanent-password"),
++            ("approve-mode", if SUPPORT_EDITION { "click" } else { "password" }),
+         ].iter().copied().chain(DISABLED_NETWORK_OPTIONS.iter().map(|&key| (key, "N")))
+          .map(|(k, v)| (k.to_owned(), v.to_owned())).collect()
+     );
+     pub static ref DEFAULT_DISPLAY_SETTINGS: RwLock<HashMap<String, String>> = Default::default();
+     pub static ref OVERWRITE_DISPLAY_SETTINGS: RwLock<HashMap<String, String>> = Default::default();
+     pub static ref DEFAULT_LOCAL_SETTINGS: RwLock<HashMap<String, String>> = Default::default();
+-    pub static ref OVERWRITE_LOCAL_SETTINGS: RwLock<HashMap<String, String>> = Default::default();
+-    pub static ref HARD_SETTINGS: RwLock<HashMap<String, String>> = Default::default();
+-    pub static ref BUILTIN_SETTINGS: RwLock<HashMap<String, String>> = Default::default();
++    pub static ref OVERWRITE_LOCAL_SETTINGS: RwLock<HashMap<String, String>> = RwLock::new(if cfg!(target_os = "android") {
++        HashMap::from([("disable-floating-window".into(), "Y".into())])
++    } else {
++        HashMap::new()
++    });
++    pub static ref HARD_SETTINGS: RwLock<HashMap<String, String>> = RwLock::new(if SUPPORT_EDITION {
++        HashMap::new()
++    } else {
++        HashMap::from([("conn-type".into(), "incoming".into())])
++    });
++    pub static ref BUILTIN_SETTINGS: RwLock<HashMap<String, String>> = RwLock::new(if SUPPORT_EDITION {
++        HashMap::from([("disable-change-permanent-password".into(), "Y".into())])
++    } else if cfg!(target_os = "android") {
++        HashMap::from([("hide-stop-service".into(), "Y".into())])
++    } else {
++        HashMap::new()
++    });
+ }
+ 
+ #[cfg(target_os = "android")]
+diff --git a/libs/hbb_common/src/password_security.rs b/libs/hbb_common/src/password_security.rs
+--- a/libs/hbb_common/src/password_security.rs
++++ b/libs/hbb_common/src/password_security.rs
+@@ -21,6 +21,7 @@
+ }
+ 
+ fn get_auto_password() -> String {
++    if crate::config::SUPPORT_EDITION { return String::new(); }
+     let len = temporary_password_length();
+     if Config::get_bool_option(crate::config::keys::OPTION_ALLOW_NUMERNIC_ONE_TIME_PASSWORD) {
+         Config::get_auto_numeric_password(len)
+diff --git a/src/server/connection.rs b/src/server/connection.rs
+--- a/src/server/connection.rs
++++ b/src/server/connection.rs
+@@ -529,6 +529,9 @@
+         meta: super::ConnectionMeta,
+         unauthorized: UnauthorizedID,
+     ) {
++        if hbb_common::config::SUPPORT_EDITION && Config::get_option("allow-support-incoming") != "Y" {
++            return;
++        }
+         let super::ConnectionMeta {
+             control_permissions,
+             controlled_context,
+@@ -1841,6 +1844,14 @@
+     // Returns whether this connection should be kept alive.
+     // `true` does not necessarily mean authorization succeeded (e.g. REQUIRE_2FA case).
+     async fn send_logon_response_and_keep_alive(&mut self) -> bool {
++        if hbb_common::config::SUPPORT_EDITION {
++            if Config::get_option("allow-support-incoming") != "Y"
++                || self.conn_audit_primary_auth != ConnAuditPrimaryAuth::Click {
++                return false;
++            }
++        } else if !matches!(self.conn_audit_primary_auth, ConnAuditPrimaryAuth::PermanentPassword) {
++            return false;
++        }
+         if self.authorized {
+             return true;
+         }
+@@ -2866,6 +2877,9 @@
+         }
+         // After handling CloseReason messages, proceed to process other message types
+         if let Some(message::Union::LoginRequest(lr)) = msg.union {
++            if hbb_common::config::SUPPORT_EDITION && Config::get_option("allow-support-incoming") != "Y" {
++                return false;
++            }
+             if !self.check_login_scope(&lr).await {
+                 return false;
+             }
+@@ -3015,7 +3029,7 @@
+                         .await;
+                 }
+                 return true;
+-            } else if self.is_recent_session(false) {
++            } else if self.is_recent_session(false) && self.conn_audit_primary_auth == ConnAuditPrimaryAuth::PermanentPassword {
+                 if !self.send_logon_response_and_keep_alive().await {
+                     return false;
+                 }
