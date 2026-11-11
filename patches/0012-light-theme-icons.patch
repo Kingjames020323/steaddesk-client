@@ -1,16 +1,5 @@
-SteadDesk light theme, palette, logo and Android adaptive icon background.
+SteadDesk light theme, palette and logo.
 
-diff --git a/flutter/android/app/src/main/res/values/ic_launcher_background.xml b/flutter/android/app/src/main/res/values/ic_launcher_background.xml
-index ab98328..7f8a973 100644
---- a/flutter/android/app/src/main/res/values/ic_launcher_background.xml
-+++ b/flutter/android/app/src/main/res/values/ic_launcher_background.xml
-@@ -1,4 +1,4 @@
- <?xml version="1.0" encoding="utf-8"?>
- <resources>
--    <color name="ic_launcher_background">#ffffff</color>
-+    <color name="ic_launcher_background">#10243A</color>
- </resources>
-\ No newline at end of file
 diff --git a/flutter/lib/common.dart b/flutter/lib/common.dart
 index 3a82e28..80cad07 100644
 --- a/flutter/lib/common.dart

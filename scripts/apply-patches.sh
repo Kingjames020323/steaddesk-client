@@ -49,6 +49,7 @@ install -m 644 "$queue/branding/png/16.png" flutter/assets/icon.png
 install -m 644 "$queue/branding/tray.ico" res/tray-icon.ico
 install -m 644 "$queue/branding/png/256.png" flutter/assets/logo.png
 install -m 644 "$queue/branding/steaddesk-icon.svg" flutter/assets/icon.svg
+install -m 644 "$queue/branding/ic_launcher_background.xml" flutter/android/app/src/main/res/values/ic_launcher_background.xml
 for spec in mdpi:48:108 hdpi:72:162 xhdpi:96:216 xxhdpi:144:324 xxxhdpi:192:432; do
   IFS=: read -r density size adaptive <<< "$spec"
   dest="flutter/android/app/src/main/res/mipmap-$density"
