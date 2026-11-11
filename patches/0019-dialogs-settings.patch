@@ -1,18 +1,19 @@
 Subject: [SteadDesk] Apply the light theme to dialogs and settings
 
 diff --git a/flutter/lib/common/widgets/address_book.dart b/flutter/lib/common/widgets/address_book.dart
-index 054a166..b16460c 100644
+index 054a166..ea46e00 100644
 --- a/flutter/lib/common/widgets/address_book.dart
 +++ b/flutter/lib/common/widgets/address_book.dart
-@@ -4,6 +4,7 @@ import 'package:bot_toast/bot_toast.dart';
+@@ -4,6 +4,8 @@ import 'package:bot_toast/bot_toast.dart';
  import 'package:dropdown_button2/dropdown_button2.dart';
  import 'package:dynamic_layouts/dynamic_layouts.dart';
  import 'package:flutter/material.dart';
++import 'package:flutter_hbb/steaddesk/theme.dart';
 +import 'package:flutter_hbb/steaddesk/dialogs.dart';
  import 'package:flutter_hbb/common/formatter/id_formatter.dart';
  import 'package:flutter_hbb/common/hbbs/hbbs.dart';
  import 'package:flutter_hbb/common/widgets/peer_card.dart';
-@@ -532,7 +533,7 @@ class _AddressBookState extends State<AddressBook> {
+@@ -532,7 +534,7 @@ class _AddressBookState extends State<AddressBook> {
          return Obx(() => makeChild(stateGlobal.isPortrait.isTrue));
        }
  
@@ -21,7 +22,7 @@ index 054a166..b16460c 100644
          title: Text(translate("Add ID")),
          content: Column(
            crossAxisAlignment: CrossAxisAlignment.start,
-@@ -668,8 +669,8 @@ class _AddressBookState extends State<AddressBook> {
+@@ -668,8 +670,8 @@ class _AddressBookState extends State<AddressBook> {
            ],
          ),
          actions: [
@@ -32,8 +33,33 @@ index 054a166..b16460c 100644
          ],
          onSubmit: submit,
          onCancel: close,
+@@ -867,7 +869,7 @@ class AddressBookTag extends StatelessWidget {
+       getEntry(translate("Delete"), () {
+         gFFI.abModel.deleteTag(name);
+         Future.delayed(Duration.zero, () => Get.back());
+-      }),
++      }, destructive: true),
+     ];
+ 
+     mod_menu.showMenu(
+@@ -887,11 +889,13 @@ class AddressBookTag extends StatelessWidget {
+   }
+ }
+ 
+-MenuEntryButton<String> getEntry(String title, VoidCallback proc) {
++MenuEntryButton<String> getEntry(String title, VoidCallback proc,
++    {bool destructive = false}) {
+   return MenuEntryButton<String>(
++    buttonStyle: destructive ? SteadDeskTheme.dangerButton : null,
+     childBuilder: (TextStyle? style) => Text(
+       title,
+-      style: style,
++      style: destructive ? null : style,
+     ),
+     proc: proc,
+     dismissOnClicked: true,
 diff --git a/flutter/lib/common/widgets/dialog.dart b/flutter/lib/common/widgets/dialog.dart
-index 98d7f6b..d256279 100644
+index 98d7f6b..3fa51d2 100644
 --- a/flutter/lib/common/widgets/dialog.dart
 +++ b/flutter/lib/common/widgets/dialog.dart
 @@ -3,6 +3,7 @@ import 'dart:convert';
@@ -95,7 +121,36 @@ index 98d7f6b..d256279 100644
            onPressed: submit,
          ),
        ],
-@@ -2065,7 +2064,7 @@ void editAbTagDialog(
+@@ -2005,7 +2004,8 @@ void trackpadSpeedDialog(SessionID sessionId, FFI ffi) {
+   });
+ }
+ 
+-void deleteConfirmDialog(Function onSubmit, String title) async {
++void deleteConfirmDialog(Function onSubmit, String title,
++    {bool addressBook = false}) async {
+   gFFI.dialogManager.show(
+     (setState, close, context) {
+       submit() async {
+@@ -2013,6 +2013,18 @@ void deleteConfirmDialog(Function onSubmit, String title) async {
+         close();
+       }
+ 
++      if (addressBook) {
++        return SteadDialog(
++          title: Text(title),
++          content: const SizedBox.shrink(),
++          actions: [
++            dialogAction('Cancel', onPressed: close, primary: false),
++            dangerAction('Delete', onPressed: submit),
++          ],
++          onSubmit: submit,
++          onCancel: close,
++        );
++      }
+       return CustomAlertDialog(
+         title: Row(
+           mainAxisAlignment: MainAxisAlignment.center,
+@@ -2065,7 +2077,7 @@ void editAbTagDialog(
        close();
      }
  
@@ -104,7 +159,7 @@ index 98d7f6b..d256279 100644
        title: Text(translate("Edit Tag")),
        content: Column(
          crossAxisAlignment: CrossAxisAlignment.start,
-@@ -2093,8 +2092,8 @@ void editAbTagDialog(
+@@ -2093,8 +2105,8 @@ void editAbTagDialog(
          ],
        ),
        actions: [
@@ -115,7 +170,7 @@ index 98d7f6b..d256279 100644
        ],
        onSubmit: submit,
        onCancel: close,
-@@ -2116,7 +2115,7 @@ void editAbPeerNoteDialog(String id) {
+@@ -2116,7 +2128,7 @@ void editAbPeerNoteDialog(String id) {
        close();
      }
  
@@ -124,7 +179,7 @@ index 98d7f6b..d256279 100644
        title: Text(translate("Edit note")),
        content: Column(
          crossAxisAlignment: CrossAxisAlignment.start,
-@@ -2136,8 +2135,8 @@ void editAbPeerNoteDialog(String id) {
+@@ -2136,8 +2148,8 @@ void editAbPeerNoteDialog(String id) {
          ],
        ),
        actions: [
@@ -135,7 +190,7 @@ index 98d7f6b..d256279 100644
        ],
        onSubmit: submit,
        onCancel: close,
-@@ -2170,7 +2169,7 @@ void renameDialog(
+@@ -2170,7 +2182,7 @@ void renameDialog(
        close();
      }
  
@@ -144,7 +199,7 @@ index 98d7f6b..d256279 100644
        title: Row(
          mainAxisAlignment: MainAxisAlignment.center,
          children: [
-@@ -2198,15 +2197,13 @@ void renameDialog(
+@@ -2198,15 +2210,13 @@ void renameDialog(
          ],
        ),
        actions: [
@@ -163,7 +218,7 @@ index 98d7f6b..d256279 100644
            onPressed: submit,
          ),
        ],
-@@ -2521,7 +2518,7 @@ void addPeersToAbDialog(
+@@ -2521,7 +2531,7 @@ void addPeersToAbDialog(
        close();
      }
  
@@ -172,7 +227,7 @@ index 98d7f6b..d256279 100644
        title: Row(
          mainAxisAlignment: MainAxisAlignment.center,
          children: [
-@@ -2554,15 +2551,13 @@ void addPeersToAbDialog(
+@@ -2554,15 +2564,13 @@ void addPeersToAbDialog(
              ],
            )),
        actions: [
@@ -191,7 +246,7 @@ index 98d7f6b..d256279 100644
            onPressed: submit,
          ),
        ],
-@@ -2596,7 +2591,7 @@ void setSharedAbPasswordDialog(String abName, Peer peer) {
+@@ -2596,7 +2604,7 @@ void setSharedAbPasswordDialog(String abName, Peer peer) {
        close();
      }
  
@@ -200,7 +255,7 @@ index 98d7f6b..d256279 100644
        title: Row(
          mainAxisAlignment: MainAxisAlignment.center,
          children: [
-@@ -2637,23 +2632,19 @@ void setSharedAbPasswordDialog(String abName, Peer peer) {
+@@ -2637,23 +2645,18 @@ void setSharedAbPasswordDialog(String abName, Peer peer) {
              isInProgress.value ? const LinearProgressIndicator() : Offstage()
            ])),
        actions: [
@@ -214,13 +269,12 @@ index 98d7f6b..d256279 100644
          ),
          if (peer.password.isNotEmpty)
 -          dialogButton(
-+          dialogAction(
++          dangerAction(
              "Remove",
 -            icon: Icon(Icons.delete_outline_rounded),
              onPressed: () => change(''),
 -            buttonStyle: ButtonStyle(
 -                backgroundColor: MaterialStatePropertyAll(Colors.red)),
-+            primary: false,
            ),
 -        Obx(() => dialogButton(
 +        Obx(() => dialogAction(
@@ -230,7 +284,7 @@ index 98d7f6b..d256279 100644
                    isInputEmpty.value ? null : () => change(controller.text),
              )),
 diff --git a/flutter/lib/common/widgets/login.dart b/flutter/lib/common/widgets/login.dart
-index 8269494..66e09b0 100644
+index 8269494..ba7728b 100644
 --- a/flutter/lib/common/widgets/login.dart
 +++ b/flutter/lib/common/widgets/login.dart
 @@ -2,152 +2,26 @@ import 'dart:async';
@@ -390,21 +444,87 @@ index 8269494..66e09b0 100644
  }
  
  class _OidcAuthController {
-@@ -416,11 +290,11 @@ class _WidgetOPState extends State<WidgetOP> {
-           : backendStateMsg;
-       final bool urlLaunched = (resultMap['url_launched'] as bool?) ?? false;
-       final authBody = resultMap['auth_body'];
--      if (authBody != null) {
-+      if (authBody != null && failedMsg.isEmpty) {
-+        widget.cbLogin(authBody as Map<String, dynamic>);
+@@ -224,9 +98,9 @@ class _OidcAuthController {
+   Future<void> _cancelBackend() async {
+     try {
+       await bind.mainAccountAuthCancel();
+-    } catch (error, stackTrace) {
+-      debugPrint('Failed to cancel account authentication $error');
+-      debugPrintStack(stackTrace: stackTrace);
++    } catch (error) {
++      debugPrint(
++          'Failed to cancel account authentication (${error.runtimeType})');
+     }
+   }
+ 
+@@ -252,7 +126,7 @@ class _OidcAuthController {
+ class WidgetOP extends StatefulWidget {
+   final ConfigOP config;
+   final RxString curOP;
+-  final Function(Map<String, dynamic>) cbLogin;
++  final bool Function(Object authBody) cbLogin;
+   final Future<bool> Function(String) startAuth;
+   final Future<bool> Function(String) cancelAuth;
+   final bool Function() canStartAuth;
+@@ -315,10 +189,9 @@ class _WidgetOPState extends State<WidgetOP> {
+       if (!launched) {
+         debugPrint('Failed to open OIDC authentication URL');
+       }
+-    } catch (error, stackTrace) {
++    } catch (error) {
+       debugPrint(
+           'Failed to open OIDC authentication URL (${error.runtimeType})');
+-      debugPrintStack(stackTrace: stackTrace);
+     }
+   }
+ 
+@@ -328,10 +201,9 @@ class _WidgetOPState extends State<WidgetOP> {
+       showToast(
+         translate('Copied'),
+       );
+-    } catch (error, stackTrace) {
++    } catch (error) {
+       debugPrint(
+           'Failed to copy OIDC authentication URL (${error.runtimeType})');
+-      debugPrintStack(stackTrace: stackTrace);
+       showToast(translate('Failed'));
+     }
+   }
+@@ -367,7 +239,7 @@ class _WidgetOPState extends State<WidgetOP> {
+     Object error,
+     String operation,
+   ) async {
+-    debugPrint('Failed to $operation $error');
++    debugPrint('Failed to $operation (${error.runtimeType})');
+     if (!_isCurrentAuthAttempt(authAttempt)) {
+       return;
+     }
+@@ -378,9 +250,9 @@ class _WidgetOPState extends State<WidgetOP> {
+       if (!canceled || !_isCurrentAuthAttempt(authAttempt)) {
+         return;
+       }
+-    } catch (cancelError, stackTrace) {
+-      debugPrint('Failed to cancel account authentication $cancelError');
+-      debugPrintStack(stackTrace: stackTrace);
++    } catch (cancelError) {
++      debugPrint(
++          'Failed to cancel account authentication (${cancelError.runtimeType})');
+       return;
+     }
+     setState(() {
+@@ -420,7 +292,10 @@ class _WidgetOPState extends State<WidgetOP> {
          _updateTimer?.cancel();
          _invalidateAuthAttempt();
          widget.curOP.value = '';
 -        widget.cbLogin(authBody as Map<String, dynamic>);
++        if (!widget.cbLogin(authBody)) {
++          setState(() => _failedMsg =
++              failedMsg.isEmpty ? 'Invalid auth response' : failedMsg);
++        }
          return;
        }
        final stateChanged = _stateMsg != stateMsg || _failedMsg != failedMsg;
-@@ -466,39 +340,40 @@ class _WidgetOPState extends State<WidgetOP> {
+@@ -466,39 +341,40 @@ class _WidgetOPState extends State<WidgetOP> {
    Widget build(BuildContext context) {
      return Column(
        children: [
@@ -478,16 +598,25 @@ index 8269494..66e09b0 100644
          Obx(() {
            if (widget.curOP.isNotEmpty &&
                widget.curOP.value != widget.config.op) {
-@@ -555,7 +430,7 @@ class _WidgetOPState extends State<WidgetOP> {
+@@ -555,7 +431,7 @@ class _WidgetOPState extends State<WidgetOP> {
                              const SizedBox(width: 6),
                              Flexible(
                                child: SelectableText(
 -                                translate(_failedMsg),
-+                                oidcFailureHint,
++                                oidcFailureText(_failedMsg),
                                  style:
                                      DefaultTextStyle.of(context).style.copyWith(
                                            fontSize: 13,
-@@ -619,7 +494,7 @@ class LoginWidgetOP extends StatelessWidget {
+@@ -580,7 +456,7 @@ class _WidgetOPState extends State<WidgetOP> {
+ class LoginWidgetOP extends StatelessWidget {
+   final List<ConfigOP> ops;
+   final RxString curOP;
+-  final Function(Map<String, dynamic>) cbLogin;
++  final bool Function(Object authBody) cbLogin;
+   final Future<bool> Function(String) startAuth;
+   final Future<bool> Function(String) cancelAuth;
+   final bool Function() canStartAuth;
+@@ -619,7 +495,7 @@ class LoginWidgetOP extends StatelessWidget {
      }
      return SingleChildScrollView(
          child: Container(
@@ -496,7 +625,7 @@ index 8269494..66e09b0 100644
              child: Column(
                mainAxisSize: MainAxisSize.min,
                mainAxisAlignment: MainAxisAlignment.spaceAround,
-@@ -678,7 +553,8 @@ class LoginWidgetUserPass extends StatelessWidget {
+@@ -678,7 +554,8 @@ class LoginWidgetUserPass extends StatelessWidget {
                Container(
                  height: 38,
                  width: 200,
@@ -506,7 +635,27 @@ index 8269494..66e09b0 100644
                        child: Text(
                          translate('Login'),
                          style: TextStyle(fontSize: 16),
-@@ -904,27 +780,25 @@ Future<bool?> _openLoginDialog() async {
+@@ -743,7 +620,7 @@ Future<bool?> _openLoginDialog() async {
+       loginOptions.value = await UserModel.queryOidcLoginOptions();
+       loginOptionsError.value = null;
+     } catch (e) {
+-      debugPrint("queryOidcLoginOptions failed: $e");
++      debugPrint("queryOidcLoginOptions failed: ${e.runtimeType}");
+       loginOptionsError.value = e;
+     } finally {
+       loginOptionsInProgress.value = false;
+@@ -880,7 +757,9 @@ Future<bool?> _openLoginDialog() async {
+                 ),
+                 if (!inProgress)
+                   SelectableText(
+-                    error.toString(),
++                    error is RequestException
++                        ? 'HTTP ${error.statusCode} · ${oidcDetail(error.cause)}'
++                        : oidcDetail(error.toString()),
+                     style: const TextStyle(fontSize: 11, color: Colors.red),
+                     textAlign: TextAlign.center,
+                   ),
+@@ -904,27 +783,32 @@ Future<bool?> _openLoginDialog() async {
                  ),
                  LoginWidgetOP(
                    ops: loginOptions
@@ -521,32 +670,36 @@ index 8269494..66e09b0 100644
                    canStartAuth: oidcAuth.canStart,
 -                  cbLogin: (Map<String, dynamic> authBody) async {
 -                    LoginResponse? resp;
--                    try {
++                  cbLogin: (authBody) {
++                    final LoginResponse resp;
+                     try {
 -                      // access_token is already stored in the rust side.
 -                      resp =
 -                          gFFI.userModel.getLoginResponseFromAuthBody(authBody);
--                    } catch (e) {
--                      debugPrint(
++                      resp = gFFI.userModel.getLoginResponseFromAuthBody(
++                          authBody as Map<String, dynamic>);
+                     } catch (e) {
+                       debugPrint(
 -                          'Failed to parse oidc login body: "$authBody"');
-+                  cbLogin: (Map<String, dynamic> authBody) {
-+                    // The native authentication flow already persisted the token.
-+                    final resp =
-+                        gFFI.userModel.getLoginResponseFromAuthBody(authBody);
-+                    if (!(resp.type == HttpType.kAuthResTypeToken &&
-+                            resp.access_token != null) &&
-+                        resp.type != HttpType.kAuthResTypeEmailCheck) {
-+                      throw const FormatException('Unexpected OIDC response');
++                          'OIDC response parse failed: ${e.runtimeType}');
++                      return false;
                      }
-                     close(true);
+-                    close(true);
 -
 -                    if (resp != null) {
 -                      handleLoginResponse(resp, false, null);
--                    }
++                    if (resp.type != HttpType.kAuthResTypeEmailCheck &&
++                        !(resp.type == HttpType.kAuthResTypeToken &&
++                            (resp.access_token?.isNotEmpty ?? false))) {
++                      return false;
+                     }
++                    close(true);
 +                    handleLoginResponse(resp, false, null);
++                    return true;
                    },
                  ),
                ],
-@@ -965,10 +839,10 @@ Future<bool?> _openLoginDialog() async {
+@@ -965,10 +849,10 @@ Future<bool?> _openLoginDialog() async {
      );
      final titlePadding = EdgeInsets.fromLTRB(MyTheme.dialogPadding, 0, 0, 0);
  
@@ -559,6 +712,171 @@ index 8269494..66e09b0 100644
        content: Column(
          crossAxisAlignment: CrossAxisAlignment.center,
          children: [
+diff --git a/flutter/lib/common/widgets/peer_card.dart b/flutter/lib/common/widgets/peer_card.dart
+index 1f9f3ed..65e6985 100644
+--- a/flutter/lib/common/widgets/peer_card.dart
++++ b/flutter/lib/common/widgets/peer_card.dart
+@@ -1,5 +1,6 @@
+ import 'package:bot_toast/bot_toast.dart';
+ import 'package:flutter/material.dart';
++import 'package:flutter_hbb/steaddesk/theme.dart';
+ import 'package:flutter/services.dart';
+ import 'package:flutter_hbb/common/widgets/dialog.dart';
+ import 'package:flutter_hbb/consts.dart';
+@@ -783,23 +784,27 @@ abstract class BasePeerCard extends StatelessWidget {
+ 
+   @protected
+   MenuEntryBase<String> _removeAction(String id) {
++    final addressBook = tab == PeerTabIndex.ab;
+     return MenuEntryButton<String>(
+-      childBuilder: (TextStyle? style) => Row(
+-        children: [
+-          Text(
+-            translate('Delete'),
+-            style: style?.copyWith(color: Colors.red),
+-          ),
+-          Expanded(
+-              child: Align(
+-            alignment: Alignment.centerRight,
+-            child: Transform.scale(
+-              scale: 0.8,
+-              child: Icon(Icons.delete_forever, color: Colors.red),
++      buttonStyle: addressBook ? SteadDeskTheme.dangerButton : null,
++      childBuilder: (TextStyle? style) => addressBook
++          ? Text(translate('Delete'))
++          : Row(
++              children: [
++                Text(
++                  translate('Delete'),
++                  style: style?.copyWith(color: Colors.red),
++                ),
++                Expanded(
++                    child: Align(
++                  alignment: Alignment.centerRight,
++                  child: Transform.scale(
++                    scale: 0.8,
++                    child: Icon(Icons.delete_forever, color: Colors.red),
++                  ),
++                ).marginOnly(right: 4)),
++              ],
+             ),
+-          ).marginOnly(right: 4)),
+-        ],
+-      ),
+       proc: () {
+         onSubmit() async {
+           switch (tab) {
+@@ -830,7 +835,8 @@ abstract class BasePeerCard extends StatelessWidget {
+         }
+ 
+         deleteConfirmDialog(onSubmit,
+-            '${translate('Delete')} "${peer.alias.isEmpty ? formatID(peer.id) : peer.alias}"?');
++            '${translate('Delete')} "${peer.alias.isEmpty ? formatID(peer.id) : peer.alias}"?',
++            addressBook: addressBook);
+       },
+       padding: menuPadding,
+       dismissOnClicked: true,
+diff --git a/flutter/lib/common/widgets/peer_tab_page.dart b/flutter/lib/common/widgets/peer_tab_page.dart
+index 4849f27..2ebec25 100644
+--- a/flutter/lib/common/widgets/peer_tab_page.dart
++++ b/flutter/lib/common/widgets/peer_tab_page.dart
+@@ -2,6 +2,7 @@ import 'dart:ui' as ui;
+ 
+ import 'package:bot_toast/bot_toast.dart';
+ import 'package:flutter/material.dart';
++import 'package:flutter_hbb/steaddesk/dialogs.dart' show dangerAction;
+ import 'package:flutter_hbb/common/widgets/address_book.dart';
+ import 'package:flutter_hbb/common/widgets/dialog.dart';
+ import 'package:flutter_hbb/common/widgets/my_group.dart';
+@@ -387,45 +388,52 @@ class _PeerTabPageState extends State<PeerTabPage>
+     if (model.currentTab == PeerTabIndex.group.index) {
+       return Offstage();
+     }
++    final addressBook = model.currentTab == PeerTabIndex.ab.index;
++    onDelete() {
++      onSubmit() async {
++        final peers = model.selectedPeers;
++        switch (model.currentTab) {
++          case 0:
++            for (var p in peers) {
++              await bind.mainRemovePeer(id: p.id);
++            }
++            bind.mainLoadRecentPeers();
++            break;
++          case 1:
++            final favs = (await bind.mainGetFav()).toList();
++            peers.map((p) {
++              favs.remove(p.id);
++            }).toList();
++            await bind.mainStoreFav(favs: favs);
++            bind.mainLoadFavPeers();
++            break;
++          case 2:
++            for (var p in peers) {
++              await bind.mainRemoveDiscovered(id: p.id);
++            }
++            bind.mainLoadLanPeers();
++            break;
++          case 3:
++            await gFFI.abModel.deletePeers(peers.map((p) => p.id).toList());
++            break;
++          default:
++            break;
++        }
++        gFFI.peerTabModel.setMultiSelectionMode(false);
++        if (model.currentTab != 3) showToast(translate('Successful'));
++      }
++
++      deleteConfirmDialog(onSubmit, translate('Delete'),
++          addressBook: addressBook);
++    }
++
++    if (addressBook) {
++      return dangerAction('Delete', onPressed: onDelete);
++    }
+     return _hoverAction(
+         context: context,
+         toolTip: translate('Delete'),
+-        onTap: () {
+-          onSubmit() async {
+-            final peers = model.selectedPeers;
+-            switch (model.currentTab) {
+-              case 0:
+-                for (var p in peers) {
+-                  await bind.mainRemovePeer(id: p.id);
+-                }
+-                bind.mainLoadRecentPeers();
+-                break;
+-              case 1:
+-                final favs = (await bind.mainGetFav()).toList();
+-                peers.map((p) {
+-                  favs.remove(p.id);
+-                }).toList();
+-                await bind.mainStoreFav(favs: favs);
+-                bind.mainLoadFavPeers();
+-                break;
+-              case 2:
+-                for (var p in peers) {
+-                  await bind.mainRemoveDiscovered(id: p.id);
+-                }
+-                bind.mainLoadLanPeers();
+-                break;
+-              case 3:
+-                await gFFI.abModel.deletePeers(peers.map((p) => p.id).toList());
+-                break;
+-              default:
+-                break;
+-            }
+-            gFFI.peerTabModel.setMultiSelectionMode(false);
+-            if (model.currentTab != 3) showToast(translate('Successful'));
+-          }
+-
+-          deleteConfirmDialog(onSubmit, translate('Delete'));
+-        },
++        onTap: onDelete,
+         child: Icon(Icons.delete, color: Colors.red));
+   }
+ 
 diff --git a/flutter/lib/desktop/pages/desktop_setting_page.dart b/flutter/lib/desktop/pages/desktop_setting_page.dart
 index abba40b..6809464 100644
 --- a/flutter/lib/desktop/pages/desktop_setting_page.dart
@@ -722,6 +1040,29 @@ index eeb51b6..26256f4 100644
      ).marginOnly(bottom: buttonBottomMargin);
    }
  
+diff --git a/flutter/lib/desktop/widgets/popup_menu.dart b/flutter/lib/desktop/widgets/popup_menu.dart
+index 28432a9..6d0aefc 100644
+--- a/flutter/lib/desktop/widgets/popup_menu.dart
++++ b/flutter/lib/desktop/widgets/popup_menu.dart
+@@ -694,7 +694,10 @@ class MenuEntryButton<T> extends MenuEntryBase<T> {
+   Function() proc;
+   final EdgeInsets? padding;
+ 
++  final ButtonStyle? buttonStyle;
++
+   MenuEntryButton({
++    this.buttonStyle,
+     required this.childBuilder,
+     required this.proc,
+     this.padding,
+@@ -712,6 +715,7 @@ class MenuEntryButton<T> extends MenuEntryBase<T> {
+     return Obx(() => Container(
+         width: conf.boxWidth,
+         child: TextButton(
++          style: buttonStyle,
+           onPressed: super.enabled!.value
+               ? () {
+                   if (super.dismissOnClicked && Navigator.canPop(context)) {
 diff --git a/flutter/lib/mobile/pages/settings_page.dart b/flutter/lib/mobile/pages/settings_page.dart
 index 47afe78..e178f04 100644
 --- a/flutter/lib/mobile/pages/settings_page.dart
@@ -800,12 +1141,25 @@ index 6b110d5..47a17a2 100644
      return;
    }
    showServerSettingsWithValue(config, dialogManager, setState);
+diff --git a/flutter/lib/models/user_model.dart b/flutter/lib/models/user_model.dart
+index 405a9fa..4a153ab 100644
+--- a/flutter/lib/models/user_model.dart
++++ b/flutter/lib/models/user_model.dart
+@@ -221,7 +221,7 @@ class UserModel {
+     try {
+       loginResponse = LoginResponse.fromJson(body);
+     } catch (e) {
+-      debugPrint("login: jsonDecode LoginResponse failed: ${e.toString()}");
++      debugPrint("login: jsonDecode LoginResponse failed: ${e.runtimeType}");
+       rethrow;
+     }
+ 
 diff --git a/flutter/lib/steaddesk/dialogs.dart b/flutter/lib/steaddesk/dialogs.dart
 new file mode 100644
-index 0000000..8757137
+index 0000000..5297dd1
 --- /dev/null
 +++ b/flutter/lib/steaddesk/dialogs.dart
-@@ -0,0 +1,104 @@
+@@ -0,0 +1,165 @@
 +import 'package:flutter/material.dart';
 +import '../common.dart' show CustomAlertDialog, translate;
 +import '../consts.dart' show kCommConfKeyLang;
@@ -827,6 +1181,67 @@ index 0000000..8757137
 +String get oidcFailureHint => steadUsesChinese
 +    ? '登录失败。可能原因：密码错误；连续输错后账号被临时锁定（约 30 分钟后自动解锁）；该账号不是客服账号（管理员请用账号密码登录）。'
 +    : 'Login failed. Possible reasons: an incorrect password; a temporary lock after repeated failures (it clears automatically after about 30 minutes); or this is not a support account (administrators should sign in with their username and password).';
++
++// Only reproduce public diagnostic labels. Arbitrary server text can be a
++// credential even when it has no recognizable token prefix or URL syntax.
++String oidcDetail(String message) {
++  final text = message.trim();
++  if (text.isEmpty) return '';
++  final label = text.split(RegExp(r'[:;\n\r?&#(]'))[0].trim().toLowerCase();
++  if (RegExp(r'^http [45][0-9]{2}$').hasMatch(label)) {
++    return label.toUpperCase();
++  }
++  const publicLabels = [
++    'oauth failed',
++    'Failed',
++    'Timeout',
++    'Invalid auth response',
++    'Wrong Password',
++    'Invalid credentials',
++    'Invalid password',
++    'Access denied',
++    'Unauthorized',
++    'Forbidden',
++    'Bad Request',
++    'Request failed',
++    'Internal Server Error',
++    'Connection refused',
++    'Network error',
++    'invalid_grant',
++    'access_denied',
++    'invalid_request',
++    'server_error',
++    'temporarily_unavailable',
++    'invalid_client',
++    'invalid_scope',
++    'unauthorized_client',
++    'unsupported_grant_type',
++    'login_required',
++    'interaction_required',
++    'consent_required',
++    'Account locked',
++    'Too many requests',
++    'Service unavailable',
++    'Authentication failed',
++  ];
++  for (final key in publicLabels) {
++    if (label == key.toLowerCase()) return translate(key);
++  }
++  return steadUsesChinese ? '服务端详情已隐藏' : 'Server details withheld';
++}
++
++String oidcFailureText(String message) {
++  final detail = oidcDetail(message);
++  if (detail.isEmpty) return oidcFailureHint;
++  final prefix = steadUsesChinese ? '详情：' : 'Details: ';
++  return '$oidcFailureHint\n$prefix$detail';
++}
++
++Widget dangerAction(String key, {required VoidCallback? onPressed}) =>
++    TextButton(
++        style: SteadDeskTheme.dangerButton,
++        onPressed: onPressed,
++        child: Text(translate(key)));
 +
 +Widget dialogAction(String key,
 +        {required VoidCallback? onPressed, bool primary = true}) =>
@@ -984,3 +1399,19 @@ index 0000000..36952c4
 +              section,
 +        ]);
 +}
+diff --git a/flutter/lib/steaddesk/theme.dart b/flutter/lib/steaddesk/theme.dart
+index 313c8dc..90d94d1 100644
+--- a/flutter/lib/steaddesk/theme.dart
++++ b/flutter/lib/steaddesk/theme.dart
+@@ -47,6 +47,11 @@ class SteadDeskTheme {
+   static const glassGlowColors = [sea, foam, action];
+   static const glassOpaque = Color(0xFFE8F4FA);
+ 
++  static final dangerButton = button.copyWith(
++    foregroundColor: MaterialStateProperty.resolveWith<Color>(
++        (states) => states.contains(MaterialState.disabled) ? offline : danger),
++  );
++
+   static final button = ButtonStyle(
+     foregroundColor: MaterialStateProperty.resolveWith<Color>((states) {
+       if (states.contains(MaterialState.disabled)) return offline;
