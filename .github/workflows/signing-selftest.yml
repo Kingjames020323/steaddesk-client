@@ -172,7 +172,14 @@ jobs:
         printf '%s\n' "$password" | scripts/sign-android.sh "$release" "$work/signed" "$work/throwaway.p12" throwaway
 
         apksigner verify --verbose --print-certs "$work/signed/$PREFIX-universal.apk"
-        apksigner verify --print-certs "$work/signed/$PREFIX-universal.apk" |
-          grep -q '^Signer #1 certificate DN: CN=SteadDesk CI throwaway$'
+        # Build-Tools before 35 print "Signer #1 certificate DN: ...", newer ones
+        # "V3.0 Signer: certificate DN: ...". Either way the only signer is the throwaway.
+        apksigner verify --print-certs "$work/signed/$PREFIX-universal.apk" > "$work/certs.txt"
+        grep -Eq '^(Signer #1|V3\.[0-9]+ Signer:) certificate DN: CN=SteadDesk CI throwaway$' "$work/certs.txt"
+        if grep -E '^(Signer #[0-9]+|V3\.[0-9]+ Signer( #[0-9]+)?:) certificate DN: ' "$work/certs.txt" |
+             grep -vq 'certificate DN: CN=SteadDesk CI throwaway$'; then
+          echo 'An unexpected signer is present.' >&2
+          exit 1
+        fi
         (cd "$work/signed" && sha256sum -c SHA256SUMS)
         test ! -e "$work/signed/$PREFIX-universal.unsigned.apk"
