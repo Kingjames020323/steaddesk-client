@@ -41,6 +41,7 @@ for ((i=applied; i<${#patches[@]}; i++)); do git apply "${patches[i]}"; done
 printf '%s\n' "$release_version" > RELEASE_VERSION
 printf '#define VERSION_AS_NUMBER %s\n#define VERSION_AS_STRING "%s"\n' \
   "${windows_version//./,}" "$release_version" > flutter/windows/runner/steaddesk_version.h
+bash "$queue/scripts/configure-edition.sh" "$PWD" "${STEADDESK_EDITION:-merchant}"
 for icon in res/icon.ico res/tray-icon.ico flutter/windows/runner/resources/app_icon.ico; do
   install -m 644 "$queue/branding/steaddesk.ico" "$icon"
 done

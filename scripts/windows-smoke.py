@@ -1,5 +1,6 @@
 """Verify the packaged app on the isolated Windows desktop; publish only public UI."""
 
+import os
 import re
 import subprocess
 import sys
@@ -89,14 +90,24 @@ output = Path(sys.argv[2])
 output.mkdir(parents=True, exist_ok=True)
 subprocess.Popen([str(exe)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 desktop = Desktop(backend="uia")
+support = os.environ.get("STEADDESK_EDITION") == "support"
+product = "SteadDesk Support" if support else "SteadDesk"
 
 
 def application():
-    return next((w for w in desktop.windows() if w.window_text() == "SteadDesk"), None)
+    return next((w for w in desktop.windows() if w.window_text() == product), None)
 
 
 window = wait_for("SteadDesk main window", application, 120)
 window.set_focus()
+if not support:
+    public_label = wait_for("merchant ID board", lambda: by_name(window, "Your Desktop"))
+    if any(by_name(window, label) for label in ("Enter remote ID", "Recent sessions", "Address book")):
+        raise RuntimeError("Merchant offers an outbound connection")
+    save_evidence(window, "merchant-home", [public_label])
+    print("PASS merchant incoming-only home", flush=True)
+    sys.exit(0)
+wait_for("incoming permission switch", lambda: by_name(window, "Allow incoming connections"))
 entry = wait_for("remote ID placeholder", lambda: by_name(window, "Enter remote ID"))
 main_labels = {"Enter remote ID", "Your Desktop", "Control Remote Desktop", "Connect",
                "Powered by RustDesk", "Recent sessions", "SteadDesk", "Install"}
