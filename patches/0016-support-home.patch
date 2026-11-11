@@ -105,10 +105,10 @@ index 405a9fa..d955322 100644
      if (resetOther) {
 diff --git a/flutter/lib/steaddesk/support_device.dart b/flutter/lib/steaddesk/support_device.dart
 new file mode 100644
-index 0000000..5463148
+index 0000000..e5636bd
 --- /dev/null
 +++ b/flutter/lib/steaddesk/support_device.dart
-@@ -0,0 +1,78 @@
+@@ -0,0 +1,100 @@
 +// Only display fields cross into the directory and its search index.
 +enum DeviceFilter {
 +  all('All'),
@@ -123,6 +123,7 @@ index 0000000..5463148
 +
 +class SupportDevice {
 +  final String id, alias, platform, name, model, groupName;
++  final List<String> hostnames;
 +  final String? merchant, store;
 +  final bool sunmi;
 +  final bool? online;
@@ -130,8 +131,18 @@ index 0000000..5463148
 +      caseSensitive: false);
 +  static final _sunmiModel = RegExp(r'^SUNMI-(.+)$', caseSensitive: false);
 +
-+  SupportDevice._(this.id, this.alias, this.platform, this.name, this.model,
-+      this.groupName, this.merchant, this.store, this.sunmi, this.online);
++  SupportDevice._(
++      this.id,
++      this.alias,
++      this.platform,
++      this.name,
++      this.model,
++      this.groupName,
++      this.hostnames,
++      this.merchant,
++      this.store,
++      this.sunmi,
++      this.online);
 +
 +  factory SupportDevice(
 +      {required String id,
@@ -166,10 +177,21 @@ index 0000000..5463148
 +        name,
 +        model,
 +        groupName,
++        hostnames,
 +        asset?[1]?.toUpperCase(),
 +        asset?[2]?.toUpperCase(),
 +        model.isNotEmpty || (asset?[3] ?? '').toUpperCase().startsWith('SUNMI'),
 +        online);
++  }
++
++  bool contains(String query) {
++    final term = query.trim().toLowerCase();
++    if (term.isEmpty || id.toLowerCase().contains(term.replaceAll(' ', '')))
++      return true;
++    final fields = [alias, ...hostnames, name, groupName, model, id]
++        .join(' ')
++        .toLowerCase();
++    return term.split(RegExp(r'\s+')).every(fields.contains);
 +  }
 +
 +  bool matches(DeviceFilter filter) {
@@ -189,10 +211,10 @@ index 0000000..5463148
 +}
 diff --git a/flutter/lib/steaddesk/support_directory.dart b/flutter/lib/steaddesk/support_directory.dart
 new file mode 100644
-index 0000000..58bbf56
+index 0000000..fa3a9dd
 --- /dev/null
 +++ b/flutter/lib/steaddesk/support_directory.dart
-@@ -0,0 +1,380 @@
+@@ -0,0 +1,414 @@
 +part of 'support_home.dart';
 +
 +typedef _Source = ({Peer peer, BaseAb? book, PeerTabIndex tab});
@@ -200,15 +222,17 @@ index 0000000..58bbf56
 +
 +class _Directory extends StatefulWidget {
 +  final SupportPage page;
-+  const _Directory(this.page, {super.key});
++  final String query;
++  const _Directory(this.page, this.query, {super.key});
 +  @override
 +  State<_Directory> createState() => _DirectoryState();
 +}
 +
 +class _DirectoryState extends State<_Directory> {
 +  static const _event = 'callback_query_onlines';
-+  static const _listener = 'SteadDeskSupportDirectory';
++  late final _listener = 'SteadDeskSupportDirectory-${identityHashCode(this)}';
 +  final presence = <String, bool>{};
++  final lastReport = <String, DateTime>{};
 +  final loadedBooks = <BaseAb>{};
 +  final closed = <String>{};
 +  Set<String> ids = {};
@@ -221,12 +245,15 @@ index 0000000..58bbf56
 +    super.initState();
 +    platformFFI.registerEventHandler(_event, _listener, (evt) async {
 +      if (!mounted) return;
++      final now = DateTime.now();
 +      var changed = false;
 +      for (final online in [true, false]) {
 +        final raw = evt[online ? 'onlines' : 'offlines'];
 +        if (raw is! String) continue;
 +        for (final id in raw.split(',')) {
-+          if (ids.contains(id) && presence[id] != online) {
++          if (!ids.contains(id)) continue;
++          lastReport[id] = now;
++          if (presence[id] != online) {
 +            presence[id] = online;
 +            changed = true;
 +          }
@@ -239,8 +266,24 @@ index 0000000..58bbf56
 +    if (widget.page == SupportPage.favorites) bind.mainLoadFavPeers();
 +  }
 +
++  @override
++  void didUpdateWidget(_Directory old) {
++    super.didUpdateWidget(old);
++    if (old.query != widget.query && widget.query.isNotEmpty) {
++      scope = '';
++      if (old.query.isEmpty) filter = DeviceFilter.all;
++    }
++  }
++
 +  Future<void> _query() async {
 +    if (!mounted || ids.isEmpty) return;
++    // The native queue can drop a request without an error callback.
++    final cutoff = DateTime.now().subtract(const Duration(seconds: 60));
++    lastReport.removeWhere((_, time) => time.isBefore(cutoff));
++    if (lastReport.length < presence.length) {
++      setState(
++          () => presence.removeWhere((id, _) => !lastReport.containsKey(id)));
++    }
 +    try {
 +      await bind.queryOnlines(ids: ids.toList());
 +    } catch (_) {
@@ -252,6 +295,7 @@ index 0000000..58bbf56
 +    if (setEquals(ids, next)) return;
 +    ids = next;
 +    presence.removeWhere((k, _) => !ids.contains(k));
++    lastReport.removeWhere((k, _) => !ids.contains(k));
 +    WidgetsBinding.instance.addPostFrameCallback((_) => _query());
 +  }
 +
@@ -379,7 +423,8 @@ index 0000000..58bbf56
 +            final selected = byScope.containsKey(scope) ? scope : '';
 +            final rows = entries.where((row) {
 +              final d = row.device;
-+              return d.matches(filter) &&
++              return d.contains(widget.query) &&
++                  d.matches(filter) &&
 +                  (selected.isEmpty ||
 +                      (selected == '?' && d.merchant == null) ||
 +                      (selected == '*' && d.merchant != null) ||
@@ -447,13 +492,12 @@ index 0000000..58bbf56
 +                                  Text(translate('Device')),
 +                                  Text(translate('Status')),
 +                                  Text(translate('Model')),
-+                                  Text(translate('Action'))),
++                                  Text(translate('Actions'))),
 +                              const Divider(
 +                                  height: 1, color: Color(0xffe5e7eb)),
 +                              Expanded(
 +                                  child: rows.isEmpty
-+                                      ? Center(
-+                                          child: Text(translate('No devices')))
++                                      ? Center(child: _emptyResults(entries))
 +                                      : ListView.separated(
 +                                          itemCount: rows.length,
 +                                          separatorBuilder: (_, __) =>
@@ -466,6 +510,18 @@ index 0000000..58bbf56
 +                      ])));
 +            });
 +          }));
++
++  Widget _emptyResults(List<_Entry> entries) {
++    final id = widget.query.trim().replaceAll(' ', '');
++    if (RegExp(r'^[0-9]+$').hasMatch(id) &&
++        !entries.any((e) => e.device.id == id)) {
++      // Typing only searches. The operator must explicitly start a connection.
++      return TextButton(
++          onPressed: () => connect(context, id),
++          child: Text('${translate("Connect")} · $id'));
++    }
++    return Text(translate('No devices'));
++  }
 +
 +  Widget _tree(Map<String, (int, int)> counts, Map<String, Set<String>> stores,
 +      String selected) {
@@ -575,10 +631,10 @@ index 0000000..58bbf56
 +}
 diff --git a/flutter/lib/steaddesk/support_home.dart b/flutter/lib/steaddesk/support_home.dart
 new file mode 100644
-index 0000000..9aa8af3
+index 0000000..70f0254
 --- /dev/null
 +++ b/flutter/lib/steaddesk/support_home.dart
-@@ -0,0 +1,301 @@
+@@ -0,0 +1,362 @@
 +import 'dart:async';
 +import 'dart:math' as math;
 +import 'package:flutter/foundation.dart' show setEquals;
@@ -596,11 +652,13 @@ index 0000000..9aa8af3
 +import '../models/peer_tab_model.dart';
 +import '../models/ab_model.dart';
 +import 'support_device.dart';
++import 'incoming_switch.dart';
 +import '../consts.dart';
 +
 +import '../models/platform_model.dart';
 +
 +part 'support_directory.dart';
++part 'support_home_bar.dart';
 +
 +enum SupportPage {
 +  devices('Devices', Icons.devices_outlined),
@@ -632,11 +690,49 @@ index 0000000..9aa8af3
 +  static const _autoKey = 'support-home-auto-collapse';
 +  late _Rail mode;
 +  late bool automatic;
++  bool expandWhileNarrow = false;
++  bool slowRaster = false;
++  bool glassVisible = false;
++  final rasterWindow = <bool>[];
++
++  void _measureGlass(List<ui.FrameTiming> frames) {
++    if (!mounted || !glassVisible || slowRaster) return;
++    for (final frame in frames) {
++      rasterWindow.add(frame.rasterDuration > const Duration(milliseconds: 32));
++      if (rasterWindow.length > 12) rasterWindow.removeAt(0);
++      if (rasterWindow.length == 12 &&
++          rasterWindow.where((slow) => slow).length >= 8) {
++        setState(() => slowRaster = true);
++        break;
++      }
++    }
++  }
++
 +  var page = SupportPage.devices;
++  final search = TextEditingController();
++  final searchFocus = FocusNode();
++
++  void _search(String value) => setState(() {
++        if (value.isNotEmpty) page = SupportPage.devices;
++      });
++
++  void _navigate(SupportPage next) {
++    search.clear();
++    setState(() => page = next);
++  }
++
++  @override
++  void dispose() {
++    WidgetsBinding.instance.removeTimingsCallback(_measureGlass);
++    search.dispose();
++    searchFocus.dispose();
++    super.dispose();
++  }
 +
 +  @override
 +  void initState() {
 +    super.initState();
++    WidgetsBinding.instance.addTimingsCallback(_measureGlass);
 +    final saved = bind.getLocalFlutterOption(k: _modeKey);
 +    mode = _Rail.values
 +        .firstWhere((m) => m.name == saved, orElse: () => _Rail.expanded);
@@ -649,12 +745,15 @@ index 0000000..9aa8af3
 +  }
 +
 +  void _toggleAuto() {
-+    setState(() => automatic = !automatic);
++    setState(() {
++      automatic = !automatic;
++      expandWhileNarrow = false;
++    });
 +    bind.setLocalFlutterOption(k: _autoKey, v: automatic ? 'Y' : 'N');
 +  }
 +
 +  void _toggle(_Rail visible, bool narrow) {
-+    if (visible == _Rail.compact && narrow && automatic) _toggleAuto();
++    expandWhileNarrow = visible == _Rail.compact && narrow && automatic;
 +    _setMode(visible == _Rail.expanded ? _Rail.compact : _Rail.expanded);
 +  }
 +
@@ -705,21 +804,39 @@ index 0000000..9aa8af3
 +      case SupportPage.devices:
 +      case SupportPage.recent:
 +      case SupportPage.favorites:
-+        return _Directory(page, key: ValueKey(page));
++        return _Directory(page, search.text, key: ValueKey(page));
 +      default:
 +        return Center(child: Text(translate('Coming soon')));
 +    }
 +  }
 +
 +  @override
-+  Widget build(BuildContext context) =>
-+      LayoutBuilder(builder: (context, constraints) {
-+        final narrow = constraints.maxWidth < 1100;
-+        final visible = automatic && narrow && mode == _Rail.expanded
++  Widget build(BuildContext context) {
++    final narrow = MediaQuery.sizeOf(context).width < 1100;
++    if (!narrow) expandWhileNarrow = false;
++    final visible =
++        automatic && narrow && !expandWhileNarrow && mode == _Rail.expanded
 +            ? _Rail.compact
 +            : mode;
-+        return CallbackShortcuts(
++    final opaque = slowRaster ||
++        MediaQuery.of(context).disableAnimations ||
++        bind.mainGetOptionSync(key: kOptionAllowAlwaysSoftwareRender) == 'Y';
++    glassVisible = visible != _Rail.hidden && !opaque;
++    if (!glassVisible) rasterWindow.clear();
++    return Theme(
++        data: ThemeData(
++            brightness: Brightness.light,
++            fontFamily: isWindows ? 'Segoe UI' : null,
++            fontFamilyFallback: isWindows ? const ['Microsoft YaHei'] : null,
++            textButtonTheme: TextButtonThemeData(
++                style: TextButton.styleFrom(
++                    foregroundColor: _blue,
++                    shape: RoundedRectangleBorder(
++                        borderRadius: BorderRadius.circular(6))))),
++        child: CallbackShortcuts(
 +            bindings: {
++              const SingleActivator(LogicalKeyboardKey.keyK, control: true):
++                  searchFocus.requestFocus,
 +              const SingleActivator(LogicalKeyboardKey.keyB, control: true):
 +                  () => _toggle(visible, narrow),
 +            },
@@ -728,28 +845,28 @@ index 0000000..9aa8af3
 +                child: Material(
 +                    color: Colors.white,
 +                    child: Row(children: [
-+                      if (visible != _Rail.hidden) _rail(visible, narrow),
++                      if (visible != _Rail.hidden)
++                        _rail(visible, narrow, opaque),
 +                      Expanded(
 +                          child: Column(
 +                              crossAxisAlignment: CrossAxisAlignment.stretch,
 +                              children: [
-+                            if (visible == _Rail.hidden)
-+                              Align(
-+                                  alignment: Alignment.centerLeft,
-+                                  child: IconButton(
-+                                      tooltip: translate('Expand navigation'),
-+                                      icon: const Icon(Icons.menu),
-+                                      onPressed: () =>
-+                                          _setMode(_Rail.expanded))),
++                            _HomeHeader(
++                                restore: visible == _Rail.hidden
++                                    ? () => _setMode(_Rail.expanded)
++                                    : null,
++                                focus: searchFocus,
++                                search: search,
++                                onSearch: _search),
++                            const Divider(height: 1, color: Color(0xffe5e7eb)),
 +                            Expanded(child: _body()),
++                            const _ServerStatus(),
 +                          ])),
-+                    ]))));
-+      });
++                    ])))));
++  }
 +
-+  Widget _rail(_Rail visible, bool narrow) {
++  Widget _rail(_Rail visible, bool narrow, bool opaque) {
 +    final full = visible == _Rail.expanded;
-+    final opaque = MediaQuery.of(context).disableAnimations ||
-+        bind.mainGetOptionSync(key: kOptionAllowAlwaysSoftwareRender) == 'Y';
 +    final radius = BorderRadius.circular(20);
 +    Widget item(String label, IconData icon, VoidCallback? tap,
 +            {bool selected = false}) =>
@@ -804,7 +921,7 @@ index 0000000..9aa8af3
 +      Expanded(
 +          child: ListView(children: [
 +        for (final p in SupportPage.values)
-+          item(translate(p.label), p.icon, () => setState(() => page = p),
++          item(translate(p.label), p.icon, () => _navigate(p),
 +              selected: page == p)
 +      ])),
 +      Obx(() {
@@ -880,11 +997,213 @@ index 0000000..9aa8af3
 +                ]))));
 +  }
 +}
+diff --git a/flutter/lib/steaddesk/support_home_bar.dart b/flutter/lib/steaddesk/support_home_bar.dart
+new file mode 100644
+index 0000000..6f822e1
+--- /dev/null
++++ b/flutter/lib/steaddesk/support_home_bar.dart
+@@ -0,0 +1,128 @@
++part of 'support_home.dart';
++
++class _HomeHeader extends StatelessWidget {
++  final VoidCallback? restore;
++  final FocusNode focus;
++  final TextEditingController search;
++  final ValueChanged<String> onSearch;
++  const _HomeHeader(
++      {required this.restore,
++      required this.focus,
++      required this.search,
++      required this.onSearch});
++
++  void _localDevice(BuildContext context, String id) {
++    showDialog<void>(
++        context: context,
++        builder: (ctx) =>
++            AlertDialog(
++                title: Text('${translate("Local ID")} · $id'),
++                content:
++                    const SizedBox(width: 310, child: SupportIncomingSwitch()),
++                actions: [
++                  TextButton(
++                      onPressed: () => Navigator.pop(ctx),
++                      child: Text(translate('Close')))
++                ]));
++  }
++
++  @override
++  Widget build(BuildContext context) => Padding(
++      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
++      child: Row(children: [
++        if (restore != null)
++          IconButton(
++              tooltip: translate('Expand navigation'),
++              icon: const Icon(Icons.menu),
++              onPressed: restore),
++        Expanded(
++            child: TextField(
++                controller: search,
++                focusNode: focus,
++                onChanged: onSearch,
++                maxLines: 1,
++                decoration: InputDecoration(
++                    isDense: true,
++                    prefixIcon: const Icon(Icons.search),
++                    hintText:
++                        translate('Search merchants, stores, devices or IDs'),
++                    suffixIcon: search.text.isEmpty
++                        ? null
++                        : IconButton(
++                            icon: const Icon(Icons.clear),
++                            tooltip: translate('Clear'),
++                            onPressed: () {
++                              search.clear();
++                              onSearch('');
++                              focus.requestFocus();
++                            }),
++                    border: const OutlineInputBorder(
++                        borderRadius: BorderRadius.all(Radius.circular(8)))))),
++        const SizedBox(width: 12),
++        ValueListenableBuilder<TextEditingValue>(
++            valueListenable: gFFI.serverModel.serverId,
++            builder: (_, value, __) {
++              final id = value.text.isEmpty ? '—' : value.text;
++              final label = '${translate("Local ID")} · $id';
++              return Tooltip(
++                  message:
++                      translate('Incoming connections require your approval'),
++                  child: TextButton(
++                      onPressed: () => _localDevice(context, id),
++                      child: Column(
++                          crossAxisAlignment: CrossAxisAlignment.end,
++                          children: [
++                            Text(label,
++                                style: const TextStyle(
++                                    color: _ink,
++                                    fontFeatures: [
++                                      ui.FontFeature.tabularFigures()
++                                    ])),
++                            Text(
++                                translate(
++                                    'Incoming connections require your approval'),
++                                style: const TextStyle(
++                                    fontSize: 11, color: Color(0xff4b5563))),
++                          ])));
++            }),
++      ]));
++}
++
++class _ServerStatus extends StatelessWidget {
++  const _ServerStatus();
++
++  @override
++  Widget build(BuildContext context) => AnimatedBuilder(
++      animation: gFFI.serverModel,
++      builder: (_, __) => Obx(() {
++            final stopped = Get.find<RxBool>(tag: 'stop-service').value;
++            final state = gFFI.serverModel.connectStatus;
++            final text = stopped
++                ? 'Service is not running'
++                : state == 1
++                    ? 'Ready'
++                    : state == 0
++                        ? 'connecting_status'
++                        : 'not_ready_status';
++            return Container(
++                decoration: const BoxDecoration(
++                    border: Border(top: BorderSide(color: Color(0xffe5e7eb)))),
++                padding:
++                    const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
++                child: Row(children: [
++                  Icon(Icons.circle,
++                      size: 8,
++                      color: !stopped && state == 1
++                          ? const Color(0xff16a34a)
++                          : const Color(0xff9ca3af)),
++                  const SizedBox(width: 8),
++                  Expanded(
++                      child: Text(
++                          '${translate("Server connection")} · ${translate(text)}',
++                          maxLines: 1,
++                          overflow: TextOverflow.ellipsis,
++                          style: const TextStyle(
++                              color: Color(0xff4b5563), fontSize: 12))),
++                ]));
++          }));
++}
+diff --git a/flutter/tool/check_support_directory.dart b/flutter/tool/check_support_directory.dart
+new file mode 100644
+index 0000000..8d7fde7
+--- /dev/null
++++ b/flutter/tool/check_support_directory.dart
+@@ -0,0 +1,62 @@
++// Run with the standalone Dart SDK from a patched upstream checkout.
++import '../lib/steaddesk/support_device.dart';
++
++void main() {
++  SupportDevice device({
++    String alias = '',
++    List<String> names = const [],
++    String platform = '',
++    bool? online,
++  }) =>
++      SupportDevice(
++          id: '123456789',
++          alias: alias,
++          hostnames: names,
++          platform: platform,
++          groupName: 'Test group',
++          online: online);
++
++  final till = device(
++      alias: 'Test till',
++      names: ['m0099-s07-SUNMI1', 'SUNMI-T2'],
++      platform: 'Android',
++      online: true);
++  final windows = device(
++      alias: 'M0099-S02-POS',
++      names: ['workstation'],
++      platform: 'Windows',
++      online: false);
++  final unknown = device(names: ['M0099-bad-SUNMI1'], platform: 'Android');
++  final assetOnly = device(names: ['M0099-S01-SUNMI2'], platform: 'Android');
++  final checks = <String, bool>{
++    'merchant/store from hostname':
++        till.merchant == 'M0099' && till.store == 'S07',
++    'canonical alias fallback':
++        windows.store == 'S02' && windows.name == windows.alias,
++    'ungrouped malformed name':
++        unknown.merchant == null && unknown.store == null,
++    'reported Android model': till.model == 'T2',
++    'asset suffix is not a hardware model':
++        assetOnly.model.isEmpty && windows.model.isEmpty,
++    'SUNMI filter': assetOnly.matches(DeviceFilter.sunmi) &&
++        !unknown.matches(DeviceFilter.sunmi),
++    'Windows filter': windows.matches(DeviceFilter.windows) &&
++        !till.matches(DeviceFilter.windows),
++    'online/offline': till.matches(DeviceFilter.online) &&
++        windows.matches(DeviceFilter.offline),
++    'unanswered presence': !unknown.matches(DeviceFilter.online) &&
++        !unknown.matches(DeviceFilter.offline) &&
++        unknown.matches(DeviceFilter.all),
++    'merchant and store tokens':
++        till.contains('M0099 S07') && !windows.contains('M0099 S07'),
++    'group and alias':
++        till.contains('TEST GROUP') && till.contains('test till'),
++    'hostname and formatted ID':
++        windows.contains('workstation') && till.contains('123 456 789'),
++    'empty and missing search': till.contains('') && !till.contains('no match'),
++  };
++  for (final result in checks.entries) {
++    if (!result.value) throw StateError(result.key);
++  }
++  print('${checks.length} directory checks passed');
++}
 diff --git a/src/lang/cn.rs b/src/lang/cn.rs
-index a86d353..8d7b224 100644
+index a86d353..f4907ab 100644
 --- a/src/lang/cn.rs
 +++ b/src/lang/cn.rs
-@@ -233,6 +233,33 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
+@@ -233,6 +233,38 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
          ("Edit Tag", "修改标签"),
          ("Forget Password", "忘记密码"),
          ("Favorites", "收藏"),
@@ -915,6 +1234,11 @@ index a86d353..8d7b224 100644
 +        ("Details", "详情"),
 +        ("Expand", "展开"),
 +        ("Collapse", "折叠"),
++        ("Search merchants, stores, devices or IDs", "搜索商户、门店、设备名或 ID"),
++        ("Local ID", "本机 ID"),
++        ("Incoming connections require your approval", "连入需本人点接受"),
++        ("Server connection", "服务器连接"),
++        ("Actions", "操作"),
          ("Add to Favorites", "加入到收藏"),
          ("Remove from Favorites", "从收藏中删除"),
          ("Empty", "空空如也"),
