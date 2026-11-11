@@ -9,7 +9,7 @@ import xml.etree.ElementTree as ET
 
 from nacl.secret import SecretBox
 
-from check_provider import adb, expect_status, shell, write
+from check_provider import adb, expect_status, shell, wait_for_confirmation, write
 
 MERCHANT = "com.steaddesk.remote"
 AUTHORITY = MERCHANT + ".staging"
@@ -60,7 +60,7 @@ def main():
     try:
         expect_status(False)
         write(first)
-        expect_status(True)
+        wait_for_confirmation()
         shell("am", "force-stop", MERCHANT)
         expect_status(True)
         verify_saved(first)
@@ -70,7 +70,7 @@ def main():
         expect_status(False)
         verify_saved(first)
         write(replacement + b"\n")
-        expect_status(True)
+        wait_for_confirmation()
         shell("am", "force-stop", MERCHANT)
         expect_status(True)
         verify_saved(replacement)

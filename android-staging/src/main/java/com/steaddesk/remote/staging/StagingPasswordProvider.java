@@ -31,7 +31,7 @@ public class StagingPasswordProvider extends ContentProvider {
     private static final String COLUMN = "password_set";
     private static final String ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789";
     private static final int LENGTH = 20;
-    private static final int TIMEOUT_MS = 15000;
+    private static final int PIPE_READ_TIMEOUT_MS = 15000;
     private final Object gate = new Object();
     private boolean writing;
     private boolean unconfirmed;
@@ -49,8 +49,8 @@ public class StagingPasswordProvider extends ContentProvider {
         if (!PASSWORD.equals(uri) || !"w".equals(mode)) throw new FileNotFoundException("endpoint");
         synchronized (gate) {
             if (writing) throw new FileNotFoundException("busy");
-            // AOSP content write closes its fd before the worker necessarily
-            // commits. Persist only an empty marker, never the input.
+            // Invalidate the previous confirmation before handing the caller an fd.
+            // The empty marker keeps an interrupted attempt unconfirmed across restarts.
             unconfirmed = true;
             ParcelFileDescriptor[] pipe;
             try {
@@ -88,7 +88,7 @@ public class StagingPasswordProvider extends ContentProvider {
         poll.fd = reader.getFileDescriptor();
         poll.events = (short) OsConstants.POLLIN;
         StructPollfd[] fds = { poll };
-        long end = SystemClock.elapsedRealtime() + TIMEOUT_MS;
+        long end = SystemClock.elapsedRealtime() + PIPE_READ_TIMEOUT_MS;
         int used = 0;
         while (used < frame.length) {
             long left = end - SystemClock.elapsedRealtime();
@@ -134,7 +134,6 @@ public class StagingPasswordProvider extends ContentProvider {
                     }
                 } finally {
                     writing = false;
-                    gate.notifyAll();
                 }
             }
         }
@@ -157,13 +156,7 @@ public class StagingPasswordProvider extends ContentProvider {
         }
         boolean set;
         synchronized (gate) {
-            long deadline = SystemClock.elapsedRealtime() + TIMEOUT_MS;
-            while (writing) {
-                long left = deadline - SystemClock.elapsedRealtime();
-                if (left <= 0) break;
-                try { gate.wait(left); }
-                catch (InterruptedException e) { Thread.currentThread().interrupt(); break; }
-            }
+            // The shipping tool polls this snapshot; never wait for a pending write.
             try {
                 set = !writing && !unconfirmed && !marker().exists() && hasPassword();
             } catch (RuntimeException | LinkageError ignored) {

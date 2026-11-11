@@ -11,24 +11,40 @@ PASSWORD = PREFIX + "permanent-password"
 STATUS = PREFIX + "status"
 
 
-def adb(*args, data=None):
+def adb(*args, data=None, timeout=30):
     return subprocess.run(
         ["adb", *args], input=data, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        timeout=30, check=True,
+        timeout=timeout, check=True,
     ).stdout.decode()
 
 
-def shell(*args, data=None):
-    return adb("shell", "-T", shlex.join(args), data=data)
+def shell(*args, data=None, timeout=30):
+    return adb("shell", "-T", shlex.join(args), data=data, timeout=timeout)
 
 
 def app_file(*args):
     return shell("run-as", PACKAGE, *args)
 
 
+def read_status(timeout):
+    row = shell("content", "query", "--uri", STATUS, timeout=timeout).strip()
+    assert row in ("Row: 0 password_set=false", "Row: 0 password_set=true"), "Unexpected status row"
+    return row == "Row: 0 password_set=true"
+
+
 def expect_status(expected):
-    result = shell("content", "query", "--uri", STATUS).strip()
-    assert result == f"Row: 0 password_set={str(expected).lower()}", "Unexpected status row"
+    assert read_status(timeout=10) == expected, "Unexpected password_set value"
+
+
+def wait_for_confirmation(deadline=None):
+    if deadline is None:
+        deadline = monotonic() + 10
+    while True:
+        remaining = deadline - monotonic()
+        assert remaining > 0, "Write was not confirmed within ten seconds"
+        if read_status(timeout=remaining):
+            return
+        sleep(min(0.1, remaining))
 
 
 def write(data, uri=PASSWORD):
@@ -46,14 +62,14 @@ def switch_adbd(root):
     assert shell("id", "-u").strip() == ("0" if root else "2000")
 
 
-def wait_for_store():
+def wait_for_file(path):
     deadline = monotonic() + 5
     while True:
         try:
-            app_file("test", "-e", "files/entered")
+            app_file("test", "-e", path)
             break
         except subprocess.CalledProcessError:
-            assert monotonic() < deadline, "Store did not start"
+            assert monotonic() < deadline, f"Timed out waiting for {path}"
             sleep(0.05)
 
 
@@ -73,7 +89,7 @@ def checks():
     print("PASS read mode and noncanonical write URIs denied", flush=True)
 
     write(b"A" * 20)
-    expect_status(True)
+    wait_for_confirmation()
     check_state("A")
     for payload in (b"A" * 19, b"A" * 21, b"A" * 19 + b"0", b"A" * 20 + b"\r\n",
                     b"A" * 20 + b"\n\n", b"A" * 19 + b"\xff", b""):
@@ -82,30 +98,33 @@ def checks():
         check_state("A")
     print("PASS shell write, status shape, and invalid rotations preserve saved fixture", flush=True)
 
-    # Suspend a valid rotation inside the native-store seam. An old true result
-    # must never acknowledge a pending write before that write has committed.
+    # Begin with a confirmed credential. Keep stdin open and send no bytes
+    # until an independent Binder query has observed the new unconfirmed state.
     write(b"A" * 20)
-    expect_status(True)
+    wait_for_confirmation()
     app_file("touch", "files/hold")
-    write(b"z" * 20 + b"\n")
-    wait_for_store()
-    assert "FileNotFoundException: busy" in write(b"A" * 20), "Concurrent write was not rejected"
-    with subprocess.Popen(["adb", "shell", "-T", "content", "query", "--uri", STATUS],
-                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT) as query:
-        try:
-            # Give the independent Binder call time to observe the pending state.
+    try:
+        with subprocess.Popen(["adb", "shell", "-T", "content", "write", "--uri", PASSWORD],
+                              stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT) as writer:
             try:
-                early = query.communicate(timeout=0.75)[0]
-            except subprocess.TimeoutExpired:
-                pass
-            else:
-                raise AssertionError(f"Query returned before commit: {early!r}")
-        finally:
-            app_file("rm", "files/hold")
-        row = query.communicate(timeout=10)[0].decode().strip()
-        assert query.returncode == 0 and row == "Row: 0 password_set=true", repr(row)
+                wait_for_file("no_backup/staging-unconfirmed")
+                assert not read_status(timeout=3), "Open pipe still reports the old confirmation"
+                check_state("AA")
+                output = writer.communicate(input=b"z" * 20 + b"\n", timeout=5)[0]
+                assert writer.returncode == 0 and not output.strip(), "Write command failed"
+            finally:
+                if writer.poll() is None:
+                    writer.kill()
+        deadline = monotonic() + 10
+        wait_for_file("files/entered")
+        assert "FileNotFoundException: busy" in write(b"A" * 20), "Concurrent write was not rejected"
+        assert not read_status(timeout=min(3, deadline - monotonic())), "Pending save acknowledged the old password"
+        check_state("AA")
+    finally:
+        app_file("rm", "files/hold")
+    wait_for_confirmation(deadline)
     check_state("AAz")
-    print("PASS query waits for rotation commit and accepts single trailing LF", flush=True)
+    print("PASS status is false before stdin and during save, then true within the ten-second poll window", flush=True)
 
     app_file("touch", "files/fail")
     write(b"A" * 20)
@@ -117,7 +136,7 @@ def checks():
     app_file("rm", "files/entered")
     app_file("touch", "files/hold")
     write(b"A" * 20)
-    wait_for_store()
+    wait_for_file("files/entered")
     shell("am", "force-stop", PACKAGE)
     expect_status(False)
     check_state("AAz")
@@ -125,7 +144,7 @@ def checks():
     print("PASS interrupted rotation survives process death without acknowledging old value", flush=True)
     switch_adbd(True)
     write(b"A" * 20)
-    expect_status(True)
+    wait_for_confirmation()
     check_state("AAzA")
     print("PASS failed-save status survives restart and root can retry", flush=True)
 
