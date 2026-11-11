@@ -22,6 +22,31 @@ SteadDesk is an AGPL-3.0 remote support client based on RustDesk 1.5.0 for Windo
 
 6. Jason uploads the signed EXE, signed APK and final checksum file to the **existing draft**. Keep the verified source archive and remove the two unsigned draft assets. Download the four final assets into a fresh directory and verify `SHA256SUMS` again. Claude reviews the version, signatures, checksums and source archive. The release owner publishes the draft after that review.
 
+Tag builds do not restore the three GitHub caches that pull request builds write: the Rust caches (`Swatinem/rust-cache` is skipped), the Flutter SDK cache, and the vcpkg binary cache (`VCPKG_BINARY_SOURCES` is `clear`; `run-vcpkg` also stops caching its own tool checkout). This does not cover tools that come with the runner image or downloads during the build. The signing tools are tested end to end with throwaway keys by the `Signing tools self-test` workflow, which runs when the tools change and can be started by hand before a release.
+
+### Version numbers
+
+`1.5.0-sd.N` has these effects, checked against the pinned upstream source:
+
+- **Android upgrade order.** `versionName` is `1.5.0-sd.N` and `versionCode` is 68 + N (patch 0007). Android refuses to install a lower `versionCode` over a higher one, so N must only go up.
+- **Windows file version.** The file and product version resources are 1.5.0.N.
+- **About pages.** `main_get_version` returns the release version; in the pinned Dart source its only caller is the desktop About page.
+- **Not the peer protocol.** The version a client sends to the other side is `crate::VERSION`, which these patches do not change, so it stays `1.5.0`. The protocol checks that were found (`versionCmp` in Dart and `get_version_number` in Rust on the peer's version) see `1.5.0`.
+- Upstream also compares its own version with the newest RustDesk release to offer updates; patch 0003 turns that path off.
+
+A future patch that compares the release version must parse the `-sd.N` suffix itself.
+
+### Protecting release tags
+
+A pushed `v1.5.0-sd.*` tag starts the release build, so only the release owner may create one. In the repository's **Settings → Rules → Rulesets**, Jason creates a tag ruleset:
+
+- Name `Release tags`, enforcement **Active**.
+- Target tags: include the pattern `v*`.
+- Rules: **Restrict creations**, **Restrict updates**, **Restrict deletions**, and **Block force pushes**.
+- Bypass list: **Repository admin** only. In this personal repository that is Jason alone; do not give anyone else the admin role. Collaborators with write access, GitHub Actions and Codex cannot create, move or delete `v*` tags.
+
+After saving, open the ruleset again and confirm it is **Active** and targets `v*`.
+
 Store the signing material on the signing workstation or its removable media. The workflow only needs a GitHub token to create the draft. Windows builds without a publisher signature and unsigned APKs are staging artifacts; Android installation requires a signed APK. Earlier demo APKs used a temporary signing certificate, so Android may reject an in-place upgrade to the offline-signed release.
 
 The source archive includes the distribution tools, patches and the patched upstream source with its pinned submodules. After extraction the source under `upstream/` is already patched. Hosted runner images, OS packages, Flutter dependency resolution and upstream's custom Windows engine download can vary between runs. Verify the assets from the release under test.

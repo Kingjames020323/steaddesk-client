@@ -1,11 +1,11 @@
-#Requires -Version 5.1
+#Requires -Version 7
 <#
 .SYNOPSIS
 Sign the Windows executable in a checked release bundle using a local RSA PFX.
 .EXAMPLE
 .\scripts\sign-windows.ps1 -ReleaseDir .\unsigned -OutputDir .\windows-signed -PfxPath E:\release.pfx
 .NOTES
-Requires .NET Framework 4.7.2+ or PowerShell 7, Python 3.6+, and Windows SDK
+Requires PowerShell 7, Python 3.10+, and Windows SDK
 10.0.22000+ SignTool on PATH. The signing host needs the publisher's trust
 chain and access to the selected RFC 3161 timestamp authority.
 #>
