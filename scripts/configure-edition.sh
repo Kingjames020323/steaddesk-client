@@ -12,9 +12,11 @@ printf '#define STEADDESK_PRODUCT "%s"\n' "$product" > "$tree/flutter/windows/ru
 
 # Compile the merchant UI with the same edition selector as the native policy.
 mkdir -p "$tree/flutter/lib/steaddesk"
-python3 - "$tree" "$support" <<'PY'
+staging_assets=$(cd "$(dirname "$0")/../android-staging" && pwd)
+python3 - "$tree" "$support" "$staging_assets" <<'PY'
 import json
 import os
+import shutil
 from pathlib import Path
 import sys
 
@@ -29,4 +31,25 @@ def dart_string(value):
     "const merchantVersion = " + dart_string((tree / "RELEASE_VERSION").read_text().strip()) + ";\n"
     "const merchantPhone = String.fromEnvironment('STEADDESK_SUPPORT_PHONE', defaultValue: "
     + dart_string(phone) + ");\n", encoding="utf-8")
+# Keep the main manifest intact for the support build and the patch queue.
+app = tree / "flutter/android/app/src"
+assets = Path(sys.argv[3])
+out = app / "steaddeskStaging"
+manifest = out / "AndroidManifest.xml"
+sources = sorted((assets / "src/main/java").rglob("*.java"))
+for source in sources:
+    dest = out / source.relative_to(assets / "src/main")
+    if not merchant:
+        dest.unlink(missing_ok=True)
+    else:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, dest)
+if not merchant:
+    manifest.unlink(missing_ok=True)
+else:
+    base = (app / "main/AndroidManifest.xml").read_text(encoding="utf-8")
+    end = "    </application>"
+    if base.count(end) != 1:
+        raise ValueError("Unexpected Android main manifest")
+    manifest.write_text(base.replace(end, (assets / "provider.xml").read_text(encoding="utf-8") + end), encoding="utf-8")
 PY
