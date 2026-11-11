@@ -1,5 +1,6 @@
 """Verify the packaged app on the isolated Windows desktop; publish only public UI."""
 
+from ctypes import windll, wintypes
 import os
 import re
 import subprocess
@@ -52,10 +53,13 @@ def public_fields(control):
     return values
 
 
-def press(window, name):
-    control = wait_for(name, lambda: by_name(window, name))
+def click_control(control):
     point = control.rectangle().mid_point()
     click(coords=(point.x, point.y))
+
+
+def press(window, name):
+    click_control(wait_for(name, lambda: by_name(window, name)))
 
 
 def save_evidence(window, name, visible_controls, public_regions=()):
@@ -108,28 +112,39 @@ if not support:
     save_evidence(window, "merchant-home", [id_label, help_label])
     print("PASS merchant incoming-only home", flush=True)
     sys.exit(0)
+
+
+# The support home puts the permission switch in the Local ID dialog. Flutter
+# can merge both lines of the button into one UIA name. Never log/capture it.
+def local_id_button():
+    matches = controls(window, lambda s: s.startswith("Local ID · "))
+    return matches[0] if matches else None
+
+
+click_control(wait_for("local device button", local_id_button))
 wait_for("incoming permission switch", lambda: by_name(window, "Allow incoming connections"))
-entry = wait_for("remote ID placeholder", lambda: by_name(window, "Enter remote ID"))
-main_labels = {"Enter remote ID", "Your Desktop", "Control Remote Desktop", "Connect",
-               "Powered by RustDesk", "Recent sessions", "SteadDesk", "Install"}
-frame = window.rectangle()
-entry_box = entry.rectangle()
-connect = wait_for("Connect", lambda: by_name(window, "Connect")).rectangle()
-public_regions = [(0, 0, frame.width(), 28)]
-if entry_box.left - frame.left > frame.width() / 4:
-    public_regions.append((entry_box.left - frame.left, 32, frame.width(),
-                           connect.bottom - frame.top + 5))
-save_evidence(window, "main", controls(window, main_labels.__contains__), public_regions)
-print("PASS main window", flush=True)
+send_keys("{ESC}")
+
+# Exercise the packaged directory and its explicit action without dialing a peer.
+wait_for("support directory", lambda: by_name(window, "Devices"))
+send_keys("^k")
+send_keys("765432109", pause=0.05)
+wait_for("numeric search connect action", lambda: by_name(window, "Connect · 765432109"))
+send_keys("^a{BACKSPACE}")
+main_labels = {"Devices", "Device", "Status", "Model", "Actions", "SUNMI", "Windows"}
+save_evidence(window, "main", controls(window, main_labels.__contains__))
+print("PASS support directory, numeric search and incoming permission dialog", flush=True)
 
 settings = by_name(window, "Settings")
 if settings:
-    press(window, "Settings")
+    click_control(settings)
 else:
-    # The 1.5.0 overflow button has only a Flutter tooltip on Windows.
+    # In the pinned Windows tab bar, Settings precedes the three window
+    # actions. All four buttons are 27 logical pixels wide.
     frame = window.rectangle()
-    click(coords=(frame.left + round(frame.width() * 0.228),
-                  frame.top + round(frame.height() * 0.24)))
+    scale = windll.user32.GetDpiForWindow(wintypes.HWND(window.handle)) / 96
+    click(coords=(frame.right - round(3.5 * 27 * scale),
+                  frame.top + round(14 * scale)))
 
 press(window, "About")
 source_name = "基于 RustDesk（AGPL-3.0） · Source code"
@@ -152,6 +167,7 @@ about_labels = tabs | {source_name, "Privacy Statement"}
 privacy = wait_for("privacy link", lambda: by_name(window, "Privacy Statement")).rectangle()
 # In the pinned About widget every row below Privacy Statement is public
 # attribution or licensing. Fingerprint and ID appear above that link.
+frame = window.rectangle()
 public_regions = [(0, 0, frame.width(), 28),
                   (0, privacy.top - frame.top, frame.width(), frame.height())]
 save_evidence(window, "about", controls(window, lambda s:
@@ -202,10 +218,10 @@ save_evidence(window, "network", fields + controls(window, {"ID/Relay server", "
 print("PASS fixed ID, relay, API and public key in read-only profile", flush=True)
 
 press(window, "Close")
-press(window, "Home")
-press(window, "Enter remote ID")
-send_keys("127.0.0.1", pause=0.05)
-press(window, "Connect")
+# Directory search offers connections to numeric IDs. Use the packaged CLI
+# to exercise the same session refusal on loopback in this isolated desktop.
+subprocess.Popen([str(exe), "--connect", "127.0.0.1"],
+                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 notice = "连接未加密，已拒绝，请联系管理员"
 
 
