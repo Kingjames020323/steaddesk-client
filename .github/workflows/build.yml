@@ -74,6 +74,11 @@ jobs:
     - name: Apply distribution patches and assets
       shell: bash
       run: bash .distribution/scripts/apply-patches.sh "$GITHUB_WORKSPACE"
+    - name: Test Android merchant file scope on an isolated filesystem
+      shell: bash
+      run: |
+        rustc --edition=2021 --test src/common/android_file_scope.rs -o "$RUNNER_TEMP/file-scope-tests"
+        "$RUNNER_TEMP/file-scope-tests"
     - name: Install prerequisites
       run: |
         sudo apt-get install ca-certificates -y

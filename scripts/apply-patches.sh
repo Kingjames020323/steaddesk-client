@@ -27,17 +27,29 @@ while IFS= read -r -d '' record; do
   blob=$(git -C "$scratch" hash-object -w --stdin < "$path")
   git -C "$scratch" update-index --add --cacheinfo "$mode,$blob,$path"
 done < <(git apply --numstat -z "${patches[@]}")
+# U-04b also replaces U-04's legacy remote shortcuts. Stacked branches
+# without U-04 have no such renderer; all device-side hunks always apply.
+apply_patch_in() {
+  local tree=$1 patch=$2
+  shift 2
+  if [[ ${patch##*/} == 0017-android-file-scope.patch && ! -f "$queue/patches/0013-file-transfer.patch" ]]; then
+    git -C "$tree" apply --exclude=flutter/lib/steaddesk/file_transfer.dart "$@" "$patch"
+  else
+    git -C "$tree" apply "$@" "$patch"
+  fi
+}
+
 applied=0
 for ((i=${#patches[@]}-1; i>=0; i--)); do
-  if git -C "$scratch" apply --cached --reverse "${patches[i]}" 2>/dev/null; then
+  if apply_patch_in "$scratch" "${patches[i]}" --cached --reverse 2>/dev/null; then
     if ((applied == 0)); then applied=$((i+1)); fi
   elif ((applied != 0)); then
     echo "Inconsistent patch queue at ${patches[i]##*/}" >&2
     exit 1
   fi
 done
-for patch in "${patches[@]}"; do git -C "$scratch" apply --cached "$patch"; done
-for ((i=applied; i<${#patches[@]}; i++)); do git apply "${patches[i]}"; done
+for patch in "${patches[@]}"; do apply_patch_in "$scratch" "$patch" --cached; done
+for ((i=applied; i<${#patches[@]}; i++)); do apply_patch_in "$PWD" "${patches[i]}"; done
 printf '%s\n' "$release_version" > RELEASE_VERSION
 printf '#define VERSION_AS_NUMBER %s\n#define VERSION_AS_STRING "%s"\n' \
   "${windows_version//./,}" "$release_version" > flutter/windows/runner/steaddesk_version.h
