@@ -142,10 +142,10 @@ index 5f234cb..05a1888 100644
                    }
 diff --git a/flutter/lib/steaddesk/merchant_panel.dart b/flutter/lib/steaddesk/merchant_panel.dart
 new file mode 100644
-index 0000000..ccd8aba
+index 0000000..6fa62b8
 --- /dev/null
 +++ b/flutter/lib/steaddesk/merchant_panel.dart
-@@ -0,0 +1,369 @@
+@@ -0,0 +1,371 @@
 +import 'dart:async';
 +import 'package:device_info_plus/device_info_plus.dart';
 +import 'package:flutter/material.dart';
@@ -351,7 +351,7 @@ index 0000000..ccd8aba
 +
 +  Widget identity() =>
 +      Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-+        Text(translate('This device ID')),
++        Semantics(container: true, child: Text(translate('This device ID'))),
 +        const SizedBox(height: 4),
 +        Row(children: [
 +          Expanded(
@@ -422,8 +422,10 @@ index 0000000..ccd8aba
 +
 +  Widget help() =>
 +      Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-+        Text(translate('Need help?'),
-+            style: const TextStyle(fontWeight: FontWeight.w600, color: _ink)),
++        Semantics(
++            container: true,
++            child: Text(translate('Need help?'),
++                style: const TextStyle(fontWeight: FontWeight.w600, color: _ink))),
 +        const SizedBox(height: 8),
 +        Text(translate('Give your device ID to support.')),
 +        if (merchantPhone.trim().isNotEmpty) ...[
