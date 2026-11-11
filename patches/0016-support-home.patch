@@ -1,0 +1,369 @@
+Subject: [SteadDesk] Support desktop navigation and device directory
+
+diff --git a/flutter/lib/desktop/pages/desktop_home_page.dart b/flutter/lib/desktop/pages/desktop_home_page.dart
+index 8ceb5b4..324106d 100644
+--- a/flutter/lib/desktop/pages/desktop_home_page.dart
++++ b/flutter/lib/desktop/pages/desktop_home_page.dart
+@@ -26,6 +26,7 @@ import 'package:window_size/window_size.dart' as window_size;
+ import '../widgets/button.dart';
+ 
+ import '../../steaddesk/incoming_switch.dart';
++import '../../steaddesk/support_home.dart';
+ 
+ class DesktopHomePage extends StatefulWidget {
+   const DesktopHomePage({Key? key}) : super(key: key);
+@@ -60,6 +61,9 @@ class _DesktopHomePageState extends State<DesktopHomePage>
+   @override
+   Widget build(BuildContext context) {
+     super.build(context);
++    if (bind.mainGetAppNameSync() == 'SteadDesk Support') {
++      return _buildBlock(child: const SupportHome());
++    }
+     final isIncomingOnly = bind.isIncomingOnly();
+     return _buildBlock(
+         child: Row(
+diff --git a/flutter/lib/models/user_model.dart b/flutter/lib/models/user_model.dart
+index 405a9fa..d955322 100644
+--- a/flutter/lib/models/user_model.dart
++++ b/flutter/lib/models/user_model.dart
+@@ -129,13 +129,16 @@ class UserModel {
+   _updateLocalUserInfo() {
+     final userInfo = getLocalUserInfo();
+     if (userInfo != null) {
+-      userName.value = (userInfo['name'] ?? '').toString();
++      final name = (userInfo['name'] ?? '').toString();
++      if (name != userName.value) isAdmin.value = false;
++      userName.value = name;
+       displayName.value = (userInfo['display_name'] ?? '').toString();
+       avatar.value = (userInfo['avatar'] ?? '').toString();
+     }
+   }
+ 
+   Future<void> reset({bool resetOther = false}) async {
++    isAdmin.value = false;
+     await bind.mainSetLocalOption(key: 'access_token', value: '');
+     await bind.mainSetLocalOption(key: 'user_info', value: '');
+     if (resetOther) {
+diff --git a/flutter/lib/steaddesk/support_home.dart b/flutter/lib/steaddesk/support_home.dart
+new file mode 100644
+index 0000000..338da75
+--- /dev/null
++++ b/flutter/lib/steaddesk/support_home.dart
+@@ -0,0 +1,294 @@
++import 'dart:ui' as ui;
++
++import 'package:flutter/material.dart';
++import 'package:flutter/services.dart';
++import 'package:get/get.dart';
++import 'package:url_launcher/url_launcher.dart';
++
++import '../common.dart';
++import '../common/widgets/login.dart';
++import '../common/widgets/peers_view.dart';
++import '../consts.dart';
++import '../desktop/pages/connection_page.dart';
++import '../models/platform_model.dart';
++
++enum SupportPage {
++  devices('Devices', Icons.devices_outlined),
++  recent('Recent connections', Icons.history),
++  favorites('Favorites', Icons.star_outline),
++  health('Device health', Icons.monitor_heart_outlined),
++  recordings('Session recordings', Icons.video_library_outlined);
++
++  final String label;
++  final IconData icon;
++  const SupportPage(this.label, this.icon);
++}
++
++enum _Rail { expanded, compact, hidden }
++
++// TODO(U-01): reference the shared light theme tokens after U-01 lands.
++const _blue = Color(0xff0a6fa8);
++const _ink = Color(0xff0b2e42);
++const _solid = Color(0xffe8f4fa);
++
++class SupportHome extends StatefulWidget {
++  const SupportHome({super.key});
++  @override
++  State<SupportHome> createState() => _SupportHomeState();
++}
++
++class _SupportHomeState extends State<SupportHome> {
++  static const _modeKey = 'support-home-navigation';
++  static const _autoKey = 'support-home-auto-collapse';
++  late _Rail mode;
++  late bool automatic;
++  var page = SupportPage.devices;
++
++  @override
++  void initState() {
++    super.initState();
++    final saved = bind.getLocalFlutterOption(k: _modeKey);
++    mode = _Rail.values
++        .firstWhere((m) => m.name == saved, orElse: () => _Rail.expanded);
++    automatic = bind.getLocalFlutterOption(k: _autoKey) != 'N';
++  }
++
++  void _setMode(_Rail next) {
++    setState(() => mode = next);
++    bind.setLocalFlutterOption(k: _modeKey, v: next.name);
++  }
++
++  void _toggleAuto() {
++    setState(() => automatic = !automatic);
++    bind.setLocalFlutterOption(k: _autoKey, v: automatic ? 'Y' : 'N');
++  }
++
++  void _toggle(_Rail visible, bool narrow) {
++    if (visible == _Rail.compact && narrow && automatic) _toggleAuto();
++    _setMode(visible == _Rail.expanded ? _Rail.compact : _Rail.expanded);
++  }
++
++  Future<void> _menu(Offset position, _Rail visible, bool narrow) async {
++    final box = Overlay.of(context).context.findRenderObject() as RenderBox;
++    final point = box.globalToLocal(position);
++    final action = await showMenu<String>(
++        context: context,
++        position: RelativeRect.fromRect(
++            Rect.fromLTWH(point.dx, point.dy, 0, 0), Offset.zero & box.size),
++        items: [
++          PopupMenuItem(
++              value: 'toggle',
++              child: Text(translate(visible == _Rail.expanded
++                  ? 'Collapse navigation'
++                  : 'Expand navigation'))),
++          PopupMenuItem(
++              value: 'hide', child: Text(translate('Hide navigation'))),
++          CheckedPopupMenuItem(
++              value: 'auto',
++              checked: automatic,
++              child: Text(translate('Auto-collapse below 1100 px'))),
++        ]);
++    if (!mounted) return;
++    if (action == 'toggle') _toggle(visible, narrow);
++    if (action == 'hide') _setMode(_Rail.hidden);
++    if (action == 'auto') _toggleAuto();
++  }
++
++  Future<void> _manage() async {
++    if (!gFFI.userModel.isLogin || !gFFI.userModel.isAdmin.value) return;
++    for (final url in [
++      'https://api.steaddesk.com/_admin/',
++      'https://console.steaddesk.com/'
++    ]) {
++      try {
++        if (await launchUrl(Uri.parse(url),
++            mode: LaunchMode.externalApplication)) continue;
++      } catch (_) {}
++      if (mounted)
++        ScaffoldMessenger.maybeOf(context)?.showSnackBar(
++            SnackBar(content: Text('${translate("Unable to open")} $url')));
++    }
++  }
++
++  Widget _body() {
++    switch (page) {
++      case SupportPage.devices:
++        return const ConnectionPage();
++      case SupportPage.recent:
++        return RecentPeersView();
++      case SupportPage.favorites:
++        return FavoritePeersView();
++      default:
++        return Center(child: Text(translate('Coming soon')));
++    }
++  }
++
++  @override
++  Widget build(BuildContext context) =>
++      LayoutBuilder(builder: (context, constraints) {
++        final narrow = constraints.maxWidth < 1100;
++        final visible = automatic && narrow && mode == _Rail.expanded
++            ? _Rail.compact
++            : mode;
++        return CallbackShortcuts(
++            bindings: {
++              const SingleActivator(LogicalKeyboardKey.keyB, control: true):
++                  () => _toggle(visible, narrow),
++            },
++            child: Focus(
++                autofocus: true,
++                child: Material(
++                    color: Colors.white,
++                    child: Row(children: [
++                      if (visible != _Rail.hidden) _rail(visible, narrow),
++                      Expanded(
++                          child: Column(
++                              crossAxisAlignment: CrossAxisAlignment.stretch,
++                              children: [
++                            if (visible == _Rail.hidden)
++                              Align(
++                                  alignment: Alignment.centerLeft,
++                                  child: IconButton(
++                                      tooltip: translate('Expand navigation'),
++                                      icon: const Icon(Icons.menu),
++                                      onPressed: () =>
++                                          _setMode(_Rail.expanded))),
++                            Expanded(child: _body()),
++                          ])),
++                    ]))));
++      });
++
++  Widget _rail(_Rail visible, bool narrow) {
++    final full = visible == _Rail.expanded;
++    final opaque = MediaQuery.of(context).disableAnimations ||
++        bind.mainGetOptionSync(key: kOptionAllowAlwaysSoftwareRender) == 'Y';
++    final radius = BorderRadius.circular(20);
++    Widget item(String label, IconData icon, VoidCallback? tap,
++            {bool selected = false}) =>
++        Tooltip(
++            message: label,
++            child: Material(
++                color: selected ? _blue.withOpacity(.12) : Colors.transparent,
++                borderRadius: BorderRadius.circular(10),
++                child: InkWell(
++                    onTap: tap,
++                    borderRadius: BorderRadius.circular(10),
++                    child: SizedBox(
++                        height: 42,
++                        child: Row(
++                            mainAxisAlignment: full
++                                ? MainAxisAlignment.start
++                                : MainAxisAlignment.center,
++                            children: [
++                              if (full) const SizedBox(width: 10),
++                              Icon(icon,
++                                  size: 20, color: selected ? _blue : _ink),
++                              if (full) ...[
++                                const SizedBox(width: 10),
++                                Expanded(
++                                    child: Text(label,
++                                        overflow: TextOverflow.ellipsis,
++                                        style: TextStyle(
++                                            color: selected ? _blue : _ink)))
++                              ],
++                            ])))));
++    final content = Column(children: [
++      Row(mainAxisAlignment: MainAxisAlignment.center, children: [
++        if (full) ...[
++          Image.asset('assets/icon.png', width: 28, height: 28),
++          const SizedBox(width: 6),
++          const Expanded(
++              child: Text('SteadDesk',
++                  style: TextStyle(fontWeight: FontWeight.bold, color: _ink)))
++        ],
++        Builder(
++            builder: (buttonContext) => IconButton(
++                tooltip: translate('Navigation'),
++                onPressed: () {
++                  final box = buttonContext.findRenderObject() as RenderBox;
++                  _menu(box.localToGlobal(Offset(0, box.size.height)), visible,
++                      narrow);
++                },
++                icon: full
++                    ? const Icon(Icons.menu_open)
++                    : Image.asset('assets/icon.png', width: 28, height: 28))),
++      ]),
++      Expanded(
++          child: ListView(children: [
++        for (final p in SupportPage.values)
++          item(translate(p.label), p.icon, () => setState(() => page = p),
++              selected: page == p)
++      ])),
++      Obx(() {
++        final user = gFFI.userModel;
++        return Column(children: [
++          if (user.isLogin && user.isAdmin.value)
++            item(translate('Management'), Icons.admin_panel_settings_outlined,
++                _manage),
++          if (!bind.isDisableAccount())
++            item(
++                user.isLogin ? user.accountLabelWithHandle : translate('Login'),
++                Icons.account_circle_outlined, () {
++              if (user.isLogin) {
++                logOutConfirmDialog();
++              } else {
++                loginDialog();
++              }
++            }),
++        ]);
++      }),
++    ]);
++    return Container(
++        width: full ? 200 : 64,
++        margin: const EdgeInsets.all(10),
++        decoration: BoxDecoration(borderRadius: radius, boxShadow: const [
++          BoxShadow(
++              color: Color(0x240b3c5a), offset: Offset(0, 10), blurRadius: 30)
++        ]),
++        child: ClipRRect(
++            borderRadius: radius,
++            child: GestureDetector(
++                behavior: HitTestBehavior.opaque,
++                onSecondaryTapDown: (e) =>
++                    _menu(e.globalPosition, visible, narrow),
++                child: Stack(fit: StackFit.expand, children: [
++                  if (!opaque)
++                    for (final glow in [
++                      (Alignment.topLeft, const Color(0xff1fa7e0)),
++                      (Alignment.centerRight, const Color(0xff34c3a6)),
++                      (Alignment.bottomLeft, _blue)
++                    ])
++                      DecoratedBox(
++                          decoration: BoxDecoration(
++                              gradient: RadialGradient(
++                                  center: glow.$1,
++                                  radius: 1.2,
++                                  colors: [
++                            glow.$2.withOpacity(.40),
++                            glow.$2.withOpacity(0)
++                          ]))),
++                  if (!opaque)
++                    BackdropFilter(
++                        filter: ui.ImageFilter.blur(sigmaX: 28, sigmaY: 28),
++                        child: const SizedBox.expand()),
++                  Container(
++                      padding: EdgeInsets.symmetric(
++                          horizontal: full ? 10 : 6, vertical: 10),
++                      decoration: BoxDecoration(
++                          color: opaque ? _solid : null,
++                          borderRadius: radius,
++                          border:
++                              Border.all(color: Colors.white.withOpacity(.78)),
++                          gradient: opaque
++                              ? null
++                              : LinearGradient(
++                                  begin: Alignment.topLeft,
++                                  end: Alignment.bottomRight,
++                                  colors: [
++                                      Colors.white.withOpacity(.62),
++                                      Colors.white.withOpacity(.42)
++                                    ])),
++                      child: content),
++                ]))));
++  }
++}
+diff --git a/src/lang/cn.rs b/src/lang/cn.rs
+index a86d353..e8e8a41 100644
+--- a/src/lang/cn.rs
++++ b/src/lang/cn.rs
+@@ -233,6 +233,18 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
+         ("Edit Tag", "修改标签"),
+         ("Forget Password", "忘记密码"),
+         ("Favorites", "收藏"),
++        ("Devices", "设备"),
++        ("Recent connections", "最近连接"),
++        ("Device health", "设备健康"),
++        ("Session recordings", "会话录像"),
++        ("Coming soon", "即将提供"),
++        ("Management", "管理"),
++        ("Collapse navigation", "折叠导航栏"),
++        ("Expand navigation", "展开导航栏"),
++        ("Hide navigation", "隐藏导航栏"),
++        ("Auto-collapse below 1100 px", "窗口小于 1100 时自动折叠"),
++        ("Navigation", "导航栏"),
++        ("Unable to open", "无法打开"),
+         ("Add to Favorites", "加入到收藏"),
+         ("Remove from Favorites", "从收藏中删除"),
+         ("Empty", "空空如也"),
