@@ -56,17 +56,20 @@ jobs:
         Write-Output "::add-mask::$password"
         $secure = ConvertTo-SecureString $password -AsPlainText -Force
         $pfx = Join-Path $work 'throwaway.pfx'
-        $rootThumbprint = $null
+        # Remember the thumbprint the moment the certificate exists, so that every
+        # cleanup below runs whichever step fails.
+        $thumbprint = $null
         try {
           $cert = New-SelfSignedCertificate -Type CodeSigningCert -Subject 'CN=SteadDesk CI throwaway' `
             -KeyAlgorithm RSA -KeyLength 3072 -HashAlgorithm SHA256 -KeyExportPolicy Exportable `
             -CertStoreLocation Cert:\CurrentUser\My -NotAfter (Get-Date).AddDays(1)
+          $thumbprint = $cert.Thumbprint
           $null = Export-PfxCertificate -Cert $cert -FilePath $pfx -Password $secure
           $publicCert = Join-Path $work 'throwaway.cer'
           $null = Export-Certificate -Cert $cert -FilePath $publicCert
-          Remove-Item -LiteralPath "Cert:\CurrentUser\My\$($cert.Thumbprint)" -DeleteKey
+          Remove-Item -LiteralPath "Cert:\CurrentUser\My\$thumbprint" -DeleteKey
           # /pa needs a trusted chain. Trust the throwaway root on this runner only.
-          $rootThumbprint = (Import-Certificate -FilePath $publicCert -CertStoreLocation Cert:\LocalMachine\Root).Thumbprint
+          $null = Import-Certificate -FilePath $publicCert -CertStoreLocation Cert:\LocalMachine\Root
 
           # The tool asks for the PFX password with Read-Host. Answer it from this session.
           function Read-Host { param([object]$Prompt, [switch]$AsSecureString) $secure }
@@ -74,8 +77,9 @@ jobs:
 
           $signed = Join-Path $work "windows-signed/$env:PREFIX-x64.exe"
           $signature = Get-AuthenticodeSignature -LiteralPath $signed
-          if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Thumbprint -ne $rootThumbprint -or
+          if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Thumbprint -ne $thumbprint -or
               -not $signature.TimeStamperCertificate) { throw "Unexpected signature: $($signature.Status)" }
+          Write-Output "Signer: $($signature.SignerCertificate.Subject)  Timestamp: $($signature.TimeStamperCertificate.Subject)"
           Push-Location (Join-Path $work 'windows-signed')
           try {
             foreach ($line in Get-Content SHA256SUMS) {
@@ -85,9 +89,30 @@ jobs:
           } finally { Pop-Location }
           if (Test-Path -LiteralPath "$work/windows-signed/$env:PREFIX-x64.unsigned.exe") { throw 'Unsigned input left in the bundle.' }
         } finally {
-          if ($rootThumbprint) { Remove-Item -LiteralPath "Cert:\LocalMachine\Root\$rootThumbprint" }
-          Remove-Item -LiteralPath $work -Recurse -Force
+          # Each cleanup is attempted even if an earlier one throws.
+          try {
+            if ($thumbprint -and (Test-Path -LiteralPath "Cert:\CurrentUser\My\$thumbprint")) {
+              Remove-Item -LiteralPath "Cert:\CurrentUser\My\$thumbprint" -DeleteKey
+            }
+          } finally {
+            try {
+              if ($thumbprint -and (Test-Path -LiteralPath "Cert:\LocalMachine\Root\$thumbprint")) {
+                Remove-Item -LiteralPath "Cert:\LocalMachine\Root\$thumbprint"
+              }
+            } finally {
+              Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
+            }
+          }
         }
+    - name: Check that no throwaway key material is left
+      if: always()
+      shell: pwsh
+      run: |
+        $left = @(Get-ChildItem Cert:\CurrentUser\My, Cert:\LocalMachine\Root |
+          Where-Object Subject -eq 'CN=SteadDesk CI throwaway')
+        if ($left.Count) { throw "Throwaway certificates left: $($left.Thumbprint -join ', ')" }
+        if (Test-Path -LiteralPath (Join-Path $env:RUNNER_TEMP 'signing-selftest')) { throw 'Throwaway files left.' }
+        Write-Output 'No throwaway certificate, key or file is left on the runner.'
 
   android:
     runs-on: ubuntu-24.04
@@ -129,11 +154,21 @@ jobs:
 
         password=$(openssl rand -base64 24)
         echo "::add-mask::$password"
-        keytool -genkeypair -keystore "$work/throwaway.p12" -storetype PKCS12 -alias throwaway \
-          -keyalg RSA -keysize 3072 -validity 1 -dname 'CN=SteadDesk CI throwaway' \
-          -storepass "$password" -keypass "$password" >/dev/null 2>&1
+        # Pass the password through the environment of keytool only, not its arguments,
+        # which other processes on the machine could read.
+        SD_THROWAWAY_PASS="$password" keytool -genkeypair -keystore "$work/throwaway.p12" \
+          -storetype PKCS12 -alias throwaway -keyalg RSA -keysize 3072 -validity 1 \
+          -dname 'CN=SteadDesk CI throwaway' \
+          -storepass:env SD_THROWAWAY_PASS -keypass:env SD_THROWAWAY_PASS >/dev/null 2>&1
 
-        # apksigner reads the password from standard input when there is no console.
+        # apksigner reads one line from standard input when there is no console. That is
+        # enough for this fixture: one signer, and the key password equals the store
+        # password. A wrong password must fail quickly and leave no output bundle.
+        if printf 'wrong-password\n' | timeout 120 scripts/sign-android.sh "$release" "$work/rejected" "$work/throwaway.p12" throwaway; then
+          echo 'A wrong keystore password was accepted.' >&2
+          exit 1
+        fi
+        test ! -e "$work/rejected"
         printf '%s\n' "$password" | scripts/sign-android.sh "$release" "$work/signed" "$work/throwaway.p12" throwaway
 
         apksigner verify --verbose --print-certs "$work/signed/$PREFIX-universal.apk"
