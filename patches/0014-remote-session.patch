@@ -1,0 +1,1031 @@
+Subject: Build the fixed desktop support session surface
+
+diff --git a/flutter/lib/common/widgets/toolbar.dart b/flutter/lib/common/widgets/toolbar.dart
+index c3896b0..8d2d247 100644
+--- a/flutter/lib/common/widgets/toolbar.dart
++++ b/flutter/lib/common/widgets/toolbar.dart
+@@ -92,7 +92,10 @@ bool allowDisplaySwitchInPrivacyMode(PeerInfo pi, String privacyModeImpl) {
+           versionCmp(pi.version, '1.4.8') >= 0);
+ }
+ 
++enum SessionAction { transfer, screenshot }
++
+ class TTextMenu {
++  final SessionAction? action;
+   final Widget child;
+   final VoidCallback? onPressed;
+   Widget? trailingIcon;
+@@ -101,6 +104,7 @@ class TTextMenu {
+       {required this.child,
+       required this.onPressed,
+       this.trailingIcon,
++      this.action,
+       this.divider = false});
+ 
+   Widget getChild() {
+@@ -461,6 +465,7 @@ List<TTextMenu> toolbarControls(BuildContext context, String id, FFI ffi) {
+   if (isDefaultConn && isDesktop) {
+     v.add(
+       TTextMenu(
++          action: SessionAction.transfer,
+           child: Text(translate('Transfer file')),
+           onPressed: () => connectWithToken(isFileTransfer: true)),
+     );
+@@ -606,6 +611,7 @@ List<TTextMenu> toolbarControls(BuildContext context, String id, FFI ffi) {
+         sessionId: sessionId, key: 'is_screenshot_supported', param: '');
+     if ('true' == isScreenshotSupported) {
+       v.add(TTextMenu(
++        action: SessionAction.screenshot,
+         child: Text(ffi.ffiModel.timerScreenshot != null
+             ? '${translate('Taking screenshot')} ...'
+             : translate('Take screenshot')),
+diff --git a/flutter/lib/desktop/pages/remote_page.dart b/flutter/lib/desktop/pages/remote_page.dart
+index 204284b..7fd7c3f 100644
+--- a/flutter/lib/desktop/pages/remote_page.dart
++++ b/flutter/lib/desktop/pages/remote_page.dart
+@@ -695,6 +695,9 @@ class _RemotePageState extends State<RemotePage>
+         ),
+       );
+ 
++  late final bool _supportSession =
++      isDesktop && bind.mainGetAppNameSync() == 'SteadDesk Support';
++
+   Widget buildBody(BuildContext context) {
+     remoteToolbar(BuildContext context) => RemoteToolbar(
+           id: widget.id,
+@@ -716,34 +719,52 @@ class _RemotePageState extends State<RemotePage>
+         );
+ 
+     bodyWidget() {
++      final canvas = Container(
++          color: _supportSession
++              ? const Color(0xffeaf4f9)
++              : kColorCanvas, // TODO(U-01): use shared theme.
++          child: RawKeyFocusScope(
++              focusNode: _rawKeyFocusNode,
++              onFocusChange: (bool imageFocused) {
++                debugPrint(
++                    "onFocusChange(window active:${!_isWindowBlur}) $imageFocused");
++                // See [onWindowBlur].
++                if (isWindows) {
++                  if (_isWindowBlur) {
++                    imageFocused = false;
++                    Future.delayed(Duration.zero, () {
++                      _rawKeyFocusNode.unfocus();
++                    });
++                  }
++                  if (imageFocused) {
++                    _ffi.inputModel.enterOrLeave(true);
++                  } else {
++                    _ffi.inputModel.enterOrLeave(false);
++                  }
++                } else if (isMacOS) {
++                  _onMacOSFocusChange();
++                }
++              },
++              inputModel: _ffi.inputModel,
++              child: getBodyForDesktop(context)));
++      if (_supportSession) {
++        final ready = _ffi.ffiModel.pi.isSet.isTrue &&
++            _ffi.ffiModel.waitForFirstImage.isFalse;
++        final session = SessionSurface(
++            id: widget.id,
++            ffi: _ffi,
++            state: widget.toolbarState,
++            ready: ready,
++            setRemoteState: setState,
++            canvas: canvas);
++        return ready
++            ? session
++            : BlockableOverlay(
++                underlying: session, state: _blockableOverlayState);
++      }
+       return Stack(
+         children: [
+-          Container(
+-              color: kColorCanvas,
+-              child: RawKeyFocusScope(
+-                  focusNode: _rawKeyFocusNode,
+-                  onFocusChange: (bool imageFocused) {
+-                    debugPrint(
+-                        "onFocusChange(window active:${!_isWindowBlur}) $imageFocused");
+-                    // See [onWindowBlur].
+-                    if (isWindows) {
+-                      if (_isWindowBlur) {
+-                        imageFocused = false;
+-                        Future.delayed(Duration.zero, () {
+-                          _rawKeyFocusNode.unfocus();
+-                        });
+-                      }
+-                      if (imageFocused) {
+-                        _ffi.inputModel.enterOrLeave(true);
+-                      } else {
+-                        _ffi.inputModel.enterOrLeave(false);
+-                      }
+-                    } else if (isMacOS) {
+-                      _onMacOSFocusChange();
+-                    }
+-                  },
+-                  inputModel: _ffi.inputModel,
+-                  child: getBodyForDesktop(context))),
++          canvas,
+           Stack(
+             children: [
+               _ffi.ffiModel.pi.isSet.isTrue &&
+@@ -952,6 +973,7 @@ class _RemotePageState extends State<RemotePage>
+           if (!isWeb) bind.hostStopSystemKeyPropagate(stopped: true);
+         },
+         child: _ViewStyleUpdater(
++          trackViewport: _supportSession,
+           canvasModel: _ffi.canvasModel,
+           inputModel: _ffi.inputModel,
+           child: Builder(builder: (context) {
+@@ -988,14 +1010,15 @@ class _RemotePageState extends State<RemotePage>
+                   zoomCursor: _zoomCursor,
+                 )));
+     }
+-    paints.add(
+-      Positioned(
+-        top: 10,
+-        right: 10,
+-        child: _buildRawTouchAndPointerRegion(
+-            QualityMonitor(_ffi.qualityMonitorModel), null, null),
+-      ),
+-    );
++    if (!_supportSession)
++      paints.add(
++        Positioned(
++          top: 10,
++          right: 10,
++          child: _buildRawTouchAndPointerRegion(
++              QualityMonitor(_ffi.qualityMonitorModel), null, null),
++        ),
++      );
+     return Stack(
+       children: paints,
+     );
+@@ -1009,12 +1032,14 @@ class _RemotePageState extends State<RemotePage>
+ /// and InputModel.updateImageWidgetSize() only when either changes.
+ /// This avoids scheduling post-frame callbacks on every LayoutBuilder rebuild.
+ class _ViewStyleUpdater extends StatefulWidget {
++  final bool trackViewport;
+   final CanvasModel canvasModel;
+   final InputModel inputModel;
+   final Widget child;
+ 
+   const _ViewStyleUpdater({
+     Key? key,
++    required this.trackViewport,
+     required this.canvasModel,
+     required this.inputModel,
+     required this.child,
+@@ -1053,6 +1078,15 @@ class _ViewStyleUpdaterState extends State<_ViewStyleUpdater> {
+               _callbackScheduled = false;
+               final currentSize = _lastSize;
+               if (mounted && currentSize != null) {
++                if (widget.trackViewport) {
++                  widget.canvasModel.sessionViewport = currentSize;
++                  widget.canvasModel.sessionOrigin = () {
++                    final box = mounted ? context.findRenderObject() : null;
++                    return box is RenderBox && box.attached
++                        ? box.localToGlobal(Offset.zero)
++                        : null;
++                  };
++                }
+                 widget.canvasModel.updateViewStyle();
+                 widget.inputModel.updateImageWidgetSize(currentSize);
+               }
+diff --git a/flutter/lib/desktop/widgets/remote_toolbar.dart b/flutter/lib/desktop/widgets/remote_toolbar.dart
+index 19b3fa9..032718e 100644
+--- a/flutter/lib/desktop/widgets/remote_toolbar.dart
++++ b/flutter/lib/desktop/widgets/remote_toolbar.dart
+@@ -1,5 +1,7 @@
+ import 'dart:convert';
+ import 'dart:async';
++import 'dart:math' as math;
++import 'dart:ui' as ui;
+ 
+ import 'package:flutter/material.dart';
+ import 'package:flutter/services.dart';
+@@ -25,6 +27,8 @@ import './kb_layout_type_chooser.dart';
+ import 'package:flutter_hbb/utils/scale.dart';
+ import 'package:flutter_hbb/common/widgets/custom_scale_base.dart';
+ 
++part '../../steaddesk/session_surface.dart';
++
+ enum _ToolbarEdge { top, right, bottom, left }
+ 
+ _ToolbarEdge _parseToolbarEdge(String? s) {
+@@ -1523,6 +1527,12 @@ class ScreenAdjustor {
+         horizontalEdges = CanvasModel.leftToEdge + CanvasModel.rightToEdge;
+         verticalEdges = CanvasModel.topToEdge + CanvasModel.bottomToEdge;
+       }
++      final viewport = canvasModel.sessionViewport;
++      if (viewport != null) {
++        final windowCanvas = canvasModel.windowCanvasSize();
++        horizontalEdges += windowCanvas.width - viewport.width;
++        verticalEdges += windowCanvas.height - viewport.height;
++      }
+       final width = (canvasModel.getDisplayWidth() * canvasModel.scale +
+                   horizontalEdges) *
+               scale +
+@@ -1683,12 +1693,14 @@ class ScreenAdjustor {
+ }
+ 
+ class _DisplayMenu extends StatefulWidget {
++  final String? label;
+   final String id;
+   final FFI ffi;
+   final ToolbarState state;
+   final Function(bool) setFullscreen;
+   const _DisplayMenu(
+-      {required this.id,
++      {this.label,
++      required this.id,
+       required this.ffi,
+       required this.state,
+       required this.setFullscreen});
+@@ -1785,6 +1797,7 @@ class _DisplayMenuState extends State<_DisplayMenu> {
+     }
+ 
+     return _IconSubmenuButton(
++      label: widget.label,
+       tooltip: 'Display Settings',
+       svg: "assets/display.svg",
+       ffi: widget.ffi,
+@@ -2517,10 +2530,12 @@ class _ResolutionsMenuState extends State<_ResolutionsMenu> {
+ }
+ 
+ class _KeyboardMenu extends StatelessWidget {
++  final String? label;
+   final String id;
+   final FFI ffi;
+   _KeyboardMenu({
+     Key? key,
++    this.label,
+     required this.id,
+     required this.ffi,
+   }) : super(key: key);
+@@ -2546,6 +2561,7 @@ class _KeyboardMenu extends StatelessWidget {
+     }
+ 
+     return _IconSubmenuButton(
++        label: label,
+         tooltip: 'Keyboard Settings',
+         svg: "assets/keyboard_mouse.svg",
+         ffi: ffi,
+@@ -2790,10 +2806,12 @@ class _KeyboardMenu extends StatelessWidget {
+ }
+ 
+ class _ChatMenu extends StatefulWidget {
++  final String? label;
+   final String id;
+   final FFI ffi;
+   _ChatMenu({
+     Key? key,
++    this.label,
+     required this.id,
+     required this.ffi,
+   }) : super(key: key);
+@@ -2812,6 +2830,7 @@ class _ChatMenuState extends State<_ChatMenu> {
+       return buildTextChatButton();
+     } else {
+       return _IconSubmenuButton(
++          label: widget.label,
+           tooltip: 'Chat',
+           key: chatButtonKey,
+           svg: 'assets/chat.svg',
+@@ -3076,6 +3095,7 @@ class _IconMenuButtonState extends State<_IconMenuButton> {
+ }
+ 
+ class _IconSubmenuButton extends StatefulWidget {
++  final String? label;
+   final String tooltip;
+   final String? svg;
+   final Widget? icon;
+@@ -3087,6 +3107,7 @@ class _IconSubmenuButton extends StatefulWidget {
+   final double? width;
+ 
+   _IconSubmenuButton({
++    this.label,
+     Key? key,
+     this.svg,
+     this.icon,
+@@ -3113,6 +3134,12 @@ class _IconSubmenuButtonState extends State<_IconSubmenuButton> {
+ 
+   @override
+   Widget build(BuildContext context) {
++    if (widget.label != null) {
++      return _SubmenuButton(
++          ffi: widget.ffi!,
++          child: Text(translate(widget.label!)),
++          menuChildren: widget.menuChildrenGetter(this));
++    }
+     assert(widget.svg != null || widget.icon != null);
+     final icon = widget.icon ??
+         SvgPicture.asset(
+diff --git a/flutter/lib/models/input_model.dart b/flutter/lib/models/input_model.dart
+index 6ea23c2..a30f5f6 100644
+--- a/flutter/lib/models/input_model.dart
++++ b/flutter/lib/models/input_model.dart
+@@ -37,10 +37,14 @@ class CanvasCoords {
+   ScrollStyle scrollStyle = ScrollStyle.scrollauto;
+   Size size = Size.zero;
+ 
++  Offset? viewportOrigin;
++
+   CanvasCoords();
+ 
+   Map<String, dynamic> toJson() {
+     return {
++      if (viewportOrigin != null)
++        'origin': [viewportOrigin!.dx, viewportOrigin!.dy],
+       'x': x,
+       'y': y,
+       'scale': scale,
+@@ -56,6 +60,11 @@ class CanvasCoords {
+ 
+   static CanvasCoords fromJson(Map<String, dynamic> json) {
+     final model = CanvasCoords();
++    final origin = json['origin'];
++    if (origin is List && origin.length == 2) {
++      model.viewportOrigin =
++          Offset((origin[0] as num).toDouble(), (origin[1] as num).toDouble());
++    }
+     model.x = json['x'];
+     model.y = json['y'];
+     model.scale = json['scale'];
+@@ -69,6 +78,7 @@ class CanvasCoords {
+ 
+   static CanvasCoords fromCanvasModel(CanvasModel model) {
+     final coords = CanvasCoords();
++    coords.viewportOrigin = model.sessionOrigin?.call();
+     coords.x = model.x;
+     coords.y = model.y;
+     coords.scale = model.scale;
+@@ -1940,8 +1950,8 @@ class InputModel {
+       }
+     }
+ 
+-    y -= CanvasModel.topToEdge;
+-    x -= CanvasModel.leftToEdge;
++    y -= canvas.viewportOrigin?.dy ?? CanvasModel.topToEdge;
++    x -= canvas.viewportOrigin?.dx ?? CanvasModel.leftToEdge;
+     if (isMove) {
+       final canvasModel = parent.target!.canvasModel;
+ 
+diff --git a/flutter/lib/models/model.dart b/flutter/lib/models/model.dart
+index f1abb8e..e6e6c46 100644
+--- a/flutter/lib/models/model.dart
++++ b/flutter/lib/models/model.dart
+@@ -2329,7 +2329,12 @@ class CanvasModel with ChangeNotifier {
+   static double get bottomToEdge =>
+       isDesktop ? windowBorderWidth + kDragToResizeAreaPadding.bottom : 0;
+ 
+-  Size getSize() {
++  Size? sessionViewport;
++  Offset? Function()? sessionOrigin;
++
++  Size getSize() => sessionViewport ?? windowCanvasSize();
++
++  Size windowCanvasSize() {
+     final mediaData = MediaQueryData.fromView(ui.window);
+     final size = mediaData.size;
+     // If minimized, w or h may be negative here.
+@@ -3974,6 +3979,7 @@ class QualityMonitorModel with ChangeNotifier {
+ class RecordingModel with ChangeNotifier {
+   WeakReference<FFI> parent;
+   RecordingModel(this.parent);
++  final elapsed = Stopwatch();
+   bool _start = false;
+   bool get start => _start;
+ 
+@@ -3991,6 +3997,14 @@ class RecordingModel with ChangeNotifier {
+   }
+ 
+   updateStatus(bool status) {
++    if (_start == status) return;
++    if (status) {
++      elapsed
++        ..reset()
++        ..start();
++    } else {
++      elapsed.stop();
++    }
+     _start = status;
+     notifyListeners();
+   }
+diff --git a/flutter/lib/steaddesk/session_surface.dart b/flutter/lib/steaddesk/session_surface.dart
+new file mode 100644
+index 0000000..0a9f580
+--- /dev/null
++++ b/flutter/lib/steaddesk/session_surface.dart
+@@ -0,0 +1,569 @@
++part of '../desktop/widgets/remote_toolbar.dart';
++
++// TODO(U-01): Replace the inline session colors with the shared theme tokens.
++const _ocean = Color(0xff0a6fa8);
++const _ink = Color(0xff0b2e42);
++const _surface = Color(0xffeaf4f9);
++const _danger = Color(0xffdc2626);
++const _numbers = TextStyle(fontFeatures: [ui.FontFeature.tabularFigures()]);
++
++enum _PanelMode { expanded, compact, hidden }
++
++class SessionSurface extends StatefulWidget {
++  final String id;
++  final FFI ffi;
++  final ToolbarState state;
++  final Widget canvas;
++  final bool ready;
++  final Function(VoidCallback) setRemoteState;
++  const SessionSurface(
++      {super.key,
++      required this.id,
++      required this.ffi,
++      required this.state,
++      required this.canvas,
++      required this.ready,
++      required this.setRemoteState});
++
++  @override
++  State<SessionSurface> createState() => _SessionSurfaceState();
++}
++
++class _SessionSurfaceState extends State<SessionSurface> {
++  static const panelKey = 'steaddesk-session-panel';
++  late _PanelMode panel;
++  @override
++  void initState() {
++    super.initState();
++    final stored = bind.getLocalFlutterOption(k: panelKey);
++    panel = _PanelMode.values.firstWhere((mode) => mode.name == stored,
++        orElse: () => _PanelMode.expanded);
++  }
++
++  void changePanel(_PanelMode mode) {
++    setState(() => panel = mode);
++    bind.setLocalFlutterOption(k: panelKey, v: mode.name);
++  }
++
++  @override
++  Widget build(BuildContext context) {
++    final model = Provider.of<FfiModel>(context);
++    final ffi = widget.ffi;
++    final android = widget.ready && model.isPeerAndroid;
++    return Obx(() {
++      final grabbed = ffi.inputModel.relativeMouseMode.value;
++      return ColoredBox(
++          color: _surface,
++          child: Column(children: [
++            IgnorePointer(
++                ignoring: grabbed,
++                child: MenuButtonTheme(
++                    data: MenuButtonThemeData(
++                        style: ButtonStyle(
++                            foregroundColor: MaterialStateProperty.resolveWith(
++                                (states) =>
++                                    states.contains(MaterialState.disabled)
++                                        ? const Color(0xff9ca3af)
++                                        : _ocean),
++                            overlayColor: const MaterialStatePropertyAll(
++                                Color(0xfff3f4f6)),
++                            shape: MaterialStatePropertyAll(
++                                RoundedRectangleBorder(
++                                    borderRadius: BorderRadius.circular(6))))),
++                    child: _SessionHeader(session: widget))),
++            Expanded(
++                child: Row(children: [
++              if (widget.ready)
++                IgnorePointer(
++                    ignoring: grabbed,
++                    child: _DevicePanel(
++                        ffi: ffi, mode: panel, change: changePanel)),
++              Expanded(child: LayoutBuilder(builder: (context, bounds) {
++                final barHeight =
++                    android ? math.min(36.0, bounds.maxHeight / 3) : 0.0;
++                return Stack(fit: StackFit.expand, children: [
++                  Positioned.fill(
++                      bottom: barHeight, child: ClipRect(child: widget.canvas)),
++                  if (android)
++                    AnimatedBuilder(
++                        animation: ffi.canvasModel,
++                        builder: (context, _) {
++                          final c = ffi.canvasModel;
++                          final rect = model.rect;
++                          if (rect == null || rect.isEmpty)
++                            return const SizedBox.shrink();
++                          final visible = Rect.fromLTWH(c.x, c.y,
++                                  rect.width * c.scale, rect.height * c.scale)
++                              .intersect(Rect.fromLTWH(0, 0, bounds.maxWidth,
++                                  bounds.maxHeight - barHeight));
++                          if (visible.isEmpty) return const SizedBox.shrink();
++                          return Positioned(
++                              left: visible.left,
++                              top: visible.bottom,
++                              width: visible.width,
++                              height: barHeight,
++                              child: IgnorePointer(
++                                  ignoring: grabbed,
++                                  child: _AndroidKeys(ffi: ffi)));
++                        }),
++                ]);
++              })),
++            ]))
++          ]));
++    });
++  }
++}
++
++class _SessionHeader extends StatelessWidget {
++  final SessionSurface session;
++  const _SessionHeader({required this.session});
++
++  @override
++  Widget build(BuildContext context) {
++    final ffi = session.ffi;
++    final model = Provider.of<FfiModel>(context);
++    final recording = Provider.of<RecordingModel>(context);
++    final pi = model.pi;
++    final alias = gFFI.abModel.find(session.id)?.alias ?? '';
++    final localAlias = bind.mainGetPeerOptionSync(id: session.id, key: 'alias');
++    final title = alias.isNotEmpty
++        ? alias
++        : localAlias.isNotEmpty
++            ? localAlias
++            : session.id;
++    final subtitle =
++        [pi.hostname, pi.platform].where((s) => s.isNotEmpty).join(' · ');
++    final controls = session.ready
++        ? toolbarControls(context, session.id, ffi)
++        : <TTextMenu>[];
++    final recordingLocked = isOptionFixed(kOptionAllowAutoRecordOutgoing) &&
++        mainGetLocalBoolOptionSync(kOptionAllowAutoRecordOutgoing);
++    final canToggle = !recordingLocked &&
++        bind.mainGetLocalOption(key: kOptionHideRecordingButton) != 'Y' &&
++        (recording.start || model.permissions['recording'] != false);
++    final tools = [
++      _KeyboardMenu(id: session.id, ffi: ffi, label: 'Keyboard Settings'),
++      for (final item in controls.where((e) => e.action == null))
++        if (item.divider)
++          const Divider()
++        else
++          MenuButton(
++              ffi: ffi,
++              child: item.child,
++              onPressed: item.onPressed,
++              trailingIcon: item.trailingIcon),
++      Obx(() {
++        final privacy = PrivacyModeState.find(session.id);
++        if (pi.displaysCount.value <= 1 ||
++            (!privacy.isEmpty &&
++                !allowDisplaySwitchInPrivacyMode(pi, privacy.value))) {
++          return const SizedBox.shrink();
++        }
++        return _MonitorMenu(
++            id: session.id,
++            ffi: ffi,
++            edge: _ToolbarEdge.top,
++            setRemoteState: session.setRemoteState);
++      }),
++      _VoiceCallMenu(id: session.id, ffi: ffi),
++      if (canToggle)
++        MenuButton(
++            ffi: ffi,
++            child: Text(translate(recording.start
++                ? 'Stop session recording'
++                : 'Start session recording')),
++            onPressed: recording.toggle),
++      MenuButton(
++          ffi: ffi,
++          child: Text(translate('Fullscreen')),
++          onPressed: () =>
++              stateGlobal.setFullscreen(!stateGlobal.fullscreen.value)),
++      MenuButton(
++          ffi: ffi,
++          child: Text(translate('Minimize')),
++          onPressed: () =>
++              WindowController.fromWindowId(stateGlobal.windowId).minimize()),
++    ];
++    Widget primary(SessionAction action, String label) {
++      final matches = controls.where((item) => item.action == action);
++      return MenuButton(
++          ffi: ffi,
++          child: Text(translate(label)),
++          onPressed: matches.isEmpty ? null : matches.first.onPressed);
++    }
++
++    return Container(
++        height: 52,
++        padding: const EdgeInsets.symmetric(horizontal: 8),
++        decoration: const BoxDecoration(
++            color: Colors.white,
++            border: Border(bottom: BorderSide(color: Color(0xffe5e7eb)))),
++        child: LayoutBuilder(builder: (context, bounds) {
++          return Row(children: [
++            SizedBox(
++                width: math.min(200.0, bounds.maxWidth * .22),
++                child: Column(
++                    mainAxisAlignment: MainAxisAlignment.center,
++                    crossAxisAlignment: CrossAxisAlignment.start,
++                    children: [
++                      Text(title,
++                          maxLines: 1,
++                          overflow: TextOverflow.ellipsis,
++                          style: const TextStyle(
++                              color: _ink, fontWeight: FontWeight.w600)),
++                      if (session.ready && subtitle.isNotEmpty)
++                        Text(subtitle,
++                            maxLines: 1,
++                            overflow: TextOverflow.ellipsis,
++                            style: const TextStyle(
++                                fontSize: 11, color: Color(0xff4b5563))),
++                    ])),
++            Expanded(
++                child: SingleChildScrollView(
++                    scrollDirection: Axis.horizontal,
++                    child: ConstrainedBox(
++                        constraints: BoxConstraints(
++                            minWidth: math.max(
++                                0.0,
++                                bounds.maxWidth -
++                                    math.min(200.0, bounds.maxWidth * .22) -
++                                    125)),
++                        child: Row(
++                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
++                            children: [
++                              Row(children: [
++                                if (session.ready)
++                                  Obx(() => ConnectionTypeState.find(session.id)
++                                              .secure
++                                              .value !=
++                                          ConnectionType.strSecure
++                                      ? const SizedBox.shrink()
++                                      : Container(
++                                          padding: const EdgeInsets.symmetric(
++                                              horizontal: 5, vertical: 2),
++                                          color: const Color(0xffe3f7f1),
++                                          child: Text(translate('Encrypted'),
++                                              style: const TextStyle(
++                                                  color: Color(0xff0b7a5e),
++                                                  fontSize: 12)))),
++                                if (session.ready) _Latency(ffi: ffi),
++                              ]),
++                              if (session.ready)
++                                MenuBar(
++                                    style: const MenuStyle(
++                                        elevation: MaterialStatePropertyAll(0),
++                                        backgroundColor:
++                                            MaterialStatePropertyAll(
++                                                Colors.transparent),
++                                        padding: MaterialStatePropertyAll(
++                                            EdgeInsets.zero)),
++                                    children: [
++                                      primary(SessionAction.transfer,
++                                          'Transfer file'),
++                                      _ChatMenu(
++                                          id: session.id,
++                                          ffi: ffi,
++                                          label: 'Chat'),
++                                      primary(SessionAction.screenshot,
++                                          'Take screenshot'),
++                                      _DisplayMenu(
++                                          id: session.id,
++                                          ffi: ffi,
++                                          state: session.state,
++                                          label: 'Display',
++                                          setFullscreen: (v) =>
++                                              stateGlobal.setFullscreen(v)),
++                                      _SubmenuButton(
++                                          ffi: ffi,
++                                          child: Text(translate('Tools')),
++                                          menuChildren: tools),
++                                    ]),
++                              if (session.ready && recording.start)
++                                _RecordingTime(model: recording),
++                            ])))),
++            const SizedBox(width: 4),
++            FilledButton(
++                style: FilledButton.styleFrom(
++                    backgroundColor: _danger,
++                    foregroundColor: Colors.white,
++                    shape: RoundedRectangleBorder(
++                        borderRadius: BorderRadius.circular(6)),
++                    padding: const EdgeInsets.symmetric(horizontal: 10)),
++                onPressed: () async {
++                  if (await showConnEndAuditDialogCloseCanceled(ffi: ffi))
++                    return;
++                  closeConnection(id: session.id);
++                },
++                child: Text(translate('End session'))),
++          ]);
++        }));
++  }
++}
++
++class _Latency extends StatelessWidget {
++  final FFI ffi;
++  const _Latency({required this.ffi});
++  @override
++  Widget build(BuildContext context) => AnimatedBuilder(
++      animation: ffi.qualityMonitorModel,
++      builder: (context, _) {
++        final q = ffi.qualityMonitorModel.data;
++        if (q.delay == null) return const SizedBox.shrink();
++        final details = [
++          if (q.targetBitrate != null)
++            '${translate("Bitrate")}: ${q.targetBitrate} kb/s',
++          if (q.fps != null) 'FPS: ${q.fps}',
++          if (q.codecFormat != null) '${translate("Codec")}: ${q.codecFormat}',
++        ].join('\n');
++        return Padding(
++            padding: const EdgeInsets.symmetric(horizontal: 6),
++            child: Tooltip(
++                message: details,
++                child: Text('${q.delay} ms', style: _numbers)));
++      });
++}
++
++class _RecordingTime extends StatefulWidget {
++  final RecordingModel model;
++  const _RecordingTime({required this.model});
++  @override
++  State<_RecordingTime> createState() => _RecordingTimeState();
++}
++
++class _RecordingTimeState extends State<_RecordingTime> {
++  late final Timer tick;
++  @override
++  void initState() {
++    super.initState();
++    tick = Timer.periodic(const Duration(seconds: 1), (_) => setState(() {}));
++  }
++
++  @override
++  void dispose() {
++    tick.cancel();
++    super.dispose();
++  }
++
++  @override
++  Widget build(BuildContext context) {
++    final t = widget.model.elapsed.elapsed;
++    return Text(
++        '● ${translate("Recording in progress")} ${t.inMinutes}:${(t.inSeconds % 60).toString().padLeft(2, "0")}',
++        style: _numbers.copyWith(color: _danger));
++  }
++}
++
++class _AndroidKeys extends StatelessWidget {
++  final FFI ffi;
++  const _AndroidKeys({required this.ffi});
++  @override
++  Widget build(BuildContext context) {
++    final model = Provider.of<FfiModel>(context);
++    final input = ffi.inputModel;
++    final enabled = model.keyboard &&
++        !model.viewOnly &&
++        versionCmp(model.pi.version, '1.2.7') >= 0;
++    Widget key(String label, IconData icon, VoidCallback press) => Expanded(
++        child: IconButton(
++            tooltip: translate(label),
++            padding: EdgeInsets.zero,
++            constraints: const BoxConstraints(),
++            color: _ocean,
++            iconSize: 18,
++            icon: FittedBox(child: Icon(icon)),
++            onPressed: enabled ? press : null));
++    return Material(
++        color: Colors.white,
++        child: Row(children: [
++          key('Back', Icons.arrow_back, input.onMobileBack),
++          key('Home', Icons.home_outlined, input.onMobileHome),
++          key('Recent apps', Icons.filter_none, input.onMobileApps),
++          key('Volume down', Icons.volume_down_outlined,
++              input.onMobileVolumeDown),
++          key('Volume up', Icons.volume_up_outlined, input.onMobileVolumeUp),
++          key('Power menu', Icons.power_settings_new, input.onMobilePower),
++        ]));
++  }
++}
++
++class _DevicePanel extends StatelessWidget {
++  final FFI ffi;
++  final _PanelMode mode;
++  final ValueChanged<_PanelMode> change;
++  const _DevicePanel(
++      {required this.ffi, required this.mode, required this.change});
++
++  Future<void> menu(BuildContext context, Offset point) async {
++    final box = Overlay.of(context).context.findRenderObject() as RenderBox;
++    final local = box.globalToLocal(point);
++    final next = await showMenu<_PanelMode>(
++        context: context,
++        position:
++            RelativeRect.fromRect(local & Size.zero, Offset.zero & box.size),
++        items: [
++          if (mode == _PanelMode.expanded)
++            PopupMenuItem(
++                value: _PanelMode.compact,
++                child: Text(translate('Collapse panel'))),
++          if (mode == _PanelMode.compact)
++            PopupMenuItem(
++                value: _PanelMode.expanded,
++                child: Text(translate('Expand panel'))),
++          PopupMenuItem(
++              value: _PanelMode.hidden, child: Text(translate('Hide panel'))),
++        ]);
++    if (next != null && context.mounted) change(next);
++  }
++
++  @override
++  Widget build(BuildContext context) {
++    final model = Provider.of<FfiModel>(context);
++    final pi = model.pi;
++    final expand = IconButton(
++        icon: const Icon(Icons.chevron_right),
++        color: _ocean,
++        tooltip: translate('Expand panel'),
++        onPressed: () => change(_PanelMode.expanded));
++    if (mode == _PanelMode.hidden)
++      return SizedBox(
++          width: 18,
++          child: Center(
++              child: IconButton(
++                  padding: EdgeInsets.zero,
++                  constraints: const BoxConstraints(),
++                  icon: const Icon(Icons.chevron_right, size: 18),
++                  color: _ocean,
++                  tooltip: translate('Expand panel'),
++                  onPressed: () => change(_PanelMode.expanded))));
++    final reduced = MediaQuery.disableAnimationsOf(context) ||
++        bind.mainGetOptionSync(key: kOptionAllowAlwaysSoftwareRender) == 'Y';
++    final border = BorderRadius.circular(20);
++    Widget glow(Alignment at, Color color) => DecoratedBox(
++        decoration: BoxDecoration(
++            gradient: RadialGradient(
++                center: at,
++                radius: .9,
++                colors: [color.withOpacity(.26), color.withOpacity(0)])));
++    Widget field(String label, String value) => Padding(
++        padding: const EdgeInsets.fromLTRB(12, 5, 12, 5),
++        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
++          Text(translate(label),
++              style: const TextStyle(fontSize: 11, color: Color(0xff4b5563))),
++          SelectableText(value, style: _numbers.copyWith(color: _ink)),
++        ]));
++    final compact = mode == _PanelMode.compact;
++    final width = compact
++        ? 44.0
++        : math.min(194.0, MediaQuery.sizeOf(context).width * .25);
++    return Align(
++        alignment: Alignment.topLeft,
++        widthFactor: 1,
++        child: Container(
++            width: width,
++            margin: const EdgeInsets.all(10),
++            decoration: BoxDecoration(borderRadius: border, boxShadow: const [
++              BoxShadow(
++                  color: Color(0x240b3c5a),
++                  offset: Offset(0, 10),
++                  blurRadius: 30)
++            ]),
++            child: GestureDetector(
++                behavior: HitTestBehavior.opaque,
++                onSecondaryTapDown: (event) =>
++                    menu(context, event.globalPosition),
++                child: ClipRRect(
++                    borderRadius: border,
++                    child: Stack(children: [
++                      if (!reduced)
++                        Positioned.fill(
++                            child: Stack(fit: StackFit.expand, children: [
++                          glow(Alignment.topLeft, const Color(0xff1fa7e0)),
++                          glow(Alignment.centerRight, const Color(0xff34c3a6)),
++                          glow(Alignment.bottomLeft, _ocean),
++                        ])),
++                      if (!reduced)
++                        Positioned.fill(
++                            child: BackdropFilter(
++                                filter:
++                                    ui.ImageFilter.blur(sigmaX: 28, sigmaY: 28),
++                                child: const SizedBox.expand())),
++                      Container(
++                          decoration: BoxDecoration(
++                              borderRadius: border,
++                              border:
++                                  Border.all(color: const Color(0xc7ffffff)),
++                              color: reduced ? const Color(0xffe8f4fa) : null,
++                              gradient: reduced
++                                  ? null
++                                  : const LinearGradient(
++                                      begin: Alignment.topLeft,
++                                      end: Alignment.bottomRight,
++                                      colors: [
++                                          Color(0x9effffff),
++                                          Color(0x6bffffff)
++                                        ])),
++                          child: compact
++                              ? expand
++                              : SingleChildScrollView(
++                                  child: Column(
++                                      mainAxisSize: MainAxisSize.min,
++                                      crossAxisAlignment:
++                                          CrossAxisAlignment.stretch,
++                                      children: [
++                                      Row(children: [
++                                        const SizedBox(width: 12),
++                                        Expanded(
++                                            child: Text(
++                                                translate('Device status'),
++                                                overflow: TextOverflow.ellipsis,
++                                                style: const TextStyle(
++                                                    color: _ink,
++                                                    fontWeight:
++                                                        FontWeight.w600))),
++                                        IconButton(
++                                            tooltip:
++                                                translate('Collapse panel'),
++                                            icon:
++                                                const Icon(Icons.chevron_left),
++                                            onPressed: () =>
++                                                change(_PanelMode.compact))
++                                      ]),
++                                      const Divider(height: 1),
++                                      if (pi.platform.isNotEmpty)
++                                        field('Platform', pi.platform),
++                                      if (model.isPeerAndroid &&
++                                          pi.hostname.isNotEmpty)
++                                        field('Device model', pi.hostname),
++                                      AnimatedBuilder(
++                                          animation: ffi.canvasModel,
++                                          builder: (context, _) {
++                                            final rect = model.rect;
++                                            return rect == null || rect.isEmpty
++                                                ? const SizedBox.shrink()
++                                                : field('Resolution',
++                                                    '${rect.width.toInt()} × ${rect.height.toInt()}');
++                                          }),
++                                      Obx(() {
++                                        final value =
++                                            ConnectionTypeState.find(ffi.id)
++                                                .direct
++                                                .value;
++                                        if (value != ConnectionType.strDirect &&
++                                            value !=
++                                                ConnectionType.strIndirect) {
++                                          return const SizedBox.shrink();
++                                        }
++                                        return field(
++                                            'Connection type',
++                                            translate(value ==
++                                                    ConnectionType.strDirect
++                                                ? 'Direct connection'
++                                                : 'Relay connection'));
++                                      }),
++                                      if (pi.version.isNotEmpty)
++                                        field('SteadDesk version', pi.version),
++                                      const SizedBox(height: 10),
++                                    ]))),
++                    ])))));
++  }
++}
+diff --git a/libs/hbb_common/src/config.rs b/libs/hbb_common/src/config.rs
+index e0e6373..3c90e3a 100644
+--- a/libs/hbb_common/src/config.rs
++++ b/libs/hbb_common/src/config.rs
+@@ -2398,6 +2398,8 @@ impl UserDefaultConfig {
+             #[cfg(any(target_os = "android", target_os = "ios"))]
+             keys::OPTION_VIEW_STYLE => self.get_string(key, "adaptive", vec!["original"]),
+             #[cfg(not(any(target_os = "android", target_os = "ios")))]
++            keys::OPTION_VIEW_STYLE if SUPPORT_EDITION => self.get_string(key, "adaptive", vec!["original"]),
++            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+             keys::OPTION_VIEW_STYLE => self.get_string(key, "original", vec!["adaptive"]),
+             keys::OPTION_SCROLL_STYLE => {
+                 self.get_string(key, "scrollauto", vec!["scrolledge", "scrollbar"])
+diff --git a/src/lang/cn.rs b/src/lang/cn.rs
+index a86d353..d62b991 100644
+--- a/src/lang/cn.rs
++++ b/src/lang/cn.rs
+@@ -330,6 +330,21 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
+         ("Hide Toolbar", "隐藏工具栏"),
+         ("Direct Connection", "直接连接"),
+         ("Relay Connection", "中继连接"),
++        ("Device status", "设备状态"),
++        ("Collapse panel", "折叠面板"),
++        ("Hide panel", "隐藏面板"),
++        ("Expand panel", "展开面板"),
++        ("Device model", "设备型号"),
++        ("Connection type", "连接方式"),
++        ("Direct connection", "直连"),
++        ("Relay connection", "中继"),
++        ("SteadDesk version", "SteadDesk 版本"),
++        ("End session", "结束会话"),
++        ("Encrypted", "已加密"),
++        ("Tools", "工具"),
++        ("Recording in progress", "录像中"),
++        ("Recent apps", "最近任务"),
++        ("Power menu", "电源菜单"),
+         ("Secure Connection", "安全连接"),
+         ("Insecure Connection", "非安全连接"),
+         ("Scale original", "原始尺寸"),
