@@ -1,0 +1,143 @@
+---
+# Run both offline signing tools end to end with throwaway keys, so that the
+# first real release is not also the first time the tools run. The keys are
+# generated inside the job, used once and deleted; nothing is uploaded.
+name: Signing tools self-test
+'on':
+  pull_request:
+    paths:
+    - scripts/sign-windows.ps1
+    - scripts/sign-android.sh
+    - scripts/signing_bundle.py
+    - .github/workflows/signing-selftest.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+env:
+  PREFIX: SteadDesk-1.5.0-sd.1
+jobs:
+  windows:
+    runs-on: windows-2022
+    steps:
+    - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      with:
+        persist-credentials: false
+    - name: Sign a stand-in executable with a throwaway certificate
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+        Set-StrictMode -Version Latest
+        $work = Join-Path $env:RUNNER_TEMP 'signing-selftest'
+        $release = Join-Path $work 'unsigned'
+        $null = New-Item -ItemType Directory -Path $release
+
+        # A real PE file stands in for the client. Its content does not matter here.
+        $source = Join-Path $work 'StandIn.cs'
+        'public static class P { public static void Main() { } }' | Set-Content -LiteralPath $source
+        $csc = Join-Path $env:WINDIR 'Microsoft.NET/Framework64/v4.0.30319/csc.exe'
+        & $csc /nologo /target:exe "/out:$release/$env:PREFIX-x64.unsigned.exe" $source
+        if ($LASTEXITCODE) { throw 'Could not build the stand-in executable.' }
+        [IO.File]::WriteAllBytes("$release/$env:PREFIX-universal.unsigned.apk", [byte[]](1, 2, 3))
+        [IO.File]::WriteAllBytes("$release/$env:PREFIX-source.tar.gz", [byte[]](4, 5, 6))
+        $sums = Get-ChildItem -LiteralPath $release | Sort-Object Name | ForEach-Object {
+          "$((Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLower())  $($_.Name)"
+        }
+        [IO.File]::WriteAllText("$release/SHA256SUMS", ($sums -join "`n") + "`n", [Text.Encoding]::ASCII)
+
+        # SignTool 10.0.22000 or later, as the README requires.
+        $kits = 'C:/Program Files (x86)/Windows Kits/10/bin'
+        $tool = Get-ChildItem -LiteralPath $kits -Directory |
+          Where-Object { $_.Name -match '^10\.0\.\d+\.\d+$' -and [version]$_.Name -ge [version]'10.0.22000.0' } |
+          Sort-Object { [version]$_.Name } | Select-Object -Last 1
+        if (-not $tool) { throw 'No Windows SDK 10.0.22000+ SignTool on the runner.' }
+        $env:PATH = (Join-Path $tool.FullName 'x64') + [IO.Path]::PathSeparator + $env:PATH
+
+        $password = [Convert]::ToBase64String([Security.Cryptography.RandomNumberGenerator]::GetBytes(24))
+        Write-Output "::add-mask::$password"
+        $secure = ConvertTo-SecureString $password -AsPlainText -Force
+        $pfx = Join-Path $work 'throwaway.pfx'
+        $rootThumbprint = $null
+        try {
+          $cert = New-SelfSignedCertificate -Type CodeSigningCert -Subject 'CN=SteadDesk CI throwaway' `
+            -KeyAlgorithm RSA -KeyLength 3072 -HashAlgorithm SHA256 -KeyExportPolicy Exportable `
+            -CertStoreLocation Cert:\CurrentUser\My -NotAfter (Get-Date).AddDays(1)
+          $null = Export-PfxCertificate -Cert $cert -FilePath $pfx -Password $secure
+          $publicCert = Join-Path $work 'throwaway.cer'
+          $null = Export-Certificate -Cert $cert -FilePath $publicCert
+          Remove-Item -LiteralPath "Cert:\CurrentUser\My\$($cert.Thumbprint)" -DeleteKey
+          # /pa needs a trusted chain. Trust the throwaway root on this runner only.
+          $rootThumbprint = (Import-Certificate -FilePath $publicCert -CertStoreLocation Cert:\LocalMachine\Root).Thumbprint
+
+          # The tool asks for the PFX password with Read-Host. Answer it from this session.
+          function Read-Host { param([object]$Prompt, [switch]$AsSecureString) $secure }
+          & ./scripts/sign-windows.ps1 -ReleaseDir $release -OutputDir (Join-Path $work 'windows-signed') -PfxPath $pfx
+
+          $signed = Join-Path $work "windows-signed/$env:PREFIX-x64.exe"
+          $signature = Get-AuthenticodeSignature -LiteralPath $signed
+          if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Thumbprint -ne $rootThumbprint -or
+              -not $signature.TimeStamperCertificate) { throw "Unexpected signature: $($signature.Status)" }
+          Push-Location (Join-Path $work 'windows-signed')
+          try {
+            foreach ($line in Get-Content SHA256SUMS) {
+              $hash, $name = $line -split '  ', 2
+              if ((Get-FileHash -LiteralPath $name -Algorithm SHA256).Hash -ne $hash) { throw "Checksum mismatch: $name" }
+            }
+          } finally { Pop-Location }
+          if (Test-Path -LiteralPath "$work/windows-signed/$env:PREFIX-x64.unsigned.exe") { throw 'Unsigned input left in the bundle.' }
+        } finally {
+          if ($rootThumbprint) { Remove-Item -LiteralPath "Cert:\LocalMachine\Root\$rootThumbprint" }
+          Remove-Item -LiteralPath $work -Recurse -Force
+        }
+
+  android:
+    runs-on: ubuntu-24.04
+    steps:
+    - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      with:
+        persist-credentials: false
+    - name: Sign a stand-in APK with a throwaway keystore
+      shell: bash
+      run: |
+        set -euo pipefail
+        umask 077
+        work="$RUNNER_TEMP/signing-selftest"
+        release="$work/unsigned"
+        mkdir -p "$release"
+        trap 'rm -rf -- "$work"' EXIT
+
+        # Build-Tools 35 or later, as the README requires.
+        tools=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -n 1)
+        if ! [[ $(basename "$tools") =~ ^([0-9]+) ]] || (( BASH_REMATCH[1] < 35 )); then
+          echo "Need Android SDK Build-Tools 35 or later, found $tools" >&2
+          exit 1
+        fi
+        platform=$(ls -d "$ANDROID_HOME"/platforms/android-* | sort -V | tail -n 1)
+        export PATH="$tools:$PATH"
+
+        # A minimal APK stands in for the client.
+        cat > "$work/AndroidManifest.xml" <<'XML'
+        <manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.steaddesk.selftest">
+          <application android:hasCode="false"/>
+        </manifest>
+        XML
+        aapt2 link --manifest "$work/AndroidManifest.xml" -I "$platform/android.jar" \
+          --min-sdk-version 24 --target-sdk-version 34 -o "$work/linked.apk"
+        zipalign -p 4 "$work/linked.apk" "$release/$PREFIX-universal.unsigned.apk"
+        printf 'stand-in' > "$release/$PREFIX-x64.exe"
+        printf 'stand-in' > "$release/$PREFIX-source.tar.gz"
+        (cd "$release" && sha256sum -- * > "$work/SHA256SUMS" && mv "$work/SHA256SUMS" SHA256SUMS)
+
+        password=$(openssl rand -base64 24)
+        echo "::add-mask::$password"
+        keytool -genkeypair -keystore "$work/throwaway.p12" -storetype PKCS12 -alias throwaway \
+          -keyalg RSA -keysize 3072 -validity 1 -dname 'CN=SteadDesk CI throwaway' \
+          -storepass "$password" -keypass "$password" >/dev/null 2>&1
+
+        # apksigner reads the password from standard input when there is no console.
+        printf '%s\n' "$password" | scripts/sign-android.sh "$release" "$work/signed" "$work/throwaway.p12" throwaway
+
+        apksigner verify --verbose --print-certs "$work/signed/$PREFIX-universal.apk"
+        apksigner verify --print-certs "$work/signed/$PREFIX-universal.apk" |
+          grep -q '^Signer #1 certificate DN: CN=SteadDesk CI throwaway$'
+        (cd "$work/signed" && sha256sum -c SHA256SUMS)
+        test ! -e "$work/signed/$PREFIX-universal.unsigned.apk"
