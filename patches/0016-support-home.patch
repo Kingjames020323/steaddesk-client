@@ -1,5 +1,44 @@
 Subject: [SteadDesk] Support desktop navigation and device directory
 
+diff --git a/flutter/lib/common/widgets/peer_card.dart b/flutter/lib/common/widgets/peer_card.dart
+index 1f9f3ed..266665f 100644
+--- a/flutter/lib/common/widgets/peer_card.dart
++++ b/flutter/lib/common/widgets/peer_card.dart
+@@ -11,6 +11,7 @@ import 'package:provider/provider.dart';
+ import '../../common.dart';
+ import '../../common/formatter/id_formatter.dart';
+ import '../../models/peer_model.dart';
++import '../../models/ab_model.dart';
+ import '../../models/platform_model.dart';
+ import '../../desktop/widgets/material_mod_popup_menu.dart' as mod_menu;
+ import '../../desktop/widgets/popup_menu.dart';
+@@ -1539,7 +1540,8 @@ class TagPainter extends CustomPainter {
+ }
+ 
+ void connectInPeerTab(BuildContext context, Peer peer, PeerTabIndex tab,
+-    {bool isFileTransfer = false,
++    {BaseAb? addressBook,
++    bool isFileTransfer = false,
+     bool isViewCamera = false,
+     bool isTcpTunneling = false,
+     bool isRDP = false,
+@@ -1556,13 +1558,14 @@ void connectInPeerTab(BuildContext context, Peer peer, PeerTabIndex tab,
+         alias: peer.alias,
+       );
+     }
+-    if (!gFFI.abModel.current.isPersonal()) {
++    final book = addressBook ?? gFFI.abModel.current;
++    if (!book.isPersonal()) {
+       if (peer.password.isNotEmpty) {
+         password = peer.password;
+         isSharedPassword = true;
+       }
+       if (password.isEmpty) {
+-        final abPassword = gFFI.abModel.getdefaultSharedPassword();
++        final abPassword = gFFI.abModel.getdefaultSharedPassword(book);
+         if (abPassword != null) {
+           password = abPassword;
+           isSharedPassword = true;
 diff --git a/flutter/lib/desktop/pages/desktop_home_page.dart b/flutter/lib/desktop/pages/desktop_home_page.dart
 index 8ceb5b4..324106d 100644
 --- a/flutter/lib/desktop/pages/desktop_home_page.dart
@@ -22,6 +61,26 @@ index 8ceb5b4..324106d 100644
      final isIncomingOnly = bind.isIncomingOnly();
      return _buildBlock(
          child: Row(
+diff --git a/flutter/lib/models/ab_model.dart b/flutter/lib/models/ab_model.dart
+index 001887c..80742f7 100644
+--- a/flutter/lib/models/ab_model.dart
++++ b/flutter/lib/models/ab_model.dart
+@@ -840,11 +840,12 @@ class AbModel {
+     _peerIdUpdateListeners.remove(key);
+   }
+ 
+-  String? getdefaultSharedPassword() {
+-    if (current.isPersonal()) {
++  String? getdefaultSharedPassword([BaseAb? addressBook]) {
++    final book = addressBook ?? current;
++    if (book.isPersonal()) {
+       return null;
+     }
+-    final profile = current.sharedProfile();
++    final profile = book.sharedProfile();
+     if (profile == null) {
+       return null;
+     }
 diff --git a/flutter/lib/models/user_model.dart b/flutter/lib/models/user_model.dart
 index 405a9fa..d955322 100644
 --- a/flutter/lib/models/user_model.dart
@@ -44,12 +103,485 @@ index 405a9fa..d955322 100644
      await bind.mainSetLocalOption(key: 'access_token', value: '');
      await bind.mainSetLocalOption(key: 'user_info', value: '');
      if (resetOther) {
+diff --git a/flutter/lib/steaddesk/support_device.dart b/flutter/lib/steaddesk/support_device.dart
+new file mode 100644
+index 0000000..5463148
+--- /dev/null
++++ b/flutter/lib/steaddesk/support_device.dart
+@@ -0,0 +1,78 @@
++// Only display fields cross into the directory and its search index.
++enum DeviceFilter {
++  all('All'),
++  sunmi('SUNMI'),
++  windows('Windows'),
++  online('Online'),
++  offline('Offline');
++
++  final String label;
++  const DeviceFilter(this.label);
++}
++
++class SupportDevice {
++  final String id, alias, platform, name, model, groupName;
++  final String? merchant, store;
++  final bool sunmi;
++  final bool? online;
++  static final _asset = RegExp(r'^(M[0-9]+)-(S[0-9]+)-([A-Z0-9][A-Z0-9._-]*)$',
++      caseSensitive: false);
++  static final _sunmiModel = RegExp(r'^SUNMI-(.+)$', caseSensitive: false);
++
++  SupportDevice._(this.id, this.alias, this.platform, this.name, this.model,
++      this.groupName, this.merchant, this.store, this.sunmi, this.online);
++
++  factory SupportDevice(
++      {required String id,
++      required String alias,
++      required List<String> hostnames,
++      required String platform,
++      required String groupName,
++      required bool? online}) {
++    final names =
++        [...hostnames, alias].map((s) => s.trim()).where((s) => s.isNotEmpty);
++    RegExpMatch? asset;
++    for (final n in names) {
++      asset = _asset.firstMatch(n);
++      if (asset != null) break;
++    }
++    String model = '';
++    if (platform.toLowerCase() == 'android') {
++      for (final host in hostnames) {
++        final match = _sunmiModel.firstMatch(host.trim());
++        if (match != null) {
++          model = match[1]!.trim();
++          break;
++        }
++      }
++    }
++    final name = asset?[0] ??
++        hostnames.firstWhere((s) => s.isNotEmpty, orElse: () => '');
++    return SupportDevice._(
++        id,
++        alias,
++        platform,
++        name,
++        model,
++        groupName,
++        asset?[1]?.toUpperCase(),
++        asset?[2]?.toUpperCase(),
++        model.isNotEmpty || (asset?[3] ?? '').toUpperCase().startsWith('SUNMI'),
++        online);
++  }
++
++  bool matches(DeviceFilter filter) {
++    switch (filter) {
++      case DeviceFilter.all:
++        return true;
++      case DeviceFilter.sunmi:
++        return sunmi;
++      case DeviceFilter.windows:
++        return platform.toLowerCase() == 'windows';
++      case DeviceFilter.online:
++        return online == true;
++      case DeviceFilter.offline:
++        return online == false;
++    }
++  }
++}
+diff --git a/flutter/lib/steaddesk/support_directory.dart b/flutter/lib/steaddesk/support_directory.dart
+new file mode 100644
+index 0000000..58bbf56
+--- /dev/null
++++ b/flutter/lib/steaddesk/support_directory.dart
+@@ -0,0 +1,380 @@
++part of 'support_home.dart';
++
++typedef _Source = ({Peer peer, BaseAb? book, PeerTabIndex tab});
++typedef _Entry = ({SupportDevice device, _Source source});
++
++class _Directory extends StatefulWidget {
++  final SupportPage page;
++  const _Directory(this.page, {super.key});
++  @override
++  State<_Directory> createState() => _DirectoryState();
++}
++
++class _DirectoryState extends State<_Directory> {
++  static const _event = 'callback_query_onlines';
++  static const _listener = 'SteadDeskSupportDirectory';
++  final presence = <String, bool>{};
++  final loadedBooks = <BaseAb>{};
++  final closed = <String>{};
++  Set<String> ids = {};
++  String scope = '';
++  var filter = DeviceFilter.all;
++  late final Timer timer;
++
++  @override
++  void initState() {
++    super.initState();
++    platformFFI.registerEventHandler(_event, _listener, (evt) async {
++      if (!mounted) return;
++      var changed = false;
++      for (final online in [true, false]) {
++        final raw = evt[online ? 'onlines' : 'offlines'];
++        if (raw is! String) continue;
++        for (final id in raw.split(',')) {
++          if (ids.contains(id) && presence[id] != online) {
++            presence[id] = online;
++            changed = true;
++          }
++        }
++      }
++      if (changed) setState(() {});
++    });
++    timer = Timer.periodic(const Duration(seconds: 30), (_) => _query());
++    if (widget.page == SupportPage.recent) bind.mainLoadRecentPeers();
++    if (widget.page == SupportPage.favorites) bind.mainLoadFavPeers();
++  }
++
++  Future<void> _query() async {
++    if (!mounted || ids.isEmpty) return;
++    try {
++      await bind.queryOnlines(ids: ids.toList());
++    } catch (_) {
++      if (mounted && presence.isNotEmpty) setState(presence.clear);
++    }
++  }
++
++  void _observe(Set<String> next) {
++    if (setEquals(ids, next)) return;
++    ids = next;
++    presence.removeWhere((k, _) => !ids.contains(k));
++    WidgetsBinding.instance.addPostFrameCallback((_) => _query());
++  }
++
++  void _loadBook(BaseAb book) {
++    if (book.initialized || !loadedBooks.add(book)) return;
++    WidgetsBinding.instance.addPostFrameCallback((_) {
++      if (mounted &&
++          gFFI.userModel.isLogin &&
++          gFFI.abModel.addressbooks[book.name()] == book &&
++          !book.initialized &&
++          !book.abPulling) book.pullAb(quiet: true);
++    });
++  }
++
++  @override
++  void dispose() {
++    timer.cancel();
++    platformFFI.unregisterEventHandler(_event, _listener);
++    super.dispose();
++  }
++
++  List<_Entry> _entries() {
++    final all = <String, List<_Source>>{};
++    void add(Peer peer, PeerTabIndex tab, [BaseAb? book]) {
++      if (peer.id.isNotEmpty)
++        (all[peer.id] ??= []).add((peer: peer, book: book, tab: tab));
++    }
++
++    final directory = widget.page == SupportPage.devices;
++    if (!directory) {
++      final recent = widget.page == SupportPage.recent;
++      final model = recent ? gFFI.recentPeersModel : gFFI.favoritePeersModel;
++      final tab = recent ? PeerTabIndex.recent : PeerTabIndex.fav;
++      for (final p in model.peers) {
++        add(p, tab);
++      }
++      for (final id in model.restPeerIds) {
++        if (!all.containsKey(id)) add(Peer.fromJson({'id': id}), tab);
++      }
++    }
++    if (gFFI.userModel.isLogin) {
++      final ab = gFFI.abModel;
++      // Prefer the active book when an ID is shared across multiple books.
++      for (final book in {ab.current, ...ab.addressbooks.values}) {
++        if (!ab.addressbooks.containsKey(book.name())) continue;
++        if (directory && !book.isPersonal() && book != ab.current)
++          _loadBook(book);
++        for (final p in book.peers) {
++          if (directory || all.containsKey(p.id)) add(p, PeerTabIndex.ab, book);
++        }
++      }
++      for (final p in gFFI.groupModel.peers) {
++        if (directory || all.containsKey(p.id)) add(p, PeerTabIndex.group);
++      }
++    }
++    _observe(all.keys.toSet());
++    return all.entries.map((entry) {
++      final peers = entry.value.map((s) => s.peer);
++      String first(String Function(Peer) read) =>
++          peers.map(read).firstWhere((s) => s.isNotEmpty, orElse: () => '');
++      return (
++        device: SupportDevice(
++            id: entry.key,
++            alias: first((p) => p.alias),
++            hostnames: peers.map((p) => p.hostname).toList(),
++            platform: first((p) => p.platform),
++            groupName: first((p) => p.device_group_name),
++            online: presence[entry.key]),
++        source: entry.value.first
++      );
++    }).toList();
++  }
++
++  void _connect(_Entry row) =>
++      connectInPeerTab(context, row.source.peer, row.source.tab,
++          addressBook: row.source.book);
++
++  void _details(_Entry row) {
++    final d = row.device;
++    showDialog<void>(
++        context: context,
++        builder: (ctx) => AlertDialog(
++                title: Text(d.alias.isEmpty ? d.id : d.alias),
++                content: SelectableText([
++                  if (d.name.isNotEmpty) d.name,
++                  'ID: ${d.id}',
++                  if (d.platform.isNotEmpty) d.platform,
++                  if (d.model.isNotEmpty) d.model,
++                  if (d.groupName.isNotEmpty) d.groupName
++                ].join('\n')),
++                actions: [
++                  TextButton(
++                      onPressed: () => Navigator.pop(ctx),
++                      child: Text(translate('Close'))),
++                  TextButton(
++                      onPressed: () {
++                        Navigator.pop(ctx);
++                        _connect(row);
++                      },
++                      child: Text(translate('Connect')))
++                ]));
++  }
++
++  @override
++  Widget build(BuildContext context) => AnimatedBuilder(
++      animation:
++          Listenable.merge([gFFI.recentPeersModel, gFFI.favoritePeersModel]),
++      builder: (_, __) => Obx(() {
++            final entries = _entries();
++            final devices = entries.map((e) => e.device);
++            final byScope = <String, (int, int)>{};
++            final stores = <String, Set<String>>{};
++            for (final d in devices) {
++              final m = d.merchant;
++              if (m != null) (stores[m] ??= {}).add(d.store!);
++              for (final key in [
++                '',
++                if (m == null) '?' else ...['*', m, '$m/${d.store}']
++              ]) {
++                final previous = byScope[key] ?? (0, 0);
++                byScope[key] =
++                    (previous.$1 + (d.online == true ? 1 : 0), previous.$2 + 1);
++              }
++            }
++            final selected = byScope.containsKey(scope) ? scope : '';
++            final rows = entries.where((row) {
++              final d = row.device;
++              return d.matches(filter) &&
++                  (selected.isEmpty ||
++                      (selected == '?' && d.merchant == null) ||
++                      (selected == '*' && d.merchant != null) ||
++                      selected == d.merchant ||
++                      selected == '${d.merchant}/${d.store}');
++            }).toList();
++            final grouped = widget.page == SupportPage.devices;
++            return LayoutBuilder(builder: (context, size) {
++              final treeWidth = size.maxWidth >= 850 ? 212.0 : 158.0;
++              // Keep columns usable at very small desktop window sizes.
++              final width =
++                  math.max(size.maxWidth, grouped ? treeWidth + 430 : 430.0);
++              return SingleChildScrollView(
++                  scrollDirection: Axis.horizontal,
++                  child: SizedBox(
++                      width: width,
++                      child: Row(children: [
++                        if (grouped) ...[
++                          SizedBox(
++                              width: treeWidth,
++                              child: _tree(byScope, stores, selected)),
++                          const VerticalDivider(width: 1)
++                        ],
++                        Expanded(
++                            child: Column(
++                                crossAxisAlignment: CrossAxisAlignment.stretch,
++                                children: [
++                              Padding(
++                                  padding:
++                                      const EdgeInsets.fromLTRB(16, 16, 16, 4),
++                                  child: Text(translate(widget.page.label),
++                                      style: const TextStyle(
++                                          fontSize: 20,
++                                          color: _ink,
++                                          fontWeight: FontWeight.w600))),
++                              SingleChildScrollView(
++                                  scrollDirection: Axis.horizontal,
++                                  child: Row(children: [
++                                    for (final f in DeviceFilter.values)
++                                      InkWell(
++                                          onTap: () =>
++                                              setState(() => filter = f),
++                                          hoverColor: const Color(0xfff3f4f6),
++                                          child: Container(
++                                              padding:
++                                                  const EdgeInsets.symmetric(
++                                                      vertical: 9,
++                                                      horizontal: 12),
++                                              decoration: BoxDecoration(
++                                                  border: Border(
++                                                      bottom: BorderSide(
++                                                          width: 2,
++                                                          color: filter == f
++                                                              ? _blue
++                                                              : Colors
++                                                                  .transparent))),
++                                              child: Text(translate(f.label),
++                                                  style: TextStyle(
++                                                      color: filter == f
++                                                          ? _blue
++                                                          : const Color(
++                                                              0xff4b5563)))))
++                                  ])),
++                              _columns(
++                                  Text(translate('Device')),
++                                  Text(translate('Status')),
++                                  Text(translate('Model')),
++                                  Text(translate('Action'))),
++                              const Divider(
++                                  height: 1, color: Color(0xffe5e7eb)),
++                              Expanded(
++                                  child: rows.isEmpty
++                                      ? Center(
++                                          child: Text(translate('No devices')))
++                                      : ListView.separated(
++                                          itemCount: rows.length,
++                                          separatorBuilder: (_, __) =>
++                                              const Divider(
++                                                  height: 1,
++                                                  color: Color(0xffeef0f2)),
++                                          itemBuilder: (_, i) =>
++                                              _row(rows[i]))),
++                            ]))
++                      ])));
++            });
++          }));
++
++  Widget _tree(Map<String, (int, int)> counts, Map<String, Set<String>> stores,
++      String selected) {
++    Widget node(String key, String label, int depth, {bool branch = false}) {
++      final count = counts[key] ?? (0, 0);
++      return Material(
++          color: selected == key ? const Color(0xffdff2fa) : Colors.transparent,
++          child: InkWell(
++              onTap: () => setState(() => scope = key),
++              child: Padding(
++                  padding: EdgeInsets.fromLTRB(6.0 + depth * 8, 3, 8, 3),
++                  child: Row(children: [
++                    if (branch)
++                      SizedBox(
++                          width: 24,
++                          height: 32,
++                          child: IconButton(
++                              padding: EdgeInsets.zero,
++                              iconSize: 16,
++                              tooltip: translate(
++                                  closed.contains(key) ? 'Expand' : 'Collapse'),
++                              onPressed: () => setState(() {
++                                    if (!closed.remove(key)) closed.add(key);
++                                  }),
++                              icon: Icon(closed.contains(key)
++                                  ? Icons.chevron_right
++                                  : Icons.expand_more))),
++                    Expanded(
++                        child: Tooltip(
++                            message: label,
++                            child: Text(label,
++                                maxLines: 1, overflow: TextOverflow.ellipsis))),
++                    Text('${count.$1}/${count.$2}',
++                        style: const TextStyle(
++                            fontSize: 12,
++                            color: Color(0xff4b5563),
++                            fontFeatures: [ui.FontFeature.tabularFigures()])),
++                  ]))));
++    }
++
++    return ListView(children: [
++      node('', translate('All devices'), 0),
++      node('*', translate('My merchants'), 0, branch: true),
++      if (!closed.contains('*'))
++        for (final m in stores.keys.toList()..sort()) ...[
++          node(m, m, 1, branch: true),
++          if (!closed.contains(m))
++            for (final s in stores[m]!.toList()..sort()) node('$m/$s', s, 2)
++        ],
++      if (counts.containsKey('?')) node('?', translate('Ungrouped'), 0)
++    ]);
++  }
++
++  Widget _columns(Widget device, Widget status, Widget model, Widget action) =>
++      Padding(
++          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
++          child: Row(children: [
++            Expanded(flex: 5, child: device),
++            Expanded(flex: 2, child: status),
++            Expanded(flex: 2, child: model),
++            SizedBox(width: 64, child: action)
++          ]));
++
++  Widget _row(_Entry row) {
++    final d = row.device;
++    final status = d.online == null
++        ? 'Unknown'
++        : d.online!
++            ? 'Online'
++            : 'Offline';
++    return InkWell(
++        onDoubleTap: () => _connect(row),
++        onTap: () => _details(row),
++        hoverColor: const Color(0xfff3f4f6),
++        child: _columns(
++            Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
++              Text(
++                  d.alias.isNotEmpty
++                      ? d.alias
++                      : d.name.isNotEmpty
++                          ? d.name
++                          : d.id,
++                  maxLines: 1,
++                  overflow: TextOverflow.ellipsis,
++                  style: const TextStyle(fontWeight: FontWeight.w600)),
++              Text([if (d.name.isNotEmpty) d.name, d.id].join(' · '),
++                  maxLines: 1,
++                  overflow: TextOverflow.ellipsis,
++                  style: const TextStyle(
++                      color: Color(0xff4b5563),
++                      fontSize: 12,
++                      fontFeatures: [ui.FontFeature.tabularFigures()]))
++            ]),
++            Text(translate(status),
++                style: TextStyle(
++                    color: d.online == true
++                        ? const Color(0xff16a34a)
++                        : const Color(0xff4b5563))),
++            Text(d.model.isEmpty ? '—' : d.model,
++                maxLines: 1, overflow: TextOverflow.ellipsis),
++            TextButton(
++                onPressed: () =>
++                    d.online == true ? _connect(row) : _details(row),
++                child: Text(translate(d.online == true ? 'Connect' : 'Details'),
++                    style: const TextStyle(color: _blue)))));
++  }
++}
 diff --git a/flutter/lib/steaddesk/support_home.dart b/flutter/lib/steaddesk/support_home.dart
 new file mode 100644
-index 0000000..338da75
+index 0000000..9aa8af3
 --- /dev/null
 +++ b/flutter/lib/steaddesk/support_home.dart
-@@ -0,0 +1,294 @@
+@@ -0,0 +1,301 @@
++import 'dart:async';
++import 'dart:math' as math;
++import 'package:flutter/foundation.dart' show setEquals;
 +import 'dart:ui' as ui;
 +
 +import 'package:flutter/material.dart';
@@ -59,10 +591,16 @@ index 0000000..338da75
 +
 +import '../common.dart';
 +import '../common/widgets/login.dart';
-+import '../common/widgets/peers_view.dart';
++import '../common/widgets/peer_card.dart' show connectInPeerTab;
++import '../models/peer_model.dart';
++import '../models/peer_tab_model.dart';
++import '../models/ab_model.dart';
++import 'support_device.dart';
 +import '../consts.dart';
-+import '../desktop/pages/connection_page.dart';
++
 +import '../models/platform_model.dart';
++
++part 'support_directory.dart';
 +
 +enum SupportPage {
 +  devices('Devices', Icons.devices_outlined),
@@ -165,11 +703,9 @@ index 0000000..338da75
 +  Widget _body() {
 +    switch (page) {
 +      case SupportPage.devices:
-+        return const ConnectionPage();
 +      case SupportPage.recent:
-+        return RecentPeersView();
 +      case SupportPage.favorites:
-+        return FavoritePeersView();
++        return _Directory(page, key: ValueKey(page));
 +      default:
 +        return Center(child: Text(translate('Coming soon')));
 +    }
@@ -345,10 +881,10 @@ index 0000000..338da75
 +  }
 +}
 diff --git a/src/lang/cn.rs b/src/lang/cn.rs
-index a86d353..e8e8a41 100644
+index a86d353..8d7b224 100644
 --- a/src/lang/cn.rs
 +++ b/src/lang/cn.rs
-@@ -233,6 +233,18 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
+@@ -233,6 +233,33 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
          ("Edit Tag", "修改标签"),
          ("Forget Password", "忘记密码"),
          ("Favorites", "收藏"),
@@ -364,6 +900,21 @@ index a86d353..e8e8a41 100644
 +        ("Auto-collapse below 1100 px", "窗口小于 1100 时自动折叠"),
 +        ("Navigation", "导航栏"),
 +        ("Unable to open", "无法打开"),
++        ("All devices", "全部设备"),
++        ("My merchants", "我负责的商户"),
++        ("Ungrouped", "未分组"),
++        ("No devices", "没有设备"),
++        ("Device", "设备"),
++        ("Model", "型号"),
++        ("SUNMI", "商米"),
++        ("Windows", "Windows"),
++        ("All", "全部"),
++        ("Online", "在线"),
++        ("Offline", "离线"),
++        ("Unknown", "未知"),
++        ("Details", "详情"),
++        ("Expand", "展开"),
++        ("Collapse", "折叠"),
          ("Add to Favorites", "加入到收藏"),
          ("Remove from Favorites", "从收藏中删除"),
          ("Empty", "空空如也"),
