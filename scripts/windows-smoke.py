@@ -101,10 +101,11 @@ def application():
 window = wait_for("SteadDesk main window", application, 120)
 window.set_focus()
 if not support:
-    public_label = wait_for("merchant ID board", lambda: by_name(window, "Your Desktop"))
+    id_label = wait_for("merchant ID label", lambda: by_name(window, "This device ID"))
+    help_label = wait_for("merchant help heading", lambda: by_name(window, "Need help?"))
     if any(by_name(window, label) for label in ("Enter remote ID", "Recent sessions", "Address book")):
         raise RuntimeError("Merchant offers an outbound connection")
-    save_evidence(window, "merchant-home", [public_label])
+    save_evidence(window, "merchant-home", [id_label, help_label])
     print("PASS merchant incoming-only home", flush=True)
     sys.exit(0)
 wait_for("incoming permission switch", lambda: by_name(window, "Allow incoming connections"))
