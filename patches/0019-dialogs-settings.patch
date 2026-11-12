@@ -1156,10 +1156,10 @@ index 405a9fa..4a153ab 100644
  
 diff --git a/flutter/lib/steaddesk/dialogs.dart b/flutter/lib/steaddesk/dialogs.dart
 new file mode 100644
-index 0000000..5297dd1
+index 0000000..965e3b6
 --- /dev/null
 +++ b/flutter/lib/steaddesk/dialogs.dart
-@@ -0,0 +1,165 @@
+@@ -0,0 +1,160 @@
 +import 'package:flutter/material.dart';
 +import '../common.dart' show CustomAlertDialog, translate;
 +import '../consts.dart' show kCommConfKeyLang;
@@ -1258,47 +1258,42 @@ index 0000000..5297dd1
 +    );
 +
 +/// Keep upstream's focus, keyboard, scrolling and overlay dismissal behavior.
-+class SteadDialog extends StatelessWidget {
-+  const SteadDialog(
-+      {super.key,
-+      this.title,
-+      this.titlePadding,
-+      required this.content,
-+      this.contentBoxConstraints = const BoxConstraints(maxWidth: 500),
-+      this.actions,
-+      this.onSubmit,
-+      this.onCancel});
-+  final Widget? title;
-+  final EdgeInsetsGeometry? titlePadding;
-+  final Widget content;
-+  final BoxConstraints contentBoxConstraints;
-+  final List<Widget>? actions;
-+  final VoidCallback? onSubmit;
-+  final VoidCallback? onCancel;
++class SteadDialog extends CustomAlertDialog {
++  static const _line = BorderSide(color: SteadDeskTheme.divider);
++
++  SteadDialog({
++    super.key,
++    Widget? title,
++    super.titlePadding,
++    required Widget content,
++    super.contentBoxConstraints,
++    List<Widget>? actions,
++    super.onSubmit,
++    super.onCancel,
++  }) : super(
++          title: title,
++          actions: actions,
++          content: Container(
++            decoration: BoxDecoration(
++              border: Border(
++                top: title == null ? BorderSide.none : _line,
++                bottom: actions == null ? BorderSide.none : _line,
++              ),
++            ),
++            padding: const EdgeInsets.symmetric(vertical: 12),
++            child: content,
++          ),
++        );
 +
 +  @override
 +  Widget build(BuildContext context) {
 +    final theme = Theme.of(context);
-+    const line = BorderSide(color: SteadDeskTheme.divider);
 +    return Theme(
 +      data: theme.copyWith(
 +          dialogTheme: theme.dialogTheme.copyWith(
 +              backgroundColor: SteadDeskTheme.page,
 +              surfaceTintColor: Colors.transparent)),
-+      child: CustomAlertDialog(
-+          title: title,
-+          titlePadding: titlePadding,
-+          contentBoxConstraints: contentBoxConstraints,
-+          content: Container(
-+              decoration: BoxDecoration(
-+                  border: Border(
-+                      top: title == null ? BorderSide.none : line,
-+                      bottom: actions == null ? BorderSide.none : line)),
-+              padding: const EdgeInsets.symmetric(vertical: 12),
-+              child: content),
-+          actions: actions,
-+          onSubmit: onSubmit,
-+          onCancel: onCancel),
++      child: super.build(context),
 +    );
 +  }
 +}
