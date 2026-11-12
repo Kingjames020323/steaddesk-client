@@ -1,5 +1,3 @@
-Subject: [SteadDesk] Support desktop navigation and device directory
-
 diff --git a/flutter/lib/common/widgets/peer_card.dart b/flutter/lib/common/widgets/peer_card.dart
 index 1f9f3ed..266665f 100644
 --- a/flutter/lib/common/widgets/peer_card.dart
@@ -105,10 +103,10 @@ index 405a9fa..d955322 100644
      if (resetOther) {
 diff --git a/flutter/lib/steaddesk/support_device.dart b/flutter/lib/steaddesk/support_device.dart
 new file mode 100644
-index 0000000..e5636bd
+index 0000000..d9cfc43
 --- /dev/null
 +++ b/flutter/lib/steaddesk/support_device.dart
-@@ -0,0 +1,100 @@
+@@ -0,0 +1,117 @@
 +// Only display fields cross into the directory and its search index.
 +enum DeviceFilter {
 +  all('All'),
@@ -209,12 +207,29 @@ index 0000000..e5636bd
 +    }
 +  }
 +}
++
++final _fullSupportId = RegExp(r'^[0-9]{9,10}$');
++
++String? directSupportId(String query) {
++  final id = query.replaceAll(' ', '');
++  return _fullSupportId.hasMatch(id) ? id : null;
++}
++
++String? supportSearchTarget(String query, Iterable<String> visibleIds) {
++  if (query.trim().isEmpty) return null;
++  final direct = directSupportId(query);
++  if (direct != null) return direct;
++  final candidates = visibleIds.iterator;
++  if (!candidates.moveNext()) return null;
++  final first = candidates.current;
++  return candidates.moveNext() ? null : first;
++}
 diff --git a/flutter/lib/steaddesk/support_directory.dart b/flutter/lib/steaddesk/support_directory.dart
 new file mode 100644
-index 0000000..fa3a9dd
+index 0000000..f736bc0
 --- /dev/null
 +++ b/flutter/lib/steaddesk/support_directory.dart
-@@ -0,0 +1,414 @@
+@@ -0,0 +1,460 @@
 +part of 'support_home.dart';
 +
 +typedef _Source = ({Peer peer, BaseAb? book, PeerTabIndex tab});
@@ -373,6 +388,32 @@ index 0000000..fa3a9dd
 +      connectInPeerTab(context, row.source.peer, row.source.tab,
 +          addressBook: row.source.book);
 +
++  List<_Entry> _visible(List<_Entry> entries, String query, String selected) =>
++      entries.where((row) {
++        final d = row.device;
++        return d.contains(query) &&
++            d.matches(filter) &&
++            (selected.isEmpty ||
++                (selected == '?' && d.merchant == null) ||
++                (selected == '*' && d.merchant != null) ||
++                selected == d.merchant ||
++                selected == '${d.merchant}/${d.store}');
++      }).toList();
++
++  void submit(String query) {
++    final entries = _entries();
++    final target = supportSearchTarget(
++        query, _visible(entries, query, scope).map((e) => e.device.id));
++    if (target == null) return;
++    for (final entry in entries) {
++      if (entry.device.id == target) {
++        _connect(entry);
++        return;
++      }
++    }
++    connect(context, target);
++  }
++
 +  void _details(_Entry row) {
 +    final d = row.device;
 +    showDialog<void>(
@@ -421,16 +462,7 @@ index 0000000..fa3a9dd
 +              }
 +            }
 +            final selected = byScope.containsKey(scope) ? scope : '';
-+            final rows = entries.where((row) {
-+              final d = row.device;
-+              return d.contains(widget.query) &&
-+                  d.matches(filter) &&
-+                  (selected.isEmpty ||
-+                      (selected == '?' && d.merchant == null) ||
-+                      (selected == '*' && d.merchant != null) ||
-+                      selected == d.merchant ||
-+                      selected == '${d.merchant}/${d.store}');
-+            }).toList();
++            final rows = _visible(entries, widget.query, selected);
 +            final grouped = widget.page == SupportPage.devices;
 +            return LayoutBuilder(builder: (context, size) {
 +              final treeWidth = size.maxWidth >= 850 ? 212.0 : 158.0;
@@ -512,9 +544,8 @@ index 0000000..fa3a9dd
 +          }));
 +
 +  Widget _emptyResults(List<_Entry> entries) {
-+    final id = widget.query.trim().replaceAll(' ', '');
-+    if (RegExp(r'^[0-9]+$').hasMatch(id) &&
-+        !entries.any((e) => e.device.id == id)) {
++    final id = directSupportId(widget.query);
++    if (id != null && !entries.any((e) => e.device.id == id)) {
 +      // Typing only searches. The operator must explicitly start a connection.
 +      return TextButton(
 +          onPressed: () => connect(context, id),
@@ -578,12 +609,32 @@ index 0000000..fa3a9dd
 +  Widget _columns(Widget device, Widget status, Widget model, Widget action) =>
 +      Padding(
 +          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-+          child: Row(children: [
-+            Expanded(flex: 5, child: device),
-+            Expanded(flex: 2, child: status),
-+            Expanded(flex: 2, child: model),
-+            SizedBox(width: 64, child: action)
-+          ]));
++          child: LayoutBuilder(builder: (_, constraints) {
++            final width = constraints.maxWidth;
++            // Keep the model hidden when automatic rail collapse frees space.
++            final showModel =
++                MediaQuery.sizeOf(context).width >= 1180 && width >= 700;
++            final actionWidth = (width * .14).clamp(84.0, 144.0).toDouble();
++            final free = width - actionWidth - (showModel ? 36 : 24);
++            final statusWidth =
++                math.max(64.0, free * 8 / (showModel ? 38 : 28));
++            return DefaultTextStyle.merge(
++              maxLines: 1,
++              softWrap: false,
++              overflow: TextOverflow.ellipsis,
++              child: Row(children: [
++                Expanded(flex: 2, child: device),
++                const SizedBox(width: 12),
++                SizedBox(width: statusWidth, child: status),
++                if (showModel) ...[
++                  const SizedBox(width: 12),
++                  Expanded(child: model),
++                ],
++                const SizedBox(width: 12),
++                SizedBox(width: actionWidth, child: action),
++              ]),
++            );
++          }));
 +
 +  Widget _row(_Entry row) {
 +    final d = row.device;
@@ -622,19 +673,29 @@ index 0000000..fa3a9dd
 +                        : const Color(0xff4b5563))),
 +            Text(d.model.isEmpty ? '—' : d.model,
 +                maxLines: 1, overflow: TextOverflow.ellipsis),
-+            TextButton(
-+                onPressed: () =>
-+                    d.online == true ? _connect(row) : _details(row),
-+                child: Text(translate(d.online == true ? 'Connect' : 'Details'),
-+                    style: const TextStyle(color: _blue)))));
++            Align(
++                alignment: Alignment.centerLeft,
++                child: TextButton(
++                    style: TextButton.styleFrom(
++                        padding: const EdgeInsets.symmetric(horizontal: 8)),
++                    onPressed: () =>
++                        d.online == true ? _connect(row) : _details(row),
++                    child: FittedBox(
++                        fit: BoxFit.scaleDown,
++                        child: Text(
++                            translate(d.online == true ? 'Connect' : 'Details'),
++                            maxLines: 1,
++                            softWrap: false,
++                            overflow: TextOverflow.visible,
++                            style: const TextStyle(color: _blue)))))));
 +  }
 +}
 diff --git a/flutter/lib/steaddesk/support_home.dart b/flutter/lib/steaddesk/support_home.dart
 new file mode 100644
-index 0000000..70f0254
+index 0000000..cb308d8
 --- /dev/null
 +++ b/flutter/lib/steaddesk/support_home.dart
-@@ -0,0 +1,362 @@
+@@ -0,0 +1,383 @@
 +import 'dart:async';
 +import 'dart:math' as math;
 +import 'package:flutter/foundation.dart' show setEquals;
@@ -710,6 +771,14 @@ index 0000000..70f0254
 +
 +  var page = SupportPage.devices;
 +  final search = TextEditingController();
++  final directoryKeys = {
++    for (final p in [
++      SupportPage.devices,
++      SupportPage.recent,
++      SupportPage.favorites
++    ])
++      p: GlobalKey<_DirectoryState>(),
++  };
 +  final searchFocus = FocusNode();
 +
 +  void _search(String value) => setState(() {
@@ -804,7 +873,7 @@ index 0000000..70f0254
 +      case SupportPage.devices:
 +      case SupportPage.recent:
 +      case SupportPage.favorites:
-+        return _Directory(page, search.text, key: ValueKey(page));
++        return _Directory(page, search.text, key: directoryKeys[page]);
 +      default:
 +        return Center(child: Text(translate('Coming soon')));
 +    }
@@ -857,7 +926,20 @@ index 0000000..70f0254
 +                                    : null,
 +                                focus: searchFocus,
 +                                search: search,
-+                                onSearch: _search),
++                                onSearch: _search,
++                                onSubmit: (query) {
++                                  if (query.trim().isEmpty) return;
++                                  // Wait for onChanged's page/filter update to render.
++                                  WidgetsBinding.instance
++                                      .addPostFrameCallback((_) {
++                                    if (mounted && search.text == query) {
++                                      directoryKeys[page]
++                                          ?.currentState
++                                          ?.submit(query);
++                                    }
++                                  });
++                                  WidgetsBinding.instance.scheduleFrame();
++                                }),
 +                            const Divider(height: 1, color: Color(0xffe5e7eb)),
 +                            Expanded(child: _body()),
 +                            const _ServerStatus(),
@@ -999,22 +1081,23 @@ index 0000000..70f0254
 +}
 diff --git a/flutter/lib/steaddesk/support_home_bar.dart b/flutter/lib/steaddesk/support_home_bar.dart
 new file mode 100644
-index 0000000..6f822e1
+index 0000000..b568192
 --- /dev/null
 +++ b/flutter/lib/steaddesk/support_home_bar.dart
-@@ -0,0 +1,128 @@
+@@ -0,0 +1,162 @@
 +part of 'support_home.dart';
 +
 +class _HomeHeader extends StatelessWidget {
 +  final VoidCallback? restore;
 +  final FocusNode focus;
 +  final TextEditingController search;
-+  final ValueChanged<String> onSearch;
++  final ValueChanged<String> onSearch, onSubmit;
 +  const _HomeHeader(
 +      {required this.restore,
 +      required this.focus,
 +      required this.search,
-+      required this.onSearch});
++      required this.onSearch,
++      required this.onSubmit});
 +
 +  void _localDevice(BuildContext context, String id) {
 +    showDialog<void>(
@@ -1045,6 +1128,8 @@ index 0000000..6f822e1
 +                controller: search,
 +                focusNode: focus,
 +                onChanged: onSearch,
++                onSubmitted: onSubmit,
++                textInputAction: TextInputAction.search,
 +                maxLines: 1,
 +                decoration: InputDecoration(
 +                    isDense: true,
@@ -1093,50 +1178,95 @@ index 0000000..6f822e1
 +      ]));
 +}
 +
-+class _ServerStatus extends StatelessWidget {
++class _ServerStatus extends StatefulWidget {
 +  const _ServerStatus();
++  @override
++  State<_ServerStatus> createState() => _ServerStatusState();
++}
++
++class _ServerStatusState extends State<_ServerStatus> {
++  bool? reachable;
++  Timer? nextCheck;
 +
 +  @override
-+  Widget build(BuildContext context) => AnimatedBuilder(
-+      animation: gFFI.serverModel,
-+      builder: (_, __) => Obx(() {
-+            final stopped = Get.find<RxBool>(tag: 'stop-service').value;
-+            final state = gFFI.serverModel.connectStatus;
-+            final text = stopped
-+                ? 'Service is not running'
-+                : state == 1
-+                    ? 'Ready'
-+                    : state == 0
-+                        ? 'connecting_status'
-+                        : 'not_ready_status';
-+            return Container(
-+                decoration: const BoxDecoration(
-+                    border: Border(top: BorderSide(color: Color(0xffe5e7eb)))),
-+                padding:
-+                    const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
-+                child: Row(children: [
-+                  Icon(Icons.circle,
-+                      size: 8,
-+                      color: !stopped && state == 1
-+                          ? const Color(0xff16a34a)
-+                          : const Color(0xff9ca3af)),
-+                  const SizedBox(width: 8),
-+                  Expanded(
-+                      child: Text(
-+                          '${translate("Server connection")} · ${translate(text)}',
-+                          maxLines: 1,
-+                          overflow: TextOverflow.ellipsis,
-+                          style: const TextStyle(
-+                              color: Color(0xff4b5563), fontSize: 12))),
-+                ]));
-+          }));
++  void initState() {
++    super.initState();
++    _probe();
++  }
++
++  Future<void> _probe() async {
++    bool result;
++    try {
++      result = await bind.mainProbeRendezvousServer();
++    } catch (_) {
++      result = false;
++    }
++    if (!mounted) return;
++    if (reachable != result) setState(() => reachable = result);
++    nextCheck = Timer(const Duration(seconds: 30), _probe);
++  }
++
++  @override
++  void dispose() {
++    nextCheck?.cancel();
++    super.dispose();
++  }
++
++  @override
++  Widget build(BuildContext context) => Obx(() {
++        final user = gFFI.userModel;
++        final account = user.networkError.isNotEmpty
++            ? 'Account status unavailable'
++            : user.isLogin
++                ? 'Signed in'
++                : 'Signed out';
++        final server = reachable == null
++            ? 'Checking'
++            : reachable!
++                ? 'Reachable'
++                : 'Unreachable';
++        return Container(
++          decoration: const BoxDecoration(
++              border: Border(top: BorderSide(color: Color(0xffe5e7eb)))),
++          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
++          child: Row(children: [
++            Icon(Icons.circle,
++                size: 8,
++                color: reachable == true
++                    ? const Color(0xff16a34a)
++                    : const Color(0xff9ca3af)),
++            const SizedBox(width: 8),
++            Expanded(
++                child: Text(
++                    '${translate("ID server")} · ${translate(server)}   |   ${translate(account)}',
++                    maxLines: 1,
++                    overflow: TextOverflow.ellipsis,
++                    style: const TextStyle(
++                        color: Color(0xff4b5563), fontSize: 12))),
++          ]),
++        );
++      });
 +}
+diff --git a/flutter/lib/web/bridge.dart b/flutter/lib/web/bridge.dart
+index f8ae3b9..8e5657f 100644
+--- a/flutter/lib/web/bridge.dart
++++ b/flutter/lib/web/bridge.dart
+@@ -931,6 +931,9 @@ class RustdeskImpl {
+     throw UnimplementedError("mainDiscover");
+   }
+ 
++  Future<bool> mainProbeRendezvousServer({dynamic hint}) =>
++      throw UnsupportedError("Native desktop only");
++
+   Future<String> mainGetApiServer({dynamic hint}) {
+     return Future(() => js.context.callMethod('getByName', ['api_server']));
+   }
 diff --git a/flutter/tool/check_support_directory.dart b/flutter/tool/check_support_directory.dart
 new file mode 100644
-index 0000000..8d7fde7
+index 0000000..0653b8b
 --- /dev/null
 +++ b/flutter/tool/check_support_directory.dart
-@@ -0,0 +1,62 @@
+@@ -0,0 +1,78 @@
 +// Run with the standalone Dart SDK from a patched upstream checkout.
 +import '../lib/steaddesk/support_device.dart';
 +
@@ -1168,6 +1298,22 @@ index 0000000..8d7fde7
 +  final unknown = device(names: ['M0099-bad-SUNMI1'], platform: 'Android');
 +  final assetOnly = device(names: ['M0099-S01-SUNMI2'], platform: 'Android');
 +  final checks = <String, bool>{
++    'complete IDs override partial matches':
++        supportSearchTarget('123 456 789', ['1234567890']) == '123456789' &&
++            supportSearchTarget('1 234 567 890', []) == '1234567890',
++    'unique name or partial ID': supportSearchTarget('till', ['10']) == '10' &&
++        supportSearchTarget('123', ['12345']) == '12345',
++    'incomplete IDs and arbitrary text do not dial': [
++      '1',
++      '12345678',
++      '12345678901',
++      'test-id',
++      '123-456-789'
++    ].every((s) => supportSearchTarget(s, []) == null),
++    'ambiguous or empty input stays in the directory':
++        supportSearchTarget('demo', ['1', '2']) == null &&
++            supportSearchTarget('demo', []) == null &&
++            supportSearchTarget('', ['1']) == null,
 +    'merchant/store from hostname':
 +        till.merchant == 'M0099' && till.store == 'S07',
 +    'canonical alias fallback':
@@ -1199,11 +1345,43 @@ index 0000000..8d7fde7
 +  }
 +  print('${checks.length} directory checks passed');
 +}
+diff --git a/src/flutter_ffi.rs b/src/flutter_ffi.rs
+index ff0972f..ad05a9c 100644
+--- a/src/flutter_ffi.rs
++++ b/src/flutter_ffi.rs
+@@ -14,7 +14,7 @@ use crate::{
+ use flutter_rust_bridge::{StreamSink, SyncReturn};
+ use hbb_common::{
+     config::{self, LocalConfig, PeerConfig, PeerInfoSerde},
+-    lazy_static, log,
++    lazy_static, log, tokio,
+     rendezvous_proto::ConnType,
+     ResultType,
+ };
+@@ -1182,6 +1182,18 @@ pub fn main_discover() {
+     discover();
+ }
+ 
++// FRB dispatches this non-SyncReturn entry point on its worker pool.
++#[tokio::main(flavor = "current_thread")]
++pub async fn main_probe_rendezvous_server() -> bool {
++    let endpoint = crate::check_port(
++        config::Config::get_rendezvous_server(),
++        config::RENDEZVOUS_PORT,
++    );
++    hbb_common::socket_client::connect_tcp(endpoint, config::CONNECT_TIMEOUT)
++        .await
++        .is_ok()
++}
++
+ pub fn main_get_api_server() -> String {
+     get_api_server()
+ }
 diff --git a/src/lang/cn.rs b/src/lang/cn.rs
-index a86d353..f4907ab 100644
+index 0827d58..763fee8 100644
 --- a/src/lang/cn.rs
 +++ b/src/lang/cn.rs
-@@ -233,6 +233,38 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
+@@ -250,6 +250,45 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
          ("Edit Tag", "修改标签"),
          ("Forget Password", "忘记密码"),
          ("Favorites", "收藏"),
@@ -1237,6 +1415,13 @@ index a86d353..f4907ab 100644
 +        ("Search merchants, stores, devices or IDs", "搜索商户、门店、设备名或 ID"),
 +        ("Local ID", "本机 ID"),
 +        ("Incoming connections require your approval", "连入需本人点接受"),
++        ("ID server", "ID 服务器"),
++        ("Checking", "检测中"),
++        ("Reachable", "可达"),
++        ("Unreachable", "不可达"),
++        ("Signed in", "已登录"),
++        ("Signed out", "未登录"),
++        ("Account status unavailable", "账号状态暂不可用"),
 +        ("Server connection", "服务器连接"),
 +        ("Actions", "操作"),
          ("Add to Favorites", "加入到收藏"),
