@@ -1,0 +1,415 @@
+diff --git a/flutter/lib/steaddesk/support_device.dart b/flutter/lib/steaddesk/support_device.dart
+index e5636bd..43526c7 100644
+--- a/flutter/lib/steaddesk/support_device.dart
++++ b/flutter/lib/steaddesk/support_device.dart
+@@ -98,3 +98,22 @@ class SupportDevice {
+     }
+   }
+ }
++
++// Exact directory IDs retain their address-book connection context. A unique
++// alias or partial ID selects the visible row. Unknown numeric IDs can be dialled.
++String? supportSearchTarget(
++    String query, Iterable<String> knownIds, Iterable<String> visibleIds) {
++  final id = query.trim().replaceAll(' ', '');
++  if (id.isEmpty) return null;
++  if (knownIds.contains(id) || RegExp(r'^[0-9]{9,10}$').hasMatch(id)) return id;
++  final candidates = visibleIds.iterator;
++  if (candidates.moveNext()) {
++    final first = candidates.current;
++    return candidates.moveNext() ? null : first;
++  }
++  // Upstream can generate shorter numeric IDs or use a custom ID.
++  return RegExp(r'^[0-9]+$').hasMatch(id) ||
++          RegExp(r'^[a-zA-Z][a-zA-Z0-9_-]{5,15}$').hasMatch(query.trim())
++      ? id
++      : null;
++}
+diff --git a/flutter/lib/steaddesk/support_directory.dart b/flutter/lib/steaddesk/support_directory.dart
+index fa3a9dd..1a43149 100644
+--- a/flutter/lib/steaddesk/support_directory.dart
++++ b/flutter/lib/steaddesk/support_directory.dart
+@@ -156,6 +156,32 @@ class _DirectoryState extends State<_Directory> {
+       connectInPeerTab(context, row.source.peer, row.source.tab,
+           addressBook: row.source.book);
+ 
++  List<_Entry> _visible(List<_Entry> entries, String query, String selected) =>
++      entries.where((row) {
++        final d = row.device;
++        return d.contains(query) &&
++            d.matches(filter) &&
++            (selected.isEmpty ||
++                (selected == '?' && d.merchant == null) ||
++                (selected == '*' && d.merchant != null) ||
++                selected == d.merchant ||
++                selected == '${d.merchant}/${d.store}');
++      }).toList();
++
++  void submit(String query) {
++    final entries = _entries();
++    final target = supportSearchTarget(query, entries.map((e) => e.device.id),
++        _visible(entries, query, scope).map((e) => e.device.id));
++    if (target == null) return;
++    for (final entry in entries) {
++      if (entry.device.id == target) {
++        _connect(entry);
++        return;
++      }
++    }
++    connect(context, target);
++  }
++
+   void _details(_Entry row) {
+     final d = row.device;
+     showDialog<void>(
+@@ -204,16 +230,7 @@ class _DirectoryState extends State<_Directory> {
+               }
+             }
+             final selected = byScope.containsKey(scope) ? scope : '';
+-            final rows = entries.where((row) {
+-              final d = row.device;
+-              return d.contains(widget.query) &&
+-                  d.matches(filter) &&
+-                  (selected.isEmpty ||
+-                      (selected == '?' && d.merchant == null) ||
+-                      (selected == '*' && d.merchant != null) ||
+-                      selected == d.merchant ||
+-                      selected == '${d.merchant}/${d.store}');
+-            }).toList();
++            final rows = _visible(entries, widget.query, selected);
+             final grouped = widget.page == SupportPage.devices;
+             return LayoutBuilder(builder: (context, size) {
+               final treeWidth = size.maxWidth >= 850 ? 212.0 : 158.0;
+@@ -361,12 +378,28 @@ class _DirectoryState extends State<_Directory> {
+   Widget _columns(Widget device, Widget status, Widget model, Widget action) =>
+       Padding(
+           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+-          child: Row(children: [
+-            Expanded(flex: 5, child: device),
+-            Expanded(flex: 2, child: status),
+-            Expanded(flex: 2, child: model),
+-            SizedBox(width: 64, child: action)
+-          ]));
++          child: LayoutBuilder(builder: (_, constraints) {
++            final width = constraints.maxWidth;
++            final showModel = width >= 700;
++            return DefaultTextStyle.merge(
++              maxLines: 1,
++              softWrap: false,
++              overflow: TextOverflow.ellipsis,
++              child: Row(children: [
++                Expanded(child: device),
++                SizedBox(
++                    width: (width * .18).clamp(88.0, 160.0).toDouble(),
++                    child: status),
++                if (showModel)
++                  SizedBox(
++                      width: (width * .22).clamp(112.0, 230.0).toDouble(),
++                      child: model),
++                SizedBox(
++                    width: (width * .16).clamp(96.0, 164.0).toDouble(),
++                    child: action),
++              ]),
++            );
++          }));
+ 
+   Widget _row(_Entry row) {
+     final d = row.device;
+@@ -405,10 +438,18 @@ class _DirectoryState extends State<_Directory> {
+                         : const Color(0xff4b5563))),
+             Text(d.model.isEmpty ? '—' : d.model,
+                 maxLines: 1, overflow: TextOverflow.ellipsis),
+-            TextButton(
+-                onPressed: () =>
+-                    d.online == true ? _connect(row) : _details(row),
+-                child: Text(translate(d.online == true ? 'Connect' : 'Details'),
+-                    style: const TextStyle(color: _blue)))));
++            Align(
++                alignment: Alignment.centerLeft,
++                child: TextButton(
++                    style: TextButton.styleFrom(
++                        padding: const EdgeInsets.symmetric(horizontal: 8)),
++                    onPressed: () =>
++                        d.online == true ? _connect(row) : _details(row),
++                    child: Text(
++                        translate(d.online == true ? 'Connect' : 'Details'),
++                        maxLines: 1,
++                        softWrap: false,
++                        overflow: TextOverflow.ellipsis,
++                        style: const TextStyle(color: _blue))))));
+   }
+ }
+diff --git a/flutter/lib/steaddesk/support_home.dart b/flutter/lib/steaddesk/support_home.dart
+index 70f0254..cb308d8 100644
+--- a/flutter/lib/steaddesk/support_home.dart
++++ b/flutter/lib/steaddesk/support_home.dart
+@@ -73,6 +73,14 @@ class _SupportHomeState extends State<SupportHome> {
+ 
+   var page = SupportPage.devices;
+   final search = TextEditingController();
++  final directoryKeys = {
++    for (final p in [
++      SupportPage.devices,
++      SupportPage.recent,
++      SupportPage.favorites
++    ])
++      p: GlobalKey<_DirectoryState>(),
++  };
+   final searchFocus = FocusNode();
+ 
+   void _search(String value) => setState(() {
+@@ -167,7 +175,7 @@ class _SupportHomeState extends State<SupportHome> {
+       case SupportPage.devices:
+       case SupportPage.recent:
+       case SupportPage.favorites:
+-        return _Directory(page, search.text, key: ValueKey(page));
++        return _Directory(page, search.text, key: directoryKeys[page]);
+       default:
+         return Center(child: Text(translate('Coming soon')));
+     }
+@@ -220,7 +228,20 @@ class _SupportHomeState extends State<SupportHome> {
+                                     : null,
+                                 focus: searchFocus,
+                                 search: search,
+-                                onSearch: _search),
++                                onSearch: _search,
++                                onSubmit: (query) {
++                                  if (query.trim().isEmpty) return;
++                                  // Wait for onChanged's page/filter update to render.
++                                  WidgetsBinding.instance
++                                      .addPostFrameCallback((_) {
++                                    if (mounted && search.text == query) {
++                                      directoryKeys[page]
++                                          ?.currentState
++                                          ?.submit(query);
++                                    }
++                                  });
++                                  WidgetsBinding.instance.scheduleFrame();
++                                }),
+                             const Divider(height: 1, color: Color(0xffe5e7eb)),
+                             Expanded(child: _body()),
+                             const _ServerStatus(),
+diff --git a/flutter/lib/steaddesk/support_home_bar.dart b/flutter/lib/steaddesk/support_home_bar.dart
+index 6f822e1..b568192 100644
+--- a/flutter/lib/steaddesk/support_home_bar.dart
++++ b/flutter/lib/steaddesk/support_home_bar.dart
+@@ -4,12 +4,13 @@ class _HomeHeader extends StatelessWidget {
+   final VoidCallback? restore;
+   final FocusNode focus;
+   final TextEditingController search;
+-  final ValueChanged<String> onSearch;
++  final ValueChanged<String> onSearch, onSubmit;
+   const _HomeHeader(
+       {required this.restore,
+       required this.focus,
+       required this.search,
+-      required this.onSearch});
++      required this.onSearch,
++      required this.onSubmit});
+ 
+   void _localDevice(BuildContext context, String id) {
+     showDialog<void>(
+@@ -40,6 +41,8 @@ class _HomeHeader extends StatelessWidget {
+                 controller: search,
+                 focusNode: focus,
+                 onChanged: onSearch,
++                onSubmitted: onSubmit,
++                textInputAction: TextInputAction.search,
+                 maxLines: 1,
+                 decoration: InputDecoration(
+                     isDense: true,
+@@ -88,41 +91,72 @@ class _HomeHeader extends StatelessWidget {
+       ]));
+ }
+ 
+-class _ServerStatus extends StatelessWidget {
++class _ServerStatus extends StatefulWidget {
+   const _ServerStatus();
++  @override
++  State<_ServerStatus> createState() => _ServerStatusState();
++}
++
++class _ServerStatusState extends State<_ServerStatus> {
++  bool? reachable;
++  Timer? nextCheck;
+ 
+   @override
+-  Widget build(BuildContext context) => AnimatedBuilder(
+-      animation: gFFI.serverModel,
+-      builder: (_, __) => Obx(() {
+-            final stopped = Get.find<RxBool>(tag: 'stop-service').value;
+-            final state = gFFI.serverModel.connectStatus;
+-            final text = stopped
+-                ? 'Service is not running'
+-                : state == 1
+-                    ? 'Ready'
+-                    : state == 0
+-                        ? 'connecting_status'
+-                        : 'not_ready_status';
+-            return Container(
+-                decoration: const BoxDecoration(
+-                    border: Border(top: BorderSide(color: Color(0xffe5e7eb)))),
+-                padding:
+-                    const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+-                child: Row(children: [
+-                  Icon(Icons.circle,
+-                      size: 8,
+-                      color: !stopped && state == 1
+-                          ? const Color(0xff16a34a)
+-                          : const Color(0xff9ca3af)),
+-                  const SizedBox(width: 8),
+-                  Expanded(
+-                      child: Text(
+-                          '${translate("Server connection")} · ${translate(text)}',
+-                          maxLines: 1,
+-                          overflow: TextOverflow.ellipsis,
+-                          style: const TextStyle(
+-                              color: Color(0xff4b5563), fontSize: 12))),
+-                ]));
+-          }));
++  void initState() {
++    super.initState();
++    _probe();
++  }
++
++  Future<void> _probe() async {
++    bool result;
++    try {
++      result = await bind.mainProbeRendezvousServer();
++    } catch (_) {
++      result = false;
++    }
++    if (!mounted) return;
++    if (reachable != result) setState(() => reachable = result);
++    nextCheck = Timer(const Duration(seconds: 30), _probe);
++  }
++
++  @override
++  void dispose() {
++    nextCheck?.cancel();
++    super.dispose();
++  }
++
++  @override
++  Widget build(BuildContext context) => Obx(() {
++        final user = gFFI.userModel;
++        final account = user.networkError.isNotEmpty
++            ? 'Account status unavailable'
++            : user.isLogin
++                ? 'Signed in'
++                : 'Signed out';
++        final server = reachable == null
++            ? 'Checking'
++            : reachable!
++                ? 'Reachable'
++                : 'Unreachable';
++        return Container(
++          decoration: const BoxDecoration(
++              border: Border(top: BorderSide(color: Color(0xffe5e7eb)))),
++          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
++          child: Row(children: [
++            Icon(Icons.circle,
++                size: 8,
++                color: reachable == true
++                    ? const Color(0xff16a34a)
++                    : const Color(0xff9ca3af)),
++            const SizedBox(width: 8),
++            Expanded(
++                child: Text(
++                    '${translate("ID server")} · ${translate(server)}   |   ${translate(account)}',
++                    maxLines: 1,
++                    overflow: TextOverflow.ellipsis,
++                    style: const TextStyle(
++                        color: Color(0xff4b5563), fontSize: 12))),
++          ]),
++        );
++      });
+ }
+diff --git a/flutter/lib/web/bridge.dart b/flutter/lib/web/bridge.dart
+index f8ae3b9..8e5657f 100644
+--- a/flutter/lib/web/bridge.dart
++++ b/flutter/lib/web/bridge.dart
+@@ -931,6 +931,9 @@ class RustdeskImpl {
+     throw UnimplementedError("mainDiscover");
+   }
+ 
++  Future<bool> mainProbeRendezvousServer({dynamic hint}) =>
++      throw UnsupportedError("Native desktop only");
++
+   Future<String> mainGetApiServer({dynamic hint}) {
+     return Future(() => js.context.callMethod('getByName', ['api_server']));
+   }
+diff --git a/flutter/tool/check_support_directory.dart b/flutter/tool/check_support_directory.dart
+index 8d7fde7..e411d42 100644
+--- a/flutter/tool/check_support_directory.dart
++++ b/flutter/tool/check_support_directory.dart
+@@ -29,6 +29,19 @@ void main() {
+   final unknown = device(names: ['M0099-bad-SUNMI1'], platform: 'Android');
+   final assetOnly = device(names: ['M0099-S01-SUNMI2'], platform: 'Android');
+   final checks = <String, bool>{
++    'exact ID beats multiple results': supportSearchTarget(
++            '123 456 789', ['123456789'], ['123456789', '1234567890']) ==
++        '123456789',
++    'unique name or partial ID':
++        supportSearchTarget('till', [], ['10']) == '10' &&
++            supportSearchTarget('123', [], ['12345']) == '12345',
++    'direct number or custom ID outside directory':
++        supportSearchTarget('987 654 321', [], []) == '987654321' &&
++            supportSearchTarget('test-id', [], []) == 'test-id',
++    'ambiguous, empty or missing text':
++        supportSearchTarget('demo', [], ['1', '2']) == null &&
++            supportSearchTarget('', [], ['1']) == null &&
++            supportSearchTarget('missing phrase', [], []) == null,
+     'merchant/store from hostname':
+         till.merchant == 'M0099' && till.store == 'S07',
+     'canonical alias fallback':
+diff --git a/src/flutter_ffi.rs b/src/flutter_ffi.rs
+index ff0972f..ad05a9c 100644
+--- a/src/flutter_ffi.rs
++++ b/src/flutter_ffi.rs
+@@ -14,7 +14,7 @@ use crate::{
+ use flutter_rust_bridge::{StreamSink, SyncReturn};
+ use hbb_common::{
+     config::{self, LocalConfig, PeerConfig, PeerInfoSerde},
+-    lazy_static, log,
++    lazy_static, log, tokio,
+     rendezvous_proto::ConnType,
+     ResultType,
+ };
+@@ -1182,6 +1182,18 @@ pub fn main_discover() {
+     discover();
+ }
+ 
++// FRB dispatches this non-SyncReturn entry point on its worker pool.
++#[tokio::main(flavor = "current_thread")]
++pub async fn main_probe_rendezvous_server() -> bool {
++    let endpoint = crate::check_port(
++        config::Config::get_rendezvous_server(),
++        config::RENDEZVOUS_PORT,
++    );
++    hbb_common::socket_client::connect_tcp(endpoint, config::CONNECT_TIMEOUT)
++        .await
++        .is_ok()
++}
++
+ pub fn main_get_api_server() -> String {
+     get_api_server()
+ }
+diff --git a/src/lang/cn.rs b/src/lang/cn.rs
+index f4907ab..06c3e5b 100644
+--- a/src/lang/cn.rs
++++ b/src/lang/cn.rs
+@@ -263,6 +263,13 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
+         ("Search merchants, stores, devices or IDs", "搜索商户、门店、设备名或 ID"),
+         ("Local ID", "本机 ID"),
+         ("Incoming connections require your approval", "连入需本人点接受"),
++        ("ID server", "ID 服务器"),
++        ("Checking", "检测中"),
++        ("Reachable", "可达"),
++        ("Unreachable", "不可达"),
++        ("Signed in", "已登录"),
++        ("Signed out", "未登录"),
++        ("Account status unavailable", "账号状态暂不可用"),
+         ("Server connection", "服务器连接"),
+         ("Actions", "操作"),
+         ("Add to Favorites", "加入到收藏"),
