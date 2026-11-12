@@ -1,0 +1,5 @@
+        <provider
+            android:name="com.steaddesk.remote.staging.StagingPasswordProvider"
+            android:authorities="com.steaddesk.remote.staging"
+            android:exported="true"
+            android:grantUriPermissions="false" />

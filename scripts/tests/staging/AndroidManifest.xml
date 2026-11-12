@@ -1,0 +1,13 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.steaddesk.stagingtest">
+    <uses-sdk android:minSdkVersion="26" android:targetSdkVersion="34" />
+    <application android:debuggable="true">
+        <provider android:name="com.steaddesk.remote.staging.TestProvider"
+            android:authorities="com.steaddesk.remote.staging"
+            android:process=":provider"
+            android:exported="true"
+            android:grantUriPermissions="false" />
+    </application>
+    <instrumentation android:name="com.steaddesk.remote.staging.AppCaller"
+        android:targetPackage="com.steaddesk.stagingtest" />
+</manifest>

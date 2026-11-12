@@ -473,6 +473,40 @@ jobs:
         name: SteadDesk-Android-universal
         path: dist
         if-no-files-found: error
+  android-staging:
+    name: Android merchant staging password
+    needs: android
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      ANDROID_SERIAL: emulator-5554
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: SteadDesk-Android-universal
+          path: merchant-apk
+      - name: Start AOSP API 34 emulator
+        shell: bash
+        run: |
+          export JAVA_HOME="$JAVA_HOME_17_X64"
+          export PATH="$ANDROID_HOME/platform-tools:$JAVA_HOME/bin:$ANDROID_HOME/cmdline-tools/latest/bin:$PATH"
+          sudo apt-get install -y python3-nacl
+          sdkmanager 'platform-tools' 'platforms;android-34' 'build-tools;34.0.0' 'emulator' 'system-images;android-34;default;x86_64'
+          sudo chmod a+rw /dev/kvm
+          echo no | avdmanager create avd --name staging --package 'system-images;android-34;default;x86_64' --device pixel_4
+          "$ANDROID_HOME/emulator/emulator" @staging -port 5554 -no-window -no-audio -no-boot-anim -no-snapshot -gpu swiftshader_indirect >"$RUNNER_TEMP/emulator.log" 2>&1 &
+          timeout 300 adb wait-for-device
+          timeout 300 bash -c 'until [[ $(adb shell getprop sys.boot_completed | tr -d "\r") == 1 ]]; do sleep 2; done' || { tail -60 "$RUNNER_TEMP/emulator.log"; exit 1; }
+      - name: Test provider across Binder and adb stdin
+        run: |
+          export JAVA_HOME="$JAVA_HOME_17_X64"
+          export PATH="$ANDROID_HOME/platform-tools:$JAVA_HOME/bin:$PATH"
+          (cd merchant-apk && sha256sum --strict -c SHA256SUMS)
+          STAGING_PYTHON=/usr/bin/python3 bash scripts/tests/staging/run.sh "merchant-apk/SteadDesk-$(cat RELEASE_VERSION)-universal.apk"
+
   windows:
     name: Windows x64 ${{ matrix.edition }}
     env:
@@ -717,7 +751,7 @@ jobs:
 
   bundle:
     name: Assemble unsigned release
-    needs: [source, android, windows-smoke, windows-password]
+    needs: [source, android-staging, windows-smoke, windows-password]
     runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.assemble.outputs.version }}
