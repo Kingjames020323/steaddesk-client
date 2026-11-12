@@ -8,6 +8,8 @@ import sys
 import time
 from pathlib import Path
 
+from windows_profile import PresetLabels
+
 from PIL import Image, ImageStat
 from pywinauto import Desktop
 from pywinauto.keyboard import send_keys
@@ -42,10 +44,10 @@ def by_name(window, name):
 
 
 def public_fields(control):
-    values = [control.window_text()]
+    values = [control.element_info.name or "", control.window_text() or ""]
     for probe in (lambda: control.iface_value.CurrentValue,
                   lambda: control.iface_text.DocumentRange.GetText(-1),
-                  lambda: control.iface_legacy_iaccessible.CurrentValue):
+                  lambda: control.legacy_properties().get('Value')):
         try:
             values.append(probe() or "")
         except Exception:
@@ -174,6 +176,8 @@ save_evidence(window, "about", controls(window, lambda s:
               s in about_labels or re.fullmatch(r"Version: [\w.()+ -]{1,30}", s) is not None), public_regions)
 print("PASS public About attribution", flush=True)
 
+# Keep the Network tile and the scrollable dialog content in the CI viewport.
+window.maximize()
 press(window, "Network")
 press(window, "ID/Relay Server")
 expected = [
@@ -189,35 +193,50 @@ expected = [
 ]
 
 
+def network_dialog():
+    # The Network page behind the Flutter overlay also exposes the four server
+    # values. Use the nearest ancestor shared by the dialog title and its action.
+    for close in controls(window, lambda name: name == "Close"):
+        scope = close.parent()
+        while scope is not None and scope != window:
+            if by_name(scope, "About"):
+                break  # Settings tabs belong to the underlying page.
+            if by_name(scope, "ID/Relay server"):
+                return scope
+            scope = scope.parent()
+    return None
+
+
+dialog = wait_for("ID/Relay server dialog with Close action", network_dialog)
+labels = PresetLabels(expected)
+
+
 def profile_fields():
-    fields = []
     matched = set()
-    for control in controls(window, lambda s: True):
+    evidence = []
+    for control in controls(dialog, lambda s: True):
+        if control.element_info.control_type == "Edit":
+            if not control.iface_value.CurrentIsReadOnly:
+                raise RuntimeError("A preset field is editable")
+        found = set()
         for value in public_fields(control):
-            normalized = " ".join(value.replace("\ufe0f", "").split())
-            present = {line for line in expected if line in normalized}
-            residue = normalized
-            for line in expected:
-                residue = residue.replace(line, "")
-            if present and not residue.strip():
-                fields.append(control)
-                matched.update(present)
-                break
-    return fields if matched == set(expected) else None
+            found.update(labels.match(value))
+        matched.update(found)
+        # A merged UIA name can describe a whole container. Only reveal
+        # pixels from leaf controls with verified public text.
+        if found and not control.children():
+            evidence.append(control)
+    return evidence if matched == set(expected) else None
 
 
 fields = wait_for("read-only preset values", profile_fields)
-wait_for("Close action", lambda: by_name(window, "Close"))
+wait_for("Close action", lambda: by_name(dialog, "Close"))
 if by_name(window, "OK") or by_name(window, "Apply") or by_name(window, "Save"):
     raise RuntimeError("An edit confirmation is visible")
-for field in fields:
-    if field.element_info.control_type == "Edit":
-        if not field.iface_value.CurrentIsReadOnly:
-            raise RuntimeError("A preset field is editable")
-save_evidence(window, "network", fields + controls(window, {"ID/Relay server", "Close"}.__contains__))
+save_evidence(window, "network", fields + controls(dialog, {"ID/Relay server", "Close"}.__contains__))
 print("PASS fixed ID, relay, API and public key in read-only profile", flush=True)
 
-press(window, "Close")
+press(dialog, "Close")
 # Directory search offers connections to numeric IDs. Use the packaged CLI
 # to exercise the same session refusal on loopback in this isolated desktop.
 subprocess.Popen([str(exe), "--connect", "127.0.0.1"],
