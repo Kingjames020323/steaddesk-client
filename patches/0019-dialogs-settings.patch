@@ -1,0 +1,1412 @@
+Subject: [SteadDesk] Apply the light theme to dialogs and settings
+
+diff --git a/flutter/lib/common/widgets/address_book.dart b/flutter/lib/common/widgets/address_book.dart
+index 054a166..ea46e00 100644
+--- a/flutter/lib/common/widgets/address_book.dart
++++ b/flutter/lib/common/widgets/address_book.dart
+@@ -4,6 +4,8 @@ import 'package:bot_toast/bot_toast.dart';
+ import 'package:dropdown_button2/dropdown_button2.dart';
+ import 'package:dynamic_layouts/dynamic_layouts.dart';
+ import 'package:flutter/material.dart';
++import 'package:flutter_hbb/steaddesk/theme.dart';
++import 'package:flutter_hbb/steaddesk/dialogs.dart';
+ import 'package:flutter_hbb/common/formatter/id_formatter.dart';
+ import 'package:flutter_hbb/common/hbbs/hbbs.dart';
+ import 'package:flutter_hbb/common/widgets/peer_card.dart';
+@@ -532,7 +534,7 @@ class _AddressBookState extends State<AddressBook> {
+         return Obx(() => makeChild(stateGlobal.isPortrait.isTrue));
+       }
+ 
+-      return CustomAlertDialog(
++      return SteadDialog(
+         title: Text(translate("Add ID")),
+         content: Column(
+           crossAxisAlignment: CrossAxisAlignment.start,
+@@ -668,8 +670,8 @@ class _AddressBookState extends State<AddressBook> {
+           ],
+         ),
+         actions: [
+-          dialogButton("Cancel", onPressed: close, isOutline: true),
+-          dialogButton("OK", onPressed: submit),
++          dialogAction("Cancel", onPressed: close, primary: false),
++          dialogAction("OK", onPressed: submit),
+         ],
+         onSubmit: submit,
+         onCancel: close,
+@@ -867,7 +869,7 @@ class AddressBookTag extends StatelessWidget {
+       getEntry(translate("Delete"), () {
+         gFFI.abModel.deleteTag(name);
+         Future.delayed(Duration.zero, () => Get.back());
+-      }),
++      }, destructive: true),
+     ];
+ 
+     mod_menu.showMenu(
+@@ -887,11 +889,13 @@ class AddressBookTag extends StatelessWidget {
+   }
+ }
+ 
+-MenuEntryButton<String> getEntry(String title, VoidCallback proc) {
++MenuEntryButton<String> getEntry(String title, VoidCallback proc,
++    {bool destructive = false}) {
+   return MenuEntryButton<String>(
++    buttonStyle: destructive ? SteadDeskTheme.dangerButton : null,
+     childBuilder: (TextStyle? style) => Text(
+       title,
+-      style: style,
++      style: destructive ? null : style,
+     ),
+     proc: proc,
+     dismissOnClicked: true,
+diff --git a/flutter/lib/common/widgets/dialog.dart b/flutter/lib/common/widgets/dialog.dart
+index 98d7f6b..3fa51d2 100644
+--- a/flutter/lib/common/widgets/dialog.dart
++++ b/flutter/lib/common/widgets/dialog.dart
+@@ -3,6 +3,7 @@ import 'dart:convert';
+ 
+ import 'package:bot_toast/bot_toast.dart';
+ import 'package:flutter/material.dart';
++import 'package:flutter_hbb/steaddesk/dialogs.dart';
+ import 'package:flutter/services.dart';
+ import 'package:flutter_hbb/common/shared_state.dart';
+ import 'package:flutter_hbb/common/widgets/setting_widgets.dart';
+@@ -908,18 +909,18 @@ void wrongPasswordDialog(SessionID sessionId,
+       enterPasswordDialog(sessionId, dialogManager);
+     }
+ 
+-    return CustomAlertDialog(
++    return SteadDialog(
+         title: null,
+         content: msgboxContent(type, title, text),
+         onSubmit: submit,
+         onCancel: cancel,
+         actions: [
+-          dialogButton(
++          dialogAction(
+             'Cancel',
+             onPressed: cancel,
+-            isOutline: true,
++            primary: false,
+           ),
+-          dialogButton(
++          dialogAction(
+             'Retry',
+             onPressed: submit,
+           ),
+@@ -1104,7 +1105,7 @@ _connectDialog(
+       );
+     }
+ 
+-    return CustomAlertDialog(
++    return SteadDialog(
+       title: Row(
+         mainAxisAlignment: MainAxisAlignment.center,
+         children: [
+@@ -1120,15 +1121,13 @@ _connectDialog(
+         passwdWidget(),
+       ]),
+       actions: [
+-        dialogButton(
++        dialogAction(
+           'Cancel',
+-          icon: Icon(Icons.close_rounded),
+           onPressed: cancel,
+-          isOutline: true,
++          primary: false,
+         ),
+-        dialogButton(
++        dialogAction(
+           'OK',
+-          icon: Icon(Icons.done_rounded),
+           onPressed: submit,
+         ),
+       ],
+@@ -2005,7 +2004,8 @@ void trackpadSpeedDialog(SessionID sessionId, FFI ffi) {
+   });
+ }
+ 
+-void deleteConfirmDialog(Function onSubmit, String title) async {
++void deleteConfirmDialog(Function onSubmit, String title,
++    {bool addressBook = false}) async {
+   gFFI.dialogManager.show(
+     (setState, close, context) {
+       submit() async {
+@@ -2013,6 +2013,18 @@ void deleteConfirmDialog(Function onSubmit, String title) async {
+         close();
+       }
+ 
++      if (addressBook) {
++        return SteadDialog(
++          title: Text(title),
++          content: const SizedBox.shrink(),
++          actions: [
++            dialogAction('Cancel', onPressed: close, primary: false),
++            dangerAction('Delete', onPressed: submit),
++          ],
++          onSubmit: submit,
++          onCancel: close,
++        );
++      }
+       return CustomAlertDialog(
+         title: Row(
+           mainAxisAlignment: MainAxisAlignment.center,
+@@ -2065,7 +2077,7 @@ void editAbTagDialog(
+       close();
+     }
+ 
+-    return CustomAlertDialog(
++    return SteadDialog(
+       title: Text(translate("Edit Tag")),
+       content: Column(
+         crossAxisAlignment: CrossAxisAlignment.start,
+@@ -2093,8 +2105,8 @@ void editAbTagDialog(
+         ],
+       ),
+       actions: [
+-        dialogButton("Cancel", onPressed: close, isOutline: true),
+-        dialogButton("OK", onPressed: submit),
++        dialogAction("Cancel", onPressed: close, primary: false),
++        dialogAction("OK", onPressed: submit),
+       ],
+       onSubmit: submit,
+       onCancel: close,
+@@ -2116,7 +2128,7 @@ void editAbPeerNoteDialog(String id) {
+       close();
+     }
+ 
+-    return CustomAlertDialog(
++    return SteadDialog(
+       title: Text(translate("Edit note")),
+       content: Column(
+         crossAxisAlignment: CrossAxisAlignment.start,
+@@ -2136,8 +2148,8 @@ void editAbPeerNoteDialog(String id) {
+         ],
+       ),
+       actions: [
+-        dialogButton("Cancel", onPressed: close, isOutline: true),
+-        dialogButton("OK", onPressed: submit),
++        dialogAction("Cancel", onPressed: close, primary: false),
++        dialogAction("OK", onPressed: submit),
+       ],
+       onSubmit: submit,
+       onCancel: close,
+@@ -2170,7 +2182,7 @@ void renameDialog(
+       close();
+     }
+ 
+-    return CustomAlertDialog(
++    return SteadDialog(
+       title: Row(
+         mainAxisAlignment: MainAxisAlignment.center,
+         children: [
+@@ -2198,15 +2210,13 @@ void renameDialog(
+         ],
+       ),
+       actions: [
+-        dialogButton(
++        dialogAction(
+           "Cancel",
+-          icon: Icon(Icons.close_rounded),
+           onPressed: cancel,
+-          isOutline: true,
++          primary: false,
+         ),
+-        dialogButton(
++        dialogAction(
+           "OK",
+-          icon: Icon(Icons.done_rounded),
+           onPressed: submit,
+         ),
+       ],
+@@ -2521,7 +2531,7 @@ void addPeersToAbDialog(
+       close();
+     }
+ 
+-    return CustomAlertDialog(
++    return SteadDialog(
+       title: Row(
+         mainAxisAlignment: MainAxisAlignment.center,
+         children: [
+@@ -2554,15 +2564,13 @@ void addPeersToAbDialog(
+             ],
+           )),
+       actions: [
+-        dialogButton(
++        dialogAction(
+           "Cancel",
+-          icon: Icon(Icons.close_rounded),
+           onPressed: cancel,
+-          isOutline: true,
++          primary: false,
+         ),
+-        dialogButton(
++        dialogAction(
+           "OK",
+-          icon: Icon(Icons.done_rounded),
+           onPressed: submit,
+         ),
+       ],
+@@ -2596,7 +2604,7 @@ void setSharedAbPasswordDialog(String abName, Peer peer) {
+       close();
+     }
+ 
+-    return CustomAlertDialog(
++    return SteadDialog(
+       title: Row(
+         mainAxisAlignment: MainAxisAlignment.center,
+         children: [
+@@ -2637,23 +2645,18 @@ void setSharedAbPasswordDialog(String abName, Peer peer) {
+             isInProgress.value ? const LinearProgressIndicator() : Offstage()
+           ])),
+       actions: [
+-        dialogButton(
++        dialogAction(
+           "Cancel",
+-          icon: Icon(Icons.close_rounded),
+           onPressed: cancel,
+-          isOutline: true,
++          primary: false,
+         ),
+         if (peer.password.isNotEmpty)
+-          dialogButton(
++          dangerAction(
+             "Remove",
+-            icon: Icon(Icons.delete_outline_rounded),
+             onPressed: () => change(''),
+-            buttonStyle: ButtonStyle(
+-                backgroundColor: MaterialStatePropertyAll(Colors.red)),
+           ),
+-        Obx(() => dialogButton(
++        Obx(() => dialogAction(
+               "OK",
+-              icon: Icon(Icons.done_rounded),
+               onPressed:
+                   isInputEmpty.value ? null : () => change(controller.text),
+             )),
+diff --git a/flutter/lib/common/widgets/login.dart b/flutter/lib/common/widgets/login.dart
+index 8269494..ba7728b 100644
+--- a/flutter/lib/common/widgets/login.dart
++++ b/flutter/lib/common/widgets/login.dart
+@@ -2,152 +2,26 @@ import 'dart:async';
+ import 'dart:convert';
+ 
+ import 'package:flutter/material.dart';
++import 'package:flutter_hbb/steaddesk/dialogs.dart';
++import 'package:flutter_hbb/steaddesk/theme.dart';
+ import 'package:flutter/services.dart';
+ import 'package:flutter_hbb/common/hbbs/hbbs.dart';
+ import 'package:flutter_hbb/models/platform_model.dart';
+ import 'package:flutter_hbb/models/user_model.dart';
+ import 'package:get/get.dart';
+-import 'package:flutter_svg/flutter_svg.dart';
+ import 'package:url_launcher/url_launcher.dart';
+ 
+ import '../../common.dart';
+ import './dialog.dart';
+ import './oidc_auth_status.dart';
+ 
+-const kOpSvgList = [
+-  'github',
+-  'gitlab',
+-  'google',
+-  'apple',
+-  'okta',
+-  'facebook',
+-  'azure',
+-  'auth0',
+-  'microsoft'
+-];
+ const _requestingAccountAuth = 'Requesting account auth';
+ const _waitingAccountAuth = 'Waiting account auth';
+ 
+-class _OidcProviderBranding {
+-  final String label;
+-  final String iconKey;
+-
+-  const _OidcProviderBranding({
+-    required this.label,
+-    required this.iconKey,
+-  });
+-}
+-
+-_OidcProviderBranding _oidcProviderBranding(String op) {
+-  switch (op.toLowerCase()) {
+-    case 'azure':
+-      return _OidcProviderBranding(
+-        label: 'Microsoft',
+-        iconKey: 'microsoft',
+-      );
+-    default:
+-      return _OidcProviderBranding(
+-        label: {
+-              'github': 'GitHub',
+-              'gitlab': 'GitLab',
+-            }[op.toLowerCase()] ??
+-            toCapitalized(op),
+-        iconKey: op.toLowerCase(),
+-      );
+-  }
+-}
+-
+-class _IconOP extends StatelessWidget {
+-  final String op;
+-  final String? icon;
+-  final EdgeInsets margin;
+-  const _IconOP(
+-      {Key? key,
+-      required this.op,
+-      required this.icon,
+-      this.margin = const EdgeInsets.symmetric(horizontal: 4.0)})
+-      : super(key: key);
+-
+-  @override
+-  Widget build(BuildContext context) {
+-    final svgFile =
+-        kOpSvgList.contains(op.toLowerCase()) ? op.toLowerCase() : 'default';
+-    return Container(
+-      margin: margin,
+-      child: icon == null
+-          ? SvgPicture.asset(
+-              'assets/auth-$svgFile.svg',
+-              width: 20,
+-            )
+-          : SvgPicture.string(
+-              icon!,
+-              width: 20,
+-            ),
+-    );
+-  }
+-}
+-
+-class ButtonOP extends StatelessWidget {
+-  final String op;
+-  final RxString curOP;
+-  final String? icon;
+-  final Color primaryColor;
+-  final double height;
+-  final Function() onTap;
+-  final bool Function() canStartAuth;
+-
+-  const ButtonOP({
+-    Key? key,
+-    required this.op,
+-    required this.curOP,
+-    required this.icon,
+-    required this.primaryColor,
+-    required this.height,
+-    required this.onTap,
+-    required this.canStartAuth,
+-  }) : super(key: key);
+-
+-  @override
+-  Widget build(BuildContext context) {
+-    final branding = _oidcProviderBranding(op);
+-    final buttonLabel = translate("Continue with {${branding.label}}");
+-    return Row(children: [
+-      Container(
+-        height: height,
+-        width: 200,
+-        child: Obx(() => ElevatedButton(
+-            style: ElevatedButton.styleFrom(
+-              backgroundColor: primaryColor,
+-            ).copyWith(elevation: ButtonStyleButton.allOrNull(0.0)),
+-            onPressed:
+-                curOP.value == 'rustdesk' || !canStartAuth() ? null : onTap,
+-            child: Row(
+-              children: [
+-                SizedBox(
+-                  width: 30,
+-                  child: _IconOP(
+-                    op: branding.iconKey,
+-                    icon: icon,
+-                    margin: EdgeInsets.only(right: 5),
+-                  ),
+-                ),
+-                Expanded(
+-                  child: FittedBox(
+-                    fit: BoxFit.scaleDown,
+-                    child: Center(child: Text(buttonLabel)),
+-                  ),
+-                ),
+-              ],
+-            ))),
+-      ),
+-    ]);
+-  }
+-}
+-
+ class ConfigOP {
+   final String op;
+-  final String? icon;
+-  ConfigOP({required this.op, required this.icon});
++  final bool showProviderName;
++  ConfigOP({required this.op, required this.showProviderName});
+ }
+ 
+ class _OidcAuthController {
+@@ -224,9 +98,9 @@ class _OidcAuthController {
+   Future<void> _cancelBackend() async {
+     try {
+       await bind.mainAccountAuthCancel();
+-    } catch (error, stackTrace) {
+-      debugPrint('Failed to cancel account authentication $error');
+-      debugPrintStack(stackTrace: stackTrace);
++    } catch (error) {
++      debugPrint(
++          'Failed to cancel account authentication (${error.runtimeType})');
+     }
+   }
+ 
+@@ -252,7 +126,7 @@ class _OidcAuthController {
+ class WidgetOP extends StatefulWidget {
+   final ConfigOP config;
+   final RxString curOP;
+-  final Function(Map<String, dynamic>) cbLogin;
++  final bool Function(Object authBody) cbLogin;
+   final Future<bool> Function(String) startAuth;
+   final Future<bool> Function(String) cancelAuth;
+   final bool Function() canStartAuth;
+@@ -315,10 +189,9 @@ class _WidgetOPState extends State<WidgetOP> {
+       if (!launched) {
+         debugPrint('Failed to open OIDC authentication URL');
+       }
+-    } catch (error, stackTrace) {
++    } catch (error) {
+       debugPrint(
+           'Failed to open OIDC authentication URL (${error.runtimeType})');
+-      debugPrintStack(stackTrace: stackTrace);
+     }
+   }
+ 
+@@ -328,10 +201,9 @@ class _WidgetOPState extends State<WidgetOP> {
+       showToast(
+         translate('Copied'),
+       );
+-    } catch (error, stackTrace) {
++    } catch (error) {
+       debugPrint(
+           'Failed to copy OIDC authentication URL (${error.runtimeType})');
+-      debugPrintStack(stackTrace: stackTrace);
+       showToast(translate('Failed'));
+     }
+   }
+@@ -367,7 +239,7 @@ class _WidgetOPState extends State<WidgetOP> {
+     Object error,
+     String operation,
+   ) async {
+-    debugPrint('Failed to $operation $error');
++    debugPrint('Failed to $operation (${error.runtimeType})');
+     if (!_isCurrentAuthAttempt(authAttempt)) {
+       return;
+     }
+@@ -378,9 +250,9 @@ class _WidgetOPState extends State<WidgetOP> {
+       if (!canceled || !_isCurrentAuthAttempt(authAttempt)) {
+         return;
+       }
+-    } catch (cancelError, stackTrace) {
+-      debugPrint('Failed to cancel account authentication $cancelError');
+-      debugPrintStack(stackTrace: stackTrace);
++    } catch (cancelError) {
++      debugPrint(
++          'Failed to cancel account authentication (${cancelError.runtimeType})');
+       return;
+     }
+     setState(() {
+@@ -420,7 +292,10 @@ class _WidgetOPState extends State<WidgetOP> {
+         _updateTimer?.cancel();
+         _invalidateAuthAttempt();
+         widget.curOP.value = '';
+-        widget.cbLogin(authBody as Map<String, dynamic>);
++        if (!widget.cbLogin(authBody)) {
++          setState(() => _failedMsg =
++              failedMsg.isEmpty ? 'Invalid auth response' : failedMsg);
++        }
+         return;
+       }
+       final stateChanged = _stateMsg != stateMsg || _failedMsg != failedMsg;
+@@ -466,39 +341,40 @@ class _WidgetOPState extends State<WidgetOP> {
+   Widget build(BuildContext context) {
+     return Column(
+       children: [
+-        ButtonOP(
+-          op: widget.config.op,
+-          curOP: widget.curOP,
+-          icon: widget.config.icon,
+-          primaryColor: str2color(widget.config.op, 0x7f),
+-          height: 36,
+-          canStartAuth: widget.canStartAuth,
+-          onTap: () async {
+-            if (!widget.canStartAuth()) {
+-              return;
+-            }
+-            final authAttempt = _resetState();
+-            try {
+-              final started = await widget.startAuth(widget.config.op);
+-              if (!started) {
+-                return;
+-              }
+-            } catch (e) {
+-              await _handleAuthFailure(
+-                authAttempt,
+-                e,
+-                'start account authentication',
+-              );
+-              return;
+-            }
+-            if (!mounted ||
+-                authAttempt != _authAttempt ||
+-                widget.curOP.value != widget.config.op) {
+-              return;
+-            }
+-            _beginQueryState(authAttempt);
+-          },
+-        ),
++        Obx(() => TextButton(
++              style: SteadDeskTheme.button,
++              child: Text(oidcButtonLabel(
++                  widget.config.showProviderName ? widget.config.op : '')),
++              onPressed:
++                  widget.curOP.value == 'rustdesk' || !widget.canStartAuth()
++                      ? null
++                      : () async {
++                          if (!widget.canStartAuth()) {
++                            return;
++                          }
++                          final authAttempt = _resetState();
++                          try {
++                            final started =
++                                await widget.startAuth(widget.config.op);
++                            if (!started) {
++                              return;
++                            }
++                          } catch (e) {
++                            await _handleAuthFailure(
++                              authAttempt,
++                              e,
++                              'start account authentication',
++                            );
++                            return;
++                          }
++                          if (!mounted ||
++                              authAttempt != _authAttempt ||
++                              widget.curOP.value != widget.config.op) {
++                            return;
++                          }
++                          _beginQueryState(authAttempt);
++                        },
++            )),
+         Obx(() {
+           if (widget.curOP.isNotEmpty &&
+               widget.curOP.value != widget.config.op) {
+@@ -555,7 +431,7 @@ class _WidgetOPState extends State<WidgetOP> {
+                             const SizedBox(width: 6),
+                             Flexible(
+                               child: SelectableText(
+-                                translate(_failedMsg),
++                                oidcFailureText(_failedMsg),
+                                 style:
+                                     DefaultTextStyle.of(context).style.copyWith(
+                                           fontSize: 13,
+@@ -580,7 +456,7 @@ class _WidgetOPState extends State<WidgetOP> {
+ class LoginWidgetOP extends StatelessWidget {
+   final List<ConfigOP> ops;
+   final RxString curOP;
+-  final Function(Map<String, dynamic>) cbLogin;
++  final bool Function(Object authBody) cbLogin;
+   final Future<bool> Function(String) startAuth;
+   final Future<bool> Function(String) cancelAuth;
+   final bool Function() canStartAuth;
+@@ -619,7 +495,7 @@ class LoginWidgetOP extends StatelessWidget {
+     }
+     return SingleChildScrollView(
+         child: Container(
+-            width: 200,
++            width: 380,
+             child: Column(
+               mainAxisSize: MainAxisSize.min,
+               mainAxisAlignment: MainAxisAlignment.spaceAround,
+@@ -678,7 +554,8 @@ class LoginWidgetUserPass extends StatelessWidget {
+               Container(
+                 height: 38,
+                 width: 200,
+-                child: Obx(() => ElevatedButton(
++                child: Obx(() => TextButton(
++                      style: SteadDeskTheme.button,
+                       child: Text(
+                         translate('Login'),
+                         style: TextStyle(fontSize: 16),
+@@ -743,7 +620,7 @@ Future<bool?> _openLoginDialog() async {
+       loginOptions.value = await UserModel.queryOidcLoginOptions();
+       loginOptionsError.value = null;
+     } catch (e) {
+-      debugPrint("queryOidcLoginOptions failed: $e");
++      debugPrint("queryOidcLoginOptions failed: ${e.runtimeType}");
+       loginOptionsError.value = e;
+     } finally {
+       loginOptionsInProgress.value = false;
+@@ -880,7 +757,9 @@ Future<bool?> _openLoginDialog() async {
+                 ),
+                 if (!inProgress)
+                   SelectableText(
+-                    error.toString(),
++                    error is RequestException
++                        ? 'HTTP ${error.statusCode} · ${oidcDetail(error.cause)}'
++                        : oidcDetail(error.toString()),
+                     style: const TextStyle(fontSize: 11, color: Colors.red),
+                     textAlign: TextAlign.center,
+                   ),
+@@ -904,27 +783,32 @@ Future<bool?> _openLoginDialog() async {
+                 ),
+                 LoginWidgetOP(
+                   ops: loginOptions
+-                      .map((e) => ConfigOP(op: e['name'], icon: e['icon']))
++                      .map((e) => ConfigOP(
++                          op: e['name'],
++                          showProviderName: loginOptions.length > 1))
+                       .toList(),
+                   curOP: curOP,
+                   startAuth: oidcAuth.start,
+                   cancelAuth: oidcAuth.cancelCurrent,
+                   canStartAuth: oidcAuth.canStart,
+-                  cbLogin: (Map<String, dynamic> authBody) async {
+-                    LoginResponse? resp;
++                  cbLogin: (authBody) {
++                    final LoginResponse resp;
+                     try {
+-                      // access_token is already stored in the rust side.
+-                      resp =
+-                          gFFI.userModel.getLoginResponseFromAuthBody(authBody);
++                      resp = gFFI.userModel.getLoginResponseFromAuthBody(
++                          authBody as Map<String, dynamic>);
+                     } catch (e) {
+                       debugPrint(
+-                          'Failed to parse oidc login body: "$authBody"');
++                          'OIDC response parse failed: ${e.runtimeType}');
++                      return false;
+                     }
+-                    close(true);
+-
+-                    if (resp != null) {
+-                      handleLoginResponse(resp, false, null);
++                    if (resp.type != HttpType.kAuthResTypeEmailCheck &&
++                        !(resp.type == HttpType.kAuthResTypeToken &&
++                            (resp.access_token?.isNotEmpty ?? false))) {
++                      return false;
+                     }
++                    close(true);
++                    handleLoginResponse(resp, false, null);
++                    return true;
+                   },
+                 ),
+               ],
+@@ -965,10 +849,10 @@ Future<bool?> _openLoginDialog() async {
+     );
+     final titlePadding = EdgeInsets.fromLTRB(MyTheme.dialogPadding, 0, 0, 0);
+ 
+-    return CustomAlertDialog(
++    return SteadDialog(
+       title: title,
+       titlePadding: titlePadding,
+-      contentBoxConstraints: BoxConstraints(minWidth: 400),
++      contentBoxConstraints: const BoxConstraints(maxWidth: 400),
+       content: Column(
+         crossAxisAlignment: CrossAxisAlignment.center,
+         children: [
+diff --git a/flutter/lib/common/widgets/peer_card.dart b/flutter/lib/common/widgets/peer_card.dart
+index 1f9f3ed..65e6985 100644
+--- a/flutter/lib/common/widgets/peer_card.dart
++++ b/flutter/lib/common/widgets/peer_card.dart
+@@ -1,5 +1,6 @@
+ import 'package:bot_toast/bot_toast.dart';
+ import 'package:flutter/material.dart';
++import 'package:flutter_hbb/steaddesk/theme.dart';
+ import 'package:flutter/services.dart';
+ import 'package:flutter_hbb/common/widgets/dialog.dart';
+ import 'package:flutter_hbb/consts.dart';
+@@ -783,23 +784,27 @@ abstract class BasePeerCard extends StatelessWidget {
+ 
+   @protected
+   MenuEntryBase<String> _removeAction(String id) {
++    final addressBook = tab == PeerTabIndex.ab;
+     return MenuEntryButton<String>(
+-      childBuilder: (TextStyle? style) => Row(
+-        children: [
+-          Text(
+-            translate('Delete'),
+-            style: style?.copyWith(color: Colors.red),
+-          ),
+-          Expanded(
+-              child: Align(
+-            alignment: Alignment.centerRight,
+-            child: Transform.scale(
+-              scale: 0.8,
+-              child: Icon(Icons.delete_forever, color: Colors.red),
++      buttonStyle: addressBook ? SteadDeskTheme.dangerButton : null,
++      childBuilder: (TextStyle? style) => addressBook
++          ? Text(translate('Delete'))
++          : Row(
++              children: [
++                Text(
++                  translate('Delete'),
++                  style: style?.copyWith(color: Colors.red),
++                ),
++                Expanded(
++                    child: Align(
++                  alignment: Alignment.centerRight,
++                  child: Transform.scale(
++                    scale: 0.8,
++                    child: Icon(Icons.delete_forever, color: Colors.red),
++                  ),
++                ).marginOnly(right: 4)),
++              ],
+             ),
+-          ).marginOnly(right: 4)),
+-        ],
+-      ),
+       proc: () {
+         onSubmit() async {
+           switch (tab) {
+@@ -830,7 +835,8 @@ abstract class BasePeerCard extends StatelessWidget {
+         }
+ 
+         deleteConfirmDialog(onSubmit,
+-            '${translate('Delete')} "${peer.alias.isEmpty ? formatID(peer.id) : peer.alias}"?');
++            '${translate('Delete')} "${peer.alias.isEmpty ? formatID(peer.id) : peer.alias}"?',
++            addressBook: addressBook);
+       },
+       padding: menuPadding,
+       dismissOnClicked: true,
+diff --git a/flutter/lib/common/widgets/peer_tab_page.dart b/flutter/lib/common/widgets/peer_tab_page.dart
+index 4849f27..2ebec25 100644
+--- a/flutter/lib/common/widgets/peer_tab_page.dart
++++ b/flutter/lib/common/widgets/peer_tab_page.dart
+@@ -2,6 +2,7 @@ import 'dart:ui' as ui;
+ 
+ import 'package:bot_toast/bot_toast.dart';
+ import 'package:flutter/material.dart';
++import 'package:flutter_hbb/steaddesk/dialogs.dart' show dangerAction;
+ import 'package:flutter_hbb/common/widgets/address_book.dart';
+ import 'package:flutter_hbb/common/widgets/dialog.dart';
+ import 'package:flutter_hbb/common/widgets/my_group.dart';
+@@ -387,45 +388,52 @@ class _PeerTabPageState extends State<PeerTabPage>
+     if (model.currentTab == PeerTabIndex.group.index) {
+       return Offstage();
+     }
++    final addressBook = model.currentTab == PeerTabIndex.ab.index;
++    onDelete() {
++      onSubmit() async {
++        final peers = model.selectedPeers;
++        switch (model.currentTab) {
++          case 0:
++            for (var p in peers) {
++              await bind.mainRemovePeer(id: p.id);
++            }
++            bind.mainLoadRecentPeers();
++            break;
++          case 1:
++            final favs = (await bind.mainGetFav()).toList();
++            peers.map((p) {
++              favs.remove(p.id);
++            }).toList();
++            await bind.mainStoreFav(favs: favs);
++            bind.mainLoadFavPeers();
++            break;
++          case 2:
++            for (var p in peers) {
++              await bind.mainRemoveDiscovered(id: p.id);
++            }
++            bind.mainLoadLanPeers();
++            break;
++          case 3:
++            await gFFI.abModel.deletePeers(peers.map((p) => p.id).toList());
++            break;
++          default:
++            break;
++        }
++        gFFI.peerTabModel.setMultiSelectionMode(false);
++        if (model.currentTab != 3) showToast(translate('Successful'));
++      }
++
++      deleteConfirmDialog(onSubmit, translate('Delete'),
++          addressBook: addressBook);
++    }
++
++    if (addressBook) {
++      return dangerAction('Delete', onPressed: onDelete);
++    }
+     return _hoverAction(
+         context: context,
+         toolTip: translate('Delete'),
+-        onTap: () {
+-          onSubmit() async {
+-            final peers = model.selectedPeers;
+-            switch (model.currentTab) {
+-              case 0:
+-                for (var p in peers) {
+-                  await bind.mainRemovePeer(id: p.id);
+-                }
+-                bind.mainLoadRecentPeers();
+-                break;
+-              case 1:
+-                final favs = (await bind.mainGetFav()).toList();
+-                peers.map((p) {
+-                  favs.remove(p.id);
+-                }).toList();
+-                await bind.mainStoreFav(favs: favs);
+-                bind.mainLoadFavPeers();
+-                break;
+-              case 2:
+-                for (var p in peers) {
+-                  await bind.mainRemoveDiscovered(id: p.id);
+-                }
+-                bind.mainLoadLanPeers();
+-                break;
+-              case 3:
+-                await gFFI.abModel.deletePeers(peers.map((p) => p.id).toList());
+-                break;
+-              default:
+-                break;
+-            }
+-            gFFI.peerTabModel.setMultiSelectionMode(false);
+-            if (model.currentTab != 3) showToast(translate('Successful'));
+-          }
+-
+-          deleteConfirmDialog(onSubmit, translate('Delete'));
+-        },
++        onTap: onDelete,
+         child: Icon(Icons.delete, color: Colors.red));
+   }
+ 
+diff --git a/flutter/lib/desktop/pages/desktop_setting_page.dart b/flutter/lib/desktop/pages/desktop_setting_page.dart
+index abba40b..6809464 100644
+--- a/flutter/lib/desktop/pages/desktop_setting_page.dart
++++ b/flutter/lib/desktop/pages/desktop_setting_page.dart
+@@ -4,6 +4,8 @@ import 'dart:io';
+ 
+ import 'package:file_picker/file_picker.dart';
+ import 'package:flutter/material.dart';
++import 'package:flutter_hbb/steaddesk/settings.dart';
++import 'package:flutter_hbb/steaddesk/theme.dart';
+ import 'package:flutter/services.dart';
+ import 'package:flutter_hbb/common.dart';
+ import 'package:flutter_hbb/common/widgets/audio_input.dart';
+@@ -36,7 +38,7 @@ const double _kRadioLeftMargin = 10;
+ const double _kListViewBottomMargin = 15;
+ const double _kTitleFontSize = 20;
+ const double _kContentFontSize = 15;
+-const Color _accentColor = MyTheme.accent;
++const Color _accentColor = SteadDeskTheme.action;
+ const String _kSettingPageControllerTag = 'settingPageController';
+ const String _kSettingPageTabKeyTag = 'settingPageTabKey';
+ 
+@@ -274,7 +276,7 @@ class _DesktopSettingPageState extends State<DesktopSettingPage>
+   Widget build(BuildContext context) {
+     super.build(context);
+     return Scaffold(
+-      backgroundColor: Theme.of(context).colorScheme.background,
++      backgroundColor: SteadDeskTheme.page,
+       body: _buildBlock(
+         children: <Widget>[
+           SizedBox(
+@@ -286,10 +288,11 @@ class _DesktopSettingPageState extends State<DesktopSettingPage>
+               ],
+             ),
+           ),
+-          const VerticalDivider(width: 1),
++          const VerticalDivider(
++              width: 1, thickness: 1, color: SteadDeskTheme.divider),
+           Expanded(
+             child: Container(
+-              color: Theme.of(context).scaffoldBackgroundColor,
++              color: SteadDeskTheme.page,
+               child: PageView(
+                 controller: controller,
+                 physics: NeverScrollableScrollPhysics(),
+@@ -1725,6 +1728,9 @@ class _NetworkState extends State<_Network> with AutomaticKeepAliveClientMixin {
+   Widget build(BuildContext context) {
+     super.build(context);
+     return ListView(controller: scrollController, children: [
++      if (isOptionFixed('custom-rendezvous-server') &&
++          bind.mainGetBuildinOption(key: kOptionHideServerSetting) != 'Y')
++        _Card(title: 'Server', children: const [SteadManagedNetwork()]),
+       _lock(locked, 'Unlock Network Settings', () {
+         locked = false;
+         setState(() => {});
+@@ -2593,7 +2599,11 @@ Widget _Card(
+       Flexible(
+         child: SizedBox(
+           width: _kCardFixedWidth,
+-          child: Card(
++          child: DecoratedBox(
++            decoration: const BoxDecoration(
++                color: SteadDeskTheme.page,
++                border:
++                    Border(bottom: BorderSide(color: SteadDeskTheme.divider))),
+             child: Column(
+               children: [
+                 Row(
+@@ -2609,6 +2619,8 @@ Widget _Card(
+                     ...?title_suffix
+                   ],
+                 ).marginOnly(left: _kContentHMargin, top: 10, bottom: 10),
++                const Divider(
++                    height: 1, thickness: 1, color: SteadDeskTheme.rowDivider),
+                 ...children
+                     .map((e) => e.marginOnly(top: 4, right: _kContentHMargin)),
+               ],
+diff --git a/flutter/lib/desktop/pages/server_page.dart b/flutter/lib/desktop/pages/server_page.dart
+index eeb51b6..26256f4 100644
+--- a/flutter/lib/desktop/pages/server_page.dart
++++ b/flutter/lib/desktop/pages/server_page.dart
+@@ -4,6 +4,7 @@ import 'dart:async';
+ import 'dart:math';
+ 
+ import 'package:flutter/material.dart';
++import 'package:flutter_hbb/steaddesk/dialogs.dart';
+ import 'package:flutter_hbb/common/widgets/audio_input.dart';
+ import 'package:flutter_hbb/consts.dart';
+ import 'package:flutter_hbb/desktop/widgets/tabbar_widget.dart';
+@@ -1078,58 +1079,21 @@ class _CmControlPanel extends StatelessWidget {
+                 key: kOptionHideElevateButtonInAcceptWindow) !=
+             'Y';
+     final showAccept = model.approveMode != 'password';
+-    return Column(
+-      mainAxisAlignment: MainAxisAlignment.end,
+-      children: [
+-        Offstage(
+-          offstage: !showElevation || !showAccept,
+-          child: buildButton(context, color: Colors.green[700], onClick: () {
+-            handleAccept(context);
+-            handleElevate(context);
+-            windowManager.minimize();
+-          },
+-              text: 'Accept and Elevate',
+-              icon: Icon(
+-                Icons.security_rounded,
+-                color: Colors.white,
+-                size: 14,
+-              ),
+-              textColor: Colors.white,
+-              tooltip: 'accept_and_elevate_btn_tooltip'),
+-        ),
+-        Row(
+-          mainAxisAlignment: MainAxisAlignment.center,
+-          children: [
+-            if (showAccept)
+-              Expanded(
+-                child: Column(
+-                  children: [
+-                    buildButton(
+-                      context,
+-                      color: MyTheme.accent,
+-                      onClick: () {
+-                        handleAccept(context);
+-                        windowManager.minimize();
+-                      },
+-                      text: 'Accept',
+-                      textColor: Colors.white,
+-                    ),
+-                  ],
+-                ),
+-              ),
+-            Expanded(
+-              child: buildButton(
+-                context,
+-                color: Colors.transparent,
+-                border: Border.all(color: Colors.grey),
+-                onClick: handleDisconnect,
+-                text: 'Cancel',
+-                textColor: null,
+-              ),
+-            ),
+-          ],
+-        ),
+-      ],
++    return SteadIncomingActions(
++      accept: showAccept
++          ? () => checkClickTime(client.id, () {
++                handleAccept(context);
++                windowManager.minimize();
++              })
++          : null,
++      elevate: showElevation && showAccept
++          ? () => checkClickTime(client.id, () {
++                handleAccept(context);
++                handleElevate(context);
++                windowManager.minimize();
++              })
++          : null,
++      reject: () => checkClickTime(client.id, handleDisconnect),
+     ).marginOnly(bottom: buttonBottomMargin);
+   }
+ 
+diff --git a/flutter/lib/desktop/widgets/popup_menu.dart b/flutter/lib/desktop/widgets/popup_menu.dart
+index 28432a9..6d0aefc 100644
+--- a/flutter/lib/desktop/widgets/popup_menu.dart
++++ b/flutter/lib/desktop/widgets/popup_menu.dart
+@@ -694,7 +694,10 @@ class MenuEntryButton<T> extends MenuEntryBase<T> {
+   Function() proc;
+   final EdgeInsets? padding;
+ 
++  final ButtonStyle? buttonStyle;
++
+   MenuEntryButton({
++    this.buttonStyle,
+     required this.childBuilder,
+     required this.proc,
+     this.padding,
+@@ -712,6 +715,7 @@ class MenuEntryButton<T> extends MenuEntryBase<T> {
+     return Obx(() => Container(
+         width: conf.boxWidth,
+         child: TextButton(
++          style: buttonStyle,
+           onPressed: super.enabled!.value
+               ? () {
+                   if (super.dismissOnClicked && Navigator.canPop(context)) {
+diff --git a/flutter/lib/mobile/pages/settings_page.dart b/flutter/lib/mobile/pages/settings_page.dart
+index 47afe78..e178f04 100644
+--- a/flutter/lib/mobile/pages/settings_page.dart
++++ b/flutter/lib/mobile/pages/settings_page.dart
+@@ -3,6 +3,7 @@ import 'dart:convert';
+ import 'dart:typed_data';
+ 
+ import 'package:flutter/material.dart';
++import 'package:flutter_hbb/steaddesk/settings.dart';
+ import 'package:flutter_hbb/common/widgets/setting_widgets.dart';
+ import 'package:flutter_hbb/desktop/pages/desktop_setting_page.dart';
+ import 'package:get/get.dart';
+@@ -715,7 +716,7 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
+     final disabledSettings = bind.isDisableSettings();
+     final hideSecuritySettings =
+         bind.mainGetBuildinOption(key: kOptionHideSecuritySetting) == 'Y';
+-    final settings = SettingsList(
++    final settings = SteadSettingsList(
+       sections: [
+         customClientSection,
+         if (!bind.isDisableAccount())
+@@ -1201,7 +1202,7 @@ class __DisplayPageState extends State<_DisplayPage> {
+         title: Text(translate('Display Settings')),
+         centerTitle: true,
+       ),
+-      body: SettingsList(sections: [
++      body: SteadSettingsList(sections: [
+         SettingsSection(
+           tiles: [
+             _getPopupDialogRadioEntry(
+diff --git a/flutter/lib/mobile/widgets/dialog.dart b/flutter/lib/mobile/widgets/dialog.dart
+index 6b110d5..47a17a2 100644
+--- a/flutter/lib/mobile/widgets/dialog.dart
++++ b/flutter/lib/mobile/widgets/dialog.dart
+@@ -1,6 +1,8 @@
+ import 'dart:async';
+ import 'dart:convert';
+ import 'package:flutter/material.dart';
++import 'package:flutter_hbb/steaddesk/dialogs.dart';
++import 'package:flutter_hbb/steaddesk/settings.dart';
+ import 'package:flutter_hbb/common/widgets/setting_widgets.dart';
+ import 'package:flutter_hbb/common/widgets/toolbar.dart';
+ import 'package:get/get.dart';
+@@ -65,19 +67,21 @@ void showServerSettings(OverlayDialogManager dialogManager,
+   if (isOptionFixed('custom-rendezvous-server')) {
+     String state(String key) =>
+         option2bool(key, bind.mainGetOptionSync(key: key)) ? 'On' : 'Off';
+-    dialogManager.show((setState, close, context) => CustomAlertDialog(
+-      title: Text(translate('ID/Relay Server')),
+-      content: SelectableText('SteadDesk · 🔒\n'
+-          '${translate("ID Server")}: ${config.idServer}\n'
+-          '${translate("Relay Server")}: ${config.relayServer}\n'
+-          '${translate("API Server")}: ${config.apiServer}\n'
+-          '${translate("Key")}: ${config.key}\n'
+-          'Direct IP access: ${state("direct-server")}\n'
+-          'LAN discovery: ${state("enable-lan-discovery")}\n'
+-          'TCP tunneling: ${state("enable-tunnel")}\n'
+-          'Remote configuration modification: ${state("allow-remote-config-modification")}'),
+-      actions: [dialogButton('Close', onPressed: close)],
+-    ));
++    dialogManager.show((setState, close, context) => SteadDialog(
++          title: Text(translate('ID/Relay Server')),
++          content: Column(
++              crossAxisAlignment: CrossAxisAlignment.start,
++              mainAxisSize: MainAxisSize.min,
++              children: [
++                const Text('SteadDesk · 🔒'),
++                const SteadManagedNetwork(),
++                SelectableText('Direct IP access: ${state("direct-server")}\n'
++                    'LAN discovery: ${state("enable-lan-discovery")}\n'
++                    'TCP tunneling: ${state("enable-tunnel")}\n'
++                    'Remote configuration modification: ${state("allow-remote-config-modification")}'),
++              ]),
++          actions: [dialogAction('Close', onPressed: close)],
++        ));
+     return;
+   }
+   showServerSettingsWithValue(config, dialogManager, setState);
+diff --git a/flutter/lib/models/user_model.dart b/flutter/lib/models/user_model.dart
+index 405a9fa..4a153ab 100644
+--- a/flutter/lib/models/user_model.dart
++++ b/flutter/lib/models/user_model.dart
+@@ -221,7 +221,7 @@ class UserModel {
+     try {
+       loginResponse = LoginResponse.fromJson(body);
+     } catch (e) {
+-      debugPrint("login: jsonDecode LoginResponse failed: ${e.toString()}");
++      debugPrint("login: jsonDecode LoginResponse failed: ${e.runtimeType}");
+       rethrow;
+     }
+ 
+diff --git a/flutter/lib/steaddesk/dialogs.dart b/flutter/lib/steaddesk/dialogs.dart
+new file mode 100644
+index 0000000..965e3b6
+--- /dev/null
++++ b/flutter/lib/steaddesk/dialogs.dart
+@@ -0,0 +1,160 @@
++import 'package:flutter/material.dart';
++import '../common.dart' show CustomAlertDialog, translate;
++import '../consts.dart' show kCommConfKeyLang;
++import '../models/platform_model.dart' show bind, localeName;
++import 'theme.dart';
++
++bool get steadUsesChinese {
++  final saved = bind.mainGetLocalOption(key: kCommConfKeyLang);
++  return (saved.isEmpty ? (localeName as String? ?? '') : saved)
++      .toLowerCase()
++      .startsWith('zh');
++}
++
++String oidcButtonLabel(String provider) {
++  final label = steadUsesChinese ? '使用单点登录（OIDC）' : 'Use single sign-on (OIDC)';
++  return provider.isEmpty ? label : '$label · $provider';
++}
++
++String get oidcFailureHint => steadUsesChinese
++    ? '登录失败。可能原因：密码错误；连续输错后账号被临时锁定（约 30 分钟后自动解锁）；该账号不是客服账号（管理员请用账号密码登录）。'
++    : 'Login failed. Possible reasons: an incorrect password; a temporary lock after repeated failures (it clears automatically after about 30 minutes); or this is not a support account (administrators should sign in with their username and password).';
++
++// Only reproduce public diagnostic labels. Arbitrary server text can be a
++// credential even when it has no recognizable token prefix or URL syntax.
++String oidcDetail(String message) {
++  final text = message.trim();
++  if (text.isEmpty) return '';
++  final label = text.split(RegExp(r'[:;\n\r?&#(]'))[0].trim().toLowerCase();
++  if (RegExp(r'^http [45][0-9]{2}$').hasMatch(label)) {
++    return label.toUpperCase();
++  }
++  const publicLabels = [
++    'oauth failed',
++    'Failed',
++    'Timeout',
++    'Invalid auth response',
++    'Wrong Password',
++    'Invalid credentials',
++    'Invalid password',
++    'Access denied',
++    'Unauthorized',
++    'Forbidden',
++    'Bad Request',
++    'Request failed',
++    'Internal Server Error',
++    'Connection refused',
++    'Network error',
++    'invalid_grant',
++    'access_denied',
++    'invalid_request',
++    'server_error',
++    'temporarily_unavailable',
++    'invalid_client',
++    'invalid_scope',
++    'unauthorized_client',
++    'unsupported_grant_type',
++    'login_required',
++    'interaction_required',
++    'consent_required',
++    'Account locked',
++    'Too many requests',
++    'Service unavailable',
++    'Authentication failed',
++  ];
++  for (final key in publicLabels) {
++    if (label == key.toLowerCase()) return translate(key);
++  }
++  return steadUsesChinese ? '服务端详情已隐藏' : 'Server details withheld';
++}
++
++String oidcFailureText(String message) {
++  final detail = oidcDetail(message);
++  if (detail.isEmpty) return oidcFailureHint;
++  final prefix = steadUsesChinese ? '详情：' : 'Details: ';
++  return '$oidcFailureHint\n$prefix$detail';
++}
++
++Widget dangerAction(String key, {required VoidCallback? onPressed}) =>
++    TextButton(
++        style: SteadDeskTheme.dangerButton,
++        onPressed: onPressed,
++        child: Text(translate(key)));
++
++Widget dialogAction(String key,
++        {required VoidCallback? onPressed, bool primary = true}) =>
++    TextButton(
++      onPressed: onPressed,
++      style: primary
++          ? SteadDeskTheme.button
++          : SteadDeskTheme.button.copyWith(
++              foregroundColor: MaterialStateProperty.resolveWith((states) =>
++                  states.contains(MaterialState.disabled)
++                      ? SteadDeskTheme.offline
++                      : SteadDeskTheme.body)),
++      child: Text(translate(key)),
++    );
++
++/// Keep upstream's focus, keyboard, scrolling and overlay dismissal behavior.
++class SteadDialog extends CustomAlertDialog {
++  static const _line = BorderSide(color: SteadDeskTheme.divider);
++
++  SteadDialog({
++    super.key,
++    Widget? title,
++    super.titlePadding,
++    required Widget content,
++    super.contentBoxConstraints,
++    List<Widget>? actions,
++    super.onSubmit,
++    super.onCancel,
++  }) : super(
++          title: title,
++          actions: actions,
++          content: Container(
++            decoration: BoxDecoration(
++              border: Border(
++                top: title == null ? BorderSide.none : _line,
++                bottom: actions == null ? BorderSide.none : _line,
++              ),
++            ),
++            padding: const EdgeInsets.symmetric(vertical: 12),
++            child: content,
++          ),
++        );
++
++  @override
++  Widget build(BuildContext context) {
++    final theme = Theme.of(context);
++    return Theme(
++      data: theme.copyWith(
++          dialogTheme: theme.dialogTheme.copyWith(
++              backgroundColor: SteadDeskTheme.page,
++              surfaceTintColor: Colors.transparent)),
++      child: super.build(context),
++    );
++  }
++}
++
++class SteadIncomingActions extends StatelessWidget {
++  const SteadIncomingActions(
++      {super.key, this.accept, this.elevate, required this.reject});
++  final VoidCallback? accept, elevate;
++  final VoidCallback reject;
++
++  @override
++  Widget build(BuildContext context) => Material(
++        color: SteadDeskTheme.page,
++        child: Column(mainAxisSize: MainAxisSize.min, children: [
++          const Divider(color: SteadDeskTheme.divider, height: 1, thickness: 1),
++          if (elevate != null)
++            Tooltip(
++                message: translate('accept_and_elevate_btn_tooltip'),
++                child: dialogAction('Accept and Elevate', onPressed: elevate)),
++          Wrap(alignment: WrapAlignment.center, children: [
++            if (accept != null) dialogAction('Accept', onPressed: accept),
++            dialogAction('Dismiss', onPressed: reject, primary: false),
++          ]),
++        ]),
++      );
++}
+diff --git a/flutter/lib/steaddesk/settings.dart b/flutter/lib/steaddesk/settings.dart
+new file mode 100644
+index 0000000..36952c4
+--- /dev/null
++++ b/flutter/lib/steaddesk/settings.dart
+@@ -0,0 +1,68 @@
++import 'package:flutter/material.dart';
++import 'package:settings_ui/settings_ui.dart';
++import '../common.dart' show translate;
++import '../models/platform_model.dart' show bind;
++import 'dialogs.dart' show steadUsesChinese;
++import 'theme.dart';
++
++const _mobileTheme = SettingsThemeData(
++  settingsListBackground: SteadDeskTheme.page,
++  settingsSectionBackground: SteadDeskTheme.page,
++  titleTextColor: SteadDeskTheme.heading,
++  settingsTileTextColor: SteadDeskTheme.body,
++  dividerColor: SteadDeskTheme.divider,
++  tileHighlightColor: SteadDeskTheme.hover,
++);
++
++class SteadManagedNetwork extends StatelessWidget {
++  const SteadManagedNetwork({super.key});
++
++  @override
++  Widget build(BuildContext context) {
++    final managed =
++        steadUsesChinese ? '由 SteadDesk 统一配置' : 'Configured by SteadDesk';
++    const fields = {
++      'ID Server': 'custom-rendezvous-server',
++      'Relay Server': 'relay-server',
++      'API Server': 'api-server',
++      'Key': 'key',
++    };
++    return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
++      for (final field in fields.entries) ...[
++        const Divider(
++            color: SteadDeskTheme.rowDivider, height: 1, thickness: 1),
++        Padding(
++            padding: const EdgeInsets.symmetric(vertical: 6),
++            child: Wrap(
++                alignment: WrapAlignment.spaceBetween,
++                spacing: 12,
++                children: [
++                  SelectableText(
++                      '${translate(field.key)}: ${bind.mainGetOptionSync(key: field.value)}'),
++                  Text(managed,
++                      style:
++                          const TextStyle(color: SteadDeskTheme.secondaryText)),
++                ])),
++      ],
++    ]);
++  }
++}
++
++/// Android settings_ui does not draw section dividers from its theme.
++class SteadSettingsList extends SettingsList {
++  SteadSettingsList(
++      {super.key, required List<AbstractSettingsSection> sections})
++      : super(lightTheme: _mobileTheme, sections: [
++          for (final section in sections)
++            if (section is SettingsSection)
++              CustomSettingsSection(
++                  child: DecoratedBox(
++                      decoration: const BoxDecoration(
++                          border: Border(
++                              bottom:
++                                  BorderSide(color: SteadDeskTheme.divider))),
++                      child: section))
++            else
++              section,
++        ]);
++}
+diff --git a/flutter/lib/steaddesk/theme.dart b/flutter/lib/steaddesk/theme.dart
+index 313c8dc..90d94d1 100644
+--- a/flutter/lib/steaddesk/theme.dart
++++ b/flutter/lib/steaddesk/theme.dart
+@@ -47,6 +47,11 @@ class SteadDeskTheme {
+   static const glassGlowColors = [sea, foam, action];
+   static const glassOpaque = Color(0xFFE8F4FA);
+ 
++  static final dangerButton = button.copyWith(
++    foregroundColor: MaterialStateProperty.resolveWith<Color>(
++        (states) => states.contains(MaterialState.disabled) ? offline : danger),
++  );
++
+   static final button = ButtonStyle(
+     foregroundColor: MaterialStateProperty.resolveWith<Color>((states) {
+       if (states.contains(MaterialState.disabled)) return offline;
