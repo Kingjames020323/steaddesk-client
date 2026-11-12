@@ -498,11 +498,24 @@ jobs:
         run: |
           export JAVA_HOME="$JAVA_HOME_17_X64"
           export PATH="$ANDROID_HOME/platform-tools:$JAVA_HOME/bin:$ANDROID_HOME/cmdline-tools/latest/bin:$PATH"
+          export ANDROID_USER_HOME="$HOME/.android"
+          export ANDROID_AVD_HOME="$ANDROID_USER_HOME/avd"
+          mkdir -p "$ANDROID_AVD_HOME"
           sudo apt-get install -y python3-nacl
           sdkmanager 'platform-tools' 'platforms;android-34' 'build-tools;34.0.0' 'emulator' 'system-images;android-34;default;x86_64'
           sudo chmod a+rw /dev/kvm
-          echo no | avdmanager create avd --name staging --package 'system-images;android-34;default;x86_64' --device pixel_4
+          create_log="$RUNNER_TEMP/staging-avd-create.log"
+          if ! avdmanager create avd --name staging --package 'system-images;android-34;default;x86_64' --device pixel_4 <<< 'no' >"$create_log" 2>&1; then
+            cat "$create_log" >&2
+            exit 1
+          fi
           emulator="$ANDROID_HOME/emulator/emulator"
+          avd_list="$RUNNER_TEMP/staging-avds.txt"
+          if ! "$emulator" -list-avds >"$avd_list" || ! grep -Fxq staging "$avd_list"; then
+            echo "Expected staging in emulator -list-avds (ANDROID_AVD_HOME=$ANDROID_AVD_HOME)" >&2
+            cat "$create_log" "$avd_list" >&2
+            exit 1
+          fi
           "$emulator" -accel-check
           adb start-server
           "$emulator" @staging -port 5554 -no-window -no-audio -no-boot-anim -no-snapshot -accel on -gpu software >"$RUNNER_TEMP/emulator.log" 2>&1 &
