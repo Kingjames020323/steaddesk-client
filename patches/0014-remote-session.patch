@@ -1029,3 +1029,237 @@ index a86d353..d62b991 100644
          ("Secure Connection", "安全连接"),
          ("Insecure Connection", "非安全连接"),
          ("Scale original", "原始尺寸"),
+diff --git a/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MainService.kt b/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MainService.kt
+index 473fead..520db16 100644
+--- a/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MainService.kt
++++ b/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MainService.kt
+@@ -408,7 +408,7 @@ class MainService : Service() {
+                                 val planes = image.planes
+                                 val buffer = planes[0].buffer
+                                 buffer.rewind()
+-                                FFI.onVideoFrameUpdate(buffer)
++                                FFI.onVideoFrameUpdate(buffer, planes[0].rowStride)
+                             }
+                         } catch (ignored: java.lang.Exception) {
+                         }
+diff --git a/flutter/android/app/src/main/kotlin/ffi.kt b/flutter/android/app/src/main/kotlin/ffi.kt
+index 02e6606..5867fb5 100644
+--- a/flutter/android/app/src/main/kotlin/ffi.kt
++++ b/flutter/android/app/src/main/kotlin/ffi.kt
+@@ -17,7 +17,7 @@ object FFI {
+     external fun setClipboardManager(clipboardManager: RdClipboardManager)
+     external fun startServer(app_dir: String, home_dir: String, custom_client_config: String)
+     external fun startService()
+-    external fun onVideoFrameUpdate(buf: ByteBuffer)
++    external fun onVideoFrameUpdate(buf: ByteBuffer, rowStride: Int)
+     external fun onAudioFrameUpdate(buf: ByteBuffer)
+     external fun translateLocale(localeName: String, input: String): String
+     external fun refreshScreen()
+diff --git a/libs/scrap/src/android/ffi.rs b/libs/scrap/src/android/ffi.rs
+index 26f6a50..d6e2328 100644
+--- a/libs/scrap/src/android/ffi.rs
++++ b/libs/scrap/src/android/ffi.rs
+@@ -24,7 +24,10 @@ lazy_static! {
+     static ref JVM: RwLock<Option<JavaVM>> = RwLock::new(None);
+     static ref MAIN_SERVICE_CTX: RwLock<Option<GlobalRef>> = RwLock::new(None); // MainService -> video service / audio service / info
+     static ref APPLICATION_CONTEXT: RwLock<Option<GlobalRef>> = RwLock::new(None);
+-    static ref VIDEO_RAW: Mutex<FrameRaw> = Mutex::new(FrameRaw::new("video", MAX_VIDEO_FRAME_TIMEOUT));
++    static ref VIDEO_RAW: Mutex<VideoFrame> = Mutex::new(VideoFrame {
++        raw: FrameRaw::new("video", MAX_VIDEO_FRAME_TIMEOUT),
++        row_stride: 0,
++    });
+     static ref AUDIO_RAW: Mutex<FrameRaw> = Mutex::new(FrameRaw::new("audio", MAX_AUDIO_FRAME_TIMEOUT));
+     static ref NDK_CONTEXT_INITED: Mutex<bool> = Default::default();
+     static ref MEDIA_CODEC_INFOS: RwLock<Option<MediaCodecInfos>> = RwLock::new(None);
+@@ -36,6 +39,11 @@ lazy_static! {
+ const MAX_VIDEO_FRAME_TIMEOUT: Duration = Duration::from_millis(100);
+ const MAX_AUDIO_FRAME_TIMEOUT: Duration = Duration::from_millis(1000);
+ 
++struct VideoFrame {
++    raw: FrameRaw,
++    row_stride: usize,
++}
++
+ struct FrameRaw {
+     name: &'static str,
+     ptr: AtomicPtr<u8>,
+@@ -105,8 +113,10 @@ impl FrameRaw {
+     }
+ }
+ 
+-pub fn get_video_raw<'a>(dst: &mut Vec<u8>, last: &mut Vec<u8>) -> Option<()> {
+-    VIDEO_RAW.lock().ok()?.take(dst, last)
++pub fn get_video_raw(dst: &mut Vec<u8>, last: &mut Vec<u8>) -> Option<usize> {
++    let mut video = VIDEO_RAW.lock().ok()?;
++    video.raw.take(dst, last)?;
++    Some(video.row_stride)
+ }
+ 
+ pub fn get_audio_raw<'a>(dst: &mut Vec<u8>, last: &mut Vec<u8>) -> Option<()> {
+@@ -126,11 +136,17 @@ pub extern "system" fn Java_ffi_FFI_onVideoFrameUpdate(
+     env: JNIEnv,
+     _class: JClass,
+     buffer: JObject,
++    row_stride: jni::sys::jint,
+ ) {
++    if row_stride <= 0 {
++        return;
++    }
+     let jb = JByteBuffer::from(buffer);
+     if let Ok(data) = env.get_direct_buffer_address(&jb) {
+         if let Ok(len) = env.get_direct_buffer_capacity(&jb) {
+-            VIDEO_RAW.lock().unwrap().update(data, len);
++            let mut video = VIDEO_RAW.lock().unwrap();
++            video.row_stride = row_stride as usize;
++            video.raw.update(data, len);
+         }
+     }
+ }
+@@ -182,7 +198,7 @@ pub extern "system" fn Java_ffi_FFI_setFrameRawEnable(
+         let name: String = name.into();
+         let value = value.eq(&1);
+         if name.eq("video") {
+-            VIDEO_RAW.lock().unwrap().set_enable(value);
++            VIDEO_RAW.lock().unwrap().raw.set_enable(value);
+         } else if name.eq("audio") {
+             AUDIO_RAW.lock().unwrap().set_enable(value);
+         }
+diff --git a/libs/scrap/src/common/android.rs b/libs/scrap/src/common/android.rs
+index 49956fc..11ff209 100644
+--- a/libs/scrap/src/common/android.rs
++++ b/libs/scrap/src/common/android.rs
+@@ -36,11 +36,22 @@ impl Capturer {
+ 
+ impl crate::TraitCapturer for Capturer {
+     fn frame<'a>(&'a mut self, _timeout: Duration) -> io::Result<Frame<'a>> {
+-        if get_video_raw(&mut self.rgba, &mut self.saved_raw_data).is_some() {
++        if let Some(stride) = get_video_raw(&mut self.rgba, &mut self.saved_raw_data) {
++            // Android can omit the padding after the last visible scanline.
++            let width = self.width();
++            let height = self.height();
++            let row_bytes = width * 4;
++            if height == 0 || row_bytes == 0 || stride < row_bytes
++                || (height - 1).checked_mul(stride).and_then(|n| n.checked_add(row_bytes))
++                    .map_or(true, |needed| needed > self.rgba.len())
++            {
++                return Err(io::ErrorKind::InvalidData.into());
++            }
+             Ok(Frame::PixelBuffer(PixelBuffer::new(
+                 &self.rgba,
+-                self.width(),
+-                self.height(),
++                width,
++                height,
++                stride,
+             )))
+         } else {
+             return Err(io::ErrorKind::WouldBlock.into());
+@@ -56,10 +67,8 @@ pub struct PixelBuffer<'a> {
+ }
+ 
+ impl<'a> PixelBuffer<'a> {
+-    pub fn new(data: &'a [u8], width: usize, height: usize) -> Self {
+-        let stride0 = data.len() / height;
+-        let mut stride = Vec::new();
+-        stride.push(stride0);
++    pub fn new(data: &'a [u8], width: usize, height: usize, row_stride: usize) -> Self {
++        let stride = vec![row_stride];
+         PixelBuffer {
+             data,
+             width,
+diff --git a/src/server/video_service.rs b/src/server/video_service.rs
+index b07098f..589a27b 100644
+--- a/src/server/video_service.rs
++++ b/src/server/video_service.rs
+@@ -31,7 +31,7 @@ use crate::{
+     ui_interface::is_installed,
+ };
+ use hbb_common::{
+-    anyhow::anyhow,
++    anyhow::{anyhow, Context as _},
+     config,
+     tokio::sync::{
+         mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
+@@ -1463,29 +1463,61 @@ pub fn set_take_screenshot(source: VideoSource, display_idx: usize, sid: String,
+     );
+ }
+ 
+-// We need to this function, because the `stride` may be larger than `width * 4`.
+-fn get_rgba_from_pixelbuf<'a>(pixbuf: &scrap::PixelBuffer<'a>) -> ResultType<Vec<u8>> {
+-    let w = pixbuf.width();
+-    let h = pixbuf.height();
+-    let stride = pixbuf.stride();
+-    let Some(s) = stride.get(0) else {
+-        bail!("Invalid pixel buf stride.")
+-    };
++fn get_rgba_from_pixelbuf(pixbuf: &scrap::PixelBuffer<'_>) -> ResultType<Vec<u8>> {
++    screenshot_rgba(
++        pixbuf.data(),
++        pixbuf.width(),
++        pixbuf.height(),
++        pixbuf.stride().first().copied().unwrap_or(0),
++        pixbuf.pixfmt(),
++    )
++}
+ 
+-    if *s == w * 4 {
+-        let mut rgba = vec![];
+-        scrap::convert(pixbuf, scrap::Pixfmt::RGBA, &mut rgba)?;
+-        Ok(rgba)
+-    } else {
+-        let bgra = pixbuf.data();
+-        let mut bit_flipped = Vec::with_capacity(w * h * 4);
+-        for y in 0..h {
+-            for x in 0..w {
+-                let i = s * y + 4 * x;
+-                bit_flipped.extend_from_slice(&[bgra[i + 2], bgra[i + 1], bgra[i], bgra[i + 3]]);
+-            }
++fn screenshot_rgba(
++    pixels: &[u8],
++    width: usize,
++    height: usize,
++    stride: usize,
++    format: scrap::Pixfmt,
++) -> ResultType<Vec<u8>> {
++    let swap_rb = match format {
++        scrap::Pixfmt::RGBA => false,
++        scrap::Pixfmt::BGRA => true,
++        format => bail!("Unsupported screenshot pixel format: {format:?}"),
++    };
++    let row_bytes = width.checked_mul(4).context("Screenshot width overflow")?;
++    if row_bytes == 0 || height == 0 || stride < row_bytes {
++        bail!("Invalid screenshot dimensions or stride");
++    }
++    let needed = (height - 1)
++        .checked_mul(stride)
++        .and_then(|offset| offset.checked_add(row_bytes))
++        .context("Screenshot buffer size overflow")?;
++    let src = pixels.get(..needed).context("Short screenshot buffer")?;
++    let mut rgba = Vec::with_capacity(row_bytes * height);
++    for row in src.chunks(stride) {
++        rgba.extend_from_slice(&row[..row_bytes]);
++    }
++    if swap_rb {
++        for pixel in rgba.chunks_exact_mut(4) {
++            pixel.swap(0, 2);
+         }
+-        Ok(bit_flipped)
++    }
++    Ok(rgba)
++}
++
++#[cfg(test)]
++#[test]
++fn screenshot_preserves_rows_channels_and_alpha() {
++    use scrap::Pixfmt::{BGRA, RGBA};
++    // The last scanline intentionally has no trailing padding.
++    let red_blue = [255, 0, 0, 255, 0, 0, 255, 64];
++    for (format, input) in [
++        (RGBA, [255, 0, 0, 255, 99, 99, 99, 99, 0, 0, 255, 64]),
++        (BGRA, [0, 0, 255, 255, 99, 99, 99, 99, 255, 0, 0, 64]),
++    ] {
++        assert_eq!(screenshot_rgba(&input, 1, 2, 8, format).unwrap(), red_blue);
++        assert!(screenshot_rgba(&input[..11], 1, 2, 8, format).is_err());
+     }
+ }
+ 
