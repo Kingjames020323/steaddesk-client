@@ -497,7 +497,7 @@ jobs:
         shell: bash
         run: |
           export JAVA_HOME="$JAVA_HOME_17_X64"
-          export PATH="$JAVA_HOME/bin:$ANDROID_HOME/cmdline-tools/latest/bin:$PATH"
+          export PATH="$ANDROID_HOME/platform-tools:$JAVA_HOME/bin:$ANDROID_HOME/cmdline-tools/latest/bin:$PATH"
           sudo apt-get install -y python3-nacl
           sdkmanager 'platform-tools' 'platforms;android-34' 'build-tools;34.0.0' 'emulator' 'system-images;android-34;default;x86_64'
           sudo chmod a+rw /dev/kvm
@@ -508,7 +508,7 @@ jobs:
       - name: Test provider across Binder and adb stdin
         run: |
           export JAVA_HOME="$JAVA_HOME_17_X64"
-          export PATH="$JAVA_HOME/bin:$PATH"
+          export PATH="$ANDROID_HOME/platform-tools:$JAVA_HOME/bin:$PATH"
           (cd merchant-apk && sha256sum --strict -c SHA256SUMS)
           STAGING_PYTHON=/usr/bin/python3 bash scripts/tests/staging/run.sh "merchant-apk/SteadDesk-$(cat RELEASE_VERSION)-universal.apk"
 
