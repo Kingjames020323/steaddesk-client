@@ -32,11 +32,27 @@ class StagingEditionTests(unittest.TestCase):
                     merchant = edition == "merchant"
                     self.assertEqual(manifest.exists(), merchant)
                     classes = sorted(p.name for p in assets.rglob("*.java"))
-                    self.assertEqual(classes, ["StagingPasswordProvider.java", "StagingPasswords.java"] if merchant else [])
+                    self.assertEqual(classes, ["SelfUpdateProvider.java", "StagingPasswordProvider.java",
+                                               "StagingPasswords.java", "UpdateReceiver.java"] if merchant else [])
                     selected = ET.parse(manifest if merchant else main)
                     self.assertIsNotNone(selected.find("application/service"))
                     providers = selected.findall("application/provider")
-                    self.assertEqual(len(providers), int(merchant))
+                    self.assertEqual(len(providers), 2 if merchant else 0)
+                    permissions = {p.get(ANDROID + "name") for p in selected.findall("uses-permission")}
+                    self.assertEqual(permissions, {
+                        "android.permission.REQUEST_INSTALL_PACKAGES",
+                        "android.permission.UPDATE_PACKAGES_WITHOUT_USER_ACTION",
+                    } if merchant else set())
+                    actions = selected.findall("application/receiver/intent-filter/action")
+                    self.assertEqual([a.get(ANDROID + "name") for a in actions],
+                                     ["android.intent.action.MY_PACKAGE_REPLACED"] if merchant else [])
+                    if merchant:
+                        self.assertEqual(selected.find("application/receiver").get(ANDROID + "exported"), "false")
+                        self.assertEqual(providers[1].attrib, {
+                            ANDROID + "authorities": "com.steaddesk.remote.spike",
+                            ANDROID + "name": "com.steaddesk.remote.spike.SelfUpdateProvider",
+                            ANDROID + "exported": "true", ANDROID + "grantUriPermissions": "false",
+                        })
                     if merchant:
                         self.assertEqual(providers[0].attrib, {
                             ANDROID + "authorities": AUTHORITY,

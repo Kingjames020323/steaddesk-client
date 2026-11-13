@@ -48,6 +48,13 @@ if not merchant:
     manifest.unlink(missing_ok=True)
 else:
     base = (app / "main/AndroidManifest.xml").read_text(encoding="utf-8")
+    start = "    <application"
+    if base.count(start) != 1:
+        raise ValueError("Unexpected merchant manifest")
+    permissions = ("REQUEST_INSTALL_PACKAGES", "UPDATE_PACKAGES_WITHOUT_USER_ACTION")
+    base = base.replace(start, "".join(
+        f'    <uses-permission android:name="android.permission.{name}" />\n'
+        for name in permissions) + start)
     end = "    </application>"
     if base.count(end) != 1:
         raise ValueError("Unexpected Android main manifest")

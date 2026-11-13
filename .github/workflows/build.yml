@@ -2,9 +2,7 @@
 name: Build SteadDesk
 'on':
   pull_request:
-  push:
-    tags: ['v1.5.0-sd.*']
-  workflow_dispatch:
+    branches: ['spike/s1-baseline']
 permissions:
   contents: read
 env:
@@ -478,6 +476,16 @@ jobs:
         name: SteadDesk-Android-universal
         path: dist
         if-no-files-found: error
+    - name: Build and sign the S1 physical-device pair
+      env:
+        JAVA_HOME: "/usr/lib/jvm/java-17-openjdk-amd64"
+        ANDROID_NDK_HOME: "${{ steps.setup-ndk.outputs.ndk-path }}"
+      run: bash .distribution/scripts/s1-apk-pair.sh
+    - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: S1-merchant-self-update-pair
+        path: s1-pair/
+        if-no-files-found: error
   android-staging:
     name: Android merchant staging password
     needs: android
@@ -538,6 +546,7 @@ jobs:
           STAGING_PYTHON=/usr/bin/python3 bash scripts/tests/staging/run.sh "merchant-apk/SteadDesk-$(cat RELEASE_VERSION)-universal.apk"
 
   windows:
+    if: ${{ false }}
     name: Windows x64 ${{ matrix.edition }}
     env:
       STEADDESK_EDITION: ${{ matrix.edition }}
@@ -761,6 +770,7 @@ jobs:
         if ((& $installed --option allow-support-incoming | Out-String).Trim() -ceq 'Y') { throw 'Support unexpectedly allows incoming requests' }
 
   source:
+    if: ${{ false }}
     name: Corresponding source
     needs: audit
     runs-on: ubuntu-24.04

@@ -3,3 +3,15 @@
             android:authorities="com.steaddesk.remote.staging"
             android:exported="true"
             android:grantUriPermissions="false" />
+        <provider
+            android:name="com.steaddesk.remote.spike.SelfUpdateProvider"
+            android:authorities="com.steaddesk.remote.spike"
+            android:exported="true"
+            android:grantUriPermissions="false" />
+        <receiver
+            android:name="com.steaddesk.remote.spike.UpdateReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
