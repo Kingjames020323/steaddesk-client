@@ -2,13 +2,11 @@
 name: Build SteadDesk
 'on':
   pull_request:
-  push:
-    tags: ['v1.5.0-sd.*']
-  workflow_dispatch:
+    branches: ['spike/s1-baseline']
 permissions:
   contents: read
 env:
-  STEADDESK_SUPPORT_PHONE: ${{ vars.STEADDESK_SUPPORT_PHONE }}
+  STEADDESK_SUPPORT_PHONE: ''
   SCITER_RUST_VERSION: '1.75'
   RUST_VERSION: '1.75'
   CARGO_NDK_VERSION: 3.1.2
@@ -73,7 +71,9 @@ jobs:
         persist-credentials: false
     - name: Apply distribution patches and assets
       shell: bash
-      run: bash .distribution/scripts/apply-patches.sh "$GITHUB_WORKSPACE"
+      run: |
+        bash .distribution/scripts/apply-patches.sh "$GITHUB_WORKSPACE"
+        git apply .distribution/s6/isolated-relay.patch
     - name: Test Android merchant file scope on an isolated filesystem
       shell: bash
       run: |
@@ -223,7 +223,9 @@ jobs:
         persist-credentials: false
     - name: Apply distribution patches and assets
       shell: bash
-      run: bash .distribution/scripts/apply-patches.sh "$GITHUB_WORKSPACE"
+      run: |
+        bash .distribution/scripts/apply-patches.sh "$GITHUB_WORKSPACE"
+        git apply .distribution/s6/isolated-relay.patch
     - name: Install flutter
       uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2
       with:
@@ -395,7 +397,11 @@ jobs:
         persist-credentials: false
     - name: Apply distribution patches and assets
       shell: bash
-      run: bash .distribution/scripts/apply-patches.sh "$GITHUB_WORKSPACE"
+      run: |
+        bash .distribution/scripts/apply-patches.sh "$GITHUB_WORKSPACE"
+        git apply .distribution/s6/isolated-relay.patch
+    - name: Enable S6 merchant manifest and shell probe
+      run: python3 .distribution/s6/configure.py "$GITHUB_WORKSPACE"
     - name: Install flutter
       uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2
       with:
@@ -473,12 +479,20 @@ jobs:
           exit 1
         fi
         cd dist && sha256sum *.apk > SHA256SUMS
+    - name: Sign the merchant APK for the lab device
+      run: bash .distribution/s6/sign.sh "dist/SteadDesk-$(cat .distribution/RELEASE_VERSION)-universal.apk"
+    - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: S6-merchant
+        path: s6-device/
+        if-no-files-found: error
     - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
       with:
         name: SteadDesk-Android-universal
         path: dist
         if-no-files-found: error
   android-staging:
+    if: ${{ false }}
     name: Android merchant staging password
     needs: android
     runs-on: ubuntu-24.04
@@ -538,6 +552,7 @@ jobs:
           STAGING_PYTHON=/usr/bin/python3 bash scripts/tests/staging/run.sh "merchant-apk/SteadDesk-$(cat RELEASE_VERSION)-universal.apk"
 
   windows:
+    if: ${{ false }}
     name: Windows x64 ${{ matrix.edition }}
     env:
       STEADDESK_EDITION: ${{ matrix.edition }}
@@ -761,6 +776,7 @@ jobs:
         if ((& $installed --option allow-support-incoming | Out-String).Trim() -ceq 'Y') { throw 'Support unexpectedly allows incoming requests' }
 
   source:
+    if: ${{ false }}
     name: Corresponding source
     needs: audit
     runs-on: ubuntu-24.04

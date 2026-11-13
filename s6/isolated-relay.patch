@@ -1,0 +1,62 @@
+Subject: Route the self-heal probe to the isolated lab relay
+
+diff --git a/libs/hbb_common/src/config.rs b/libs/hbb_common/src/config.rs
+--- a/libs/hbb_common/src/config.rs
++++ b/libs/hbb_common/src/config.rs
+@@ -90,7 +90,7 @@
+         [
+             ("custom-rendezvous-server", RENDEZVOUS_SERVERS[0]),
+             ("relay-server", RENDEZVOUS_SERVERS[0]),
+-            ("api-server", "https://api.steaddesk.com"),
++            ("api-server", "https://api.s6.test"),
+             ("key", RS_PUB_KEY),
+             ("verification-method", "use-permanent-password"),
+             ("approve-mode", if SUPPORT_EDITION { "click" } else { "password" }),
+@@ -150,8 +150,8 @@
+     'm', 'n', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z',
+ ];
+
+-pub const RENDEZVOUS_SERVERS: &[&str] = &["relay.steaddesk.com"];
+-pub const RS_PUB_KEY: &str = "J1e7eHb4p8PaTnIc7Ihk+t7JNQi0xBVBGfI+sRr3CfA=";
++pub const RENDEZVOUS_SERVERS: &[&str] = &["relay.s6.test"];
++pub const RS_PUB_KEY: &str = "s6-lab-key-unconfigured";
+
+ pub const RENDEZVOUS_PORT: i32 = 21116;
+ pub const RELAY_PORT: i32 = 21117;
+@@ -1258,10 +1258,25 @@
+         }
+     }
+
++    // The probe's APK is identical on both lab devices. The fixture public key
++    // is provisioned locally and is read from the private Flutter data directory.
++    #[cfg(target_os = "android")]
++    fn s6_lab_key() -> String {
++        let dir = APP_DIR.read().unwrap();
++        if Path::new(&*dir).is_absolute() {
++            if let Ok(key) = std::fs::read_to_string(Path::new(&*dir).join("s6-lab.pub")) {
++                return key;
++            }
++        }
++        RS_PUB_KEY.to_owned()
++    }
++
+     pub fn get_options() -> HashMap<String, String> {
+         let mut res = DEFAULT_SETTINGS.read().unwrap().clone();
+         res.extend(CONFIG2.read().unwrap().options.clone());
+         res.extend(OVERWRITE_SETTINGS.read().unwrap().clone());
++        #[cfg(target_os = "android")]
++        res.insert("key".into(), Self::s6_lab_key());
+         res
+     }
+
+@@ -1281,6 +1296,10 @@
+     }
+
+     pub fn get_option(k: &str) -> String {
++        #[cfg(target_os = "android")]
++        if k == "key" {
++            return Self::s6_lab_key();
++        }
+         get_or(
+             &OVERWRITE_SETTINGS,
+             &CONFIG2.read().unwrap().options,
