@@ -1,0 +1,999 @@
+diff --git a/flutter/lib/steaddesk/support_device.dart b/flutter/lib/steaddesk/support_device.dart
+index d9cfc43..cca7ceb 100644
+--- a/flutter/lib/steaddesk/support_device.dart
++++ b/flutter/lib/steaddesk/support_device.dart
+@@ -83,6 +83,12 @@ class SupportDevice {
+     return term.split(RegExp(r'\s+')).every(fields.contains);
+   }
+ 
++  bool matchesSuggestion(String query) {
++    final digits = query.trim().replaceAll(' ', '');
++    if (RegExp(r'^[0-9]+$').hasMatch(digits)) return id.startsWith(digits);
++    return contains(query);
++  }
++
+   bool matches(DeviceFilter filter) {
+     switch (filter) {
+       case DeviceFilter.all:
+diff --git a/flutter/lib/steaddesk/support_device_menu.dart b/flutter/lib/steaddesk/support_device_menu.dart
+new file mode 100644
+index 0000000..f940487
+--- /dev/null
++++ b/flutter/lib/steaddesk/support_device_menu.dart
+@@ -0,0 +1,236 @@
++part of 'support_home.dart';
++
++// This desktop-local file is shared with the personal group UI. Group names
++// are JSON keys, never path components. Keep other operators' lists intact.
++class _PersonalGroups {
++  static Future<File> _file() async {
++    final dir = await getApplicationSupportDirectory();
++    return File('${dir.path}/support-groups-v1.json');
++  }
++
++  static Future<Map<String, dynamic>> _read(File file) async {
++    if (!await file.exists())
++      return {'version': 1, 'accounts': <String, dynamic>{}};
++    final doc = jsonDecode(await file.readAsString()) as Map<String, dynamic>;
++    if (doc['version'] != 1 || doc['accounts'] is! Map<String, dynamic>)
++      throw const FormatException();
++    return doc;
++  }
++
++  static Map<String, dynamic> _groups(
++      Map<String, dynamic> doc, String account) {
++    final accounts = doc['accounts'] as Map<String, dynamic>;
++    return accounts.putIfAbsent(account, () => <String, dynamic>{})
++        as Map<String, dynamic>;
++  }
++
++  static Future<List<String>> names(String account) async =>
++      _groups(await _read(await _file()), account).keys.toList()..sort();
++  static Future<void> _pending = Future.value();
++  static Future<void> add(String account, String name, String id) {
++    final next = _pending.then((_) => _write(account, name, id));
++    _pending = next.catchError((Object _) {});
++    return next;
++  }
++
++  static Future<void> _write(String account, String name, String id) async {
++    final file = await _file();
++    await file.parent.create(recursive: true);
++    final lock = await File('${file.path}.lock').open(mode: FileMode.append);
++    try {
++      await lock.lock(FileLock.blockingExclusive);
++      final doc = await _read(file);
++      final groups = _groups(doc, account);
++      final ids = List<String>.from(groups[name] ?? []);
++      if (ids.contains(id)) return;
++      groups[name] = [...ids, id];
++      final next = File('${file.path}.tmp');
++      await next.writeAsString(jsonEncode(doc), flush: true);
++      await next.rename(file.path);
++    } finally {
++      await lock.close();
++    }
++  }
++}
++
++class _DeviceMenu extends StatefulWidget {
++  final _Entry row;
++  final _DirectoryState directory;
++  final Widget child;
++  final ValueChanged<bool>? onOpenChanged;
++  const _DeviceMenu(
++      {required this.row,
++      required this.directory,
++      required this.child,
++      this.onOpenChanged});
++  @override
++  State<_DeviceMenu> createState() => _DeviceMenuState();
++}
++
++class _DeviceMenuState extends State<_DeviceMenu> {
++  final controller = MenuController();
++  List<String> names = [];
++  bool favorite = false;
++  List<String> stores = [];
++  String owner = "";
++  int opening = 0;
++  String get account => gFFI.userModel.userName.value;
++  void _error() => showToast(translate('Operation failed'));
++  Future<void> _open(TapDownDetails tap) async {
++    final serial = ++opening;
++    final id = widget.row.device.id, user = account;
++    final position = tap.localPosition;
++    try {
++      final favs = await bind.mainGetFav();
++      List<String> groups = [];
++      if (user.isNotEmpty) {
++        try {
++          groups = await _PersonalGroups.names(user);
++        } catch (_) {
++          if (mounted) _error();
++        }
++      }
++      if (!mounted ||
++          widget.row.device.id != id ||
++          serial != opening ||
++          user != account) return;
++      setState(() {
++        favorite = favs.contains(id);
++        names = groups;
++        owner = user;
++        stores = user.isNotEmpty && gFFI.userModel.isAdmin.value
++            ? _managedStores(widget.directory)
++            : [];
++      });
++      controller.open(position: position);
++    } catch (_) {
++      if (mounted) _error();
++    }
++  }
++
++  Future<void> _favorite(String id, bool add) async {
++    try {
++      final ids = (await bind.mainGetFav()).toList();
++      if (add && !ids.contains(id)) {
++        ids.add(id);
++      } else if (!add) {
++        ids.remove(id);
++      }
++      await bind.mainStoreFav(favs: ids);
++      await bind.mainLoadFavPeers();
++    } catch (_) {
++      _error();
++    }
++  }
++
++  Future<void> _add(String name, String user, String id) async {
++    if (user != account) return;
++    try {
++      await _PersonalGroups.add(user, name, id);
++      showToast(translate('Successful'));
++    } catch (_) {
++      _error();
++    }
++  }
++
++  Future<void> _newGroup(String user, String id) async {
++    var name = '';
++    final result = await showDialog<String>(
++        context: widget.directory.context,
++        builder: (ctx) => AlertDialog(
++                title: Text(translate('New group')),
++                content: TextField(
++                    autofocus: true,
++                    maxLength: 80,
++                    onChanged: (v) => name = v.trim(),
++                    onSubmitted: (v) {
++                      if (v.trim().isNotEmpty) Navigator.pop(ctx, v.trim());
++                    }),
++                actions: [
++                  TextButton(
++                      onPressed: () => Navigator.pop(ctx),
++                      child: Text(translate('Cancel'))),
++                  TextButton(
++                      onPressed: () {
++                        if (name.isNotEmpty) Navigator.pop(ctx, name);
++                      },
++                      child: Text(translate('Add')))
++                ]));
++    if (result != null) await _add(result, user, id);
++  }
++
++  Widget _button(String label, VoidCallback? action) =>
++      MenuItemButton(onPressed: action, child: Text(translate(label)));
++  @override
++  Widget build(BuildContext context) {
++    final row = widget.row, dir = widget.directory, id = row.device.id;
++    final style = MenuStyle(
++        backgroundColor: const WidgetStatePropertyAll(Colors.white),
++        side:
++            const WidgetStatePropertyAll(BorderSide(color: Color(0xffe5e7eb))),
++        shadowColor: const WidgetStatePropertyAll(Color(0x330b2e42)));
++    return MenuAnchor(
++        style: style,
++        controller: controller,
++        onOpen: () => widget.onOpenChanged?.call(true),
++        onClose: () => widget.onOpenChanged?.call(false),
++        menuChildren: [
++          _button('Connect', () => dir._connect(row)),
++          _button(
++              'Transfer file',
++              () => connectInPeerTab(
++                  dir.context, row.source.peer, row.source.tab,
++                  addressBook: row.source.book, isFileTransfer: true)),
++          _button('Device status', () => dir._details(row)),
++          const Divider(height: 1),
++          SubmenuButton(
++              menuStyle: style,
++              menuChildren: [
++                _button('My groups', null),
++                if (owner == account)
++                  for (final name in names)
++                    MenuItemButton(
++                        onPressed: () => _add(name, owner, id),
++                        child: Text(name)),
++                if (stores.isNotEmpty &&
++                    account == owner &&
++                    gFFI.userModel.isAdmin.value) ...[
++                  _button('My merchants', null),
++                  for (final store in stores)
++                    MenuItemButton(onPressed: null, child: Text(store)),
++                ],
++                const Divider(height: 1),
++                _button(
++                    'New group…',
++                    owner.isEmpty || owner != account
++                        ? null
++                        : () => _newGroup(owner, id)),
++              ],
++              child: Text(translate('Add to group'))),
++          _button(favorite ? 'Remove from Favorites' : 'Add to Favorites',
++              () => _favorite(id, !favorite)),
++          _button('Copy ID', () => Clipboard.setData(ClipboardData(text: id))),
++        ],
++        child: GestureDetector(
++            behavior: HitTestBehavior.translucent,
++            onSecondaryTapDown: _open,
++            child: widget.child));
++  }
++
++  List<String> _managedStores(_DirectoryState dir) {
++    final stores = <String>{};
++    for (final row in dir._entries(searchIndex: true)) {
++      final d = row.device;
++      if ((row.source.tab == PeerTabIndex.ab ||
++              row.source.tab == PeerTabIndex.group) &&
++          d.merchant != null) {
++        stores.add([
++          if (d.groupName.isNotEmpty) d.groupName,
++          d.merchant!,
++          d.store!
++        ].join(' › '));
++      }
++    }
++    return stores.toList()..sort();
++  }
++}
+diff --git a/flutter/lib/steaddesk/support_directory.dart b/flutter/lib/steaddesk/support_directory.dart
+index f736bc0..e5be28e 100644
+--- a/flutter/lib/steaddesk/support_directory.dart
++++ b/flutter/lib/steaddesk/support_directory.dart
+@@ -14,6 +14,7 @@ class _Directory extends StatefulWidget {
+ class _DirectoryState extends State<_Directory> {
+   static const _event = 'callback_query_onlines';
+   late final _listener = 'SteadDeskSupportDirectory-${identityHashCode(this)}';
++  final presenceChanges = ValueNotifier(0);
+   final presence = <String, bool>{};
+   final lastReport = <String, DateTime>{};
+   final loadedBooks = <BaseAb>{};
+@@ -42,7 +43,10 @@ class _DirectoryState extends State<_Directory> {
+           }
+         }
+       }
+-      if (changed) setState(() {});
++      if (changed) {
++        setState(() {});
++        presenceChanges.value++;
++      }
+     });
+     timer = Timer.periodic(const Duration(seconds: 30), (_) => _query());
+     if (widget.page == SupportPage.recent) bind.mainLoadRecentPeers();
+@@ -66,11 +70,15 @@ class _DirectoryState extends State<_Directory> {
+     if (lastReport.length < presence.length) {
+       setState(
+           () => presence.removeWhere((id, _) => !lastReport.containsKey(id)));
++      presenceChanges.value++;
+     }
+     try {
+       await bind.queryOnlines(ids: ids.toList());
+     } catch (_) {
+-      if (mounted && presence.isNotEmpty) setState(presence.clear);
++      if (mounted && presence.isNotEmpty) {
++        setState(presence.clear);
++        presenceChanges.value++;
++      }
+     }
+   }
+ 
+@@ -96,18 +104,26 @@ class _DirectoryState extends State<_Directory> {
+   @override
+   void dispose() {
+     timer.cancel();
++    presenceChanges.dispose();
+     platformFFI.unregisterEventHandler(_event, _listener);
+     super.dispose();
+   }
+ 
+-  List<_Entry> _entries() {
++  void selectScope(String next) => setState(() {
++        scope = next;
++        filter = DeviceFilter.all;
++        closed.remove('*');
++        closed.remove(next.split('/').first);
++      });
++
++  List<_Entry> _entries({bool searchIndex = false}) {
+     final all = <String, List<_Source>>{};
+     void add(Peer peer, PeerTabIndex tab, [BaseAb? book]) {
+       if (peer.id.isNotEmpty)
+         (all[peer.id] ??= []).add((peer: peer, book: book, tab: tab));
+     }
+ 
+-    final directory = widget.page == SupportPage.devices;
++    final directory = searchIndex || widget.page == SupportPage.devices;
+     if (!directory) {
+       final recent = widget.page == SupportPage.recent;
+       final model = recent ? gFFI.recentPeersModel : gFFI.favoritePeersModel;
+@@ -124,8 +140,10 @@ class _DirectoryState extends State<_Directory> {
+       // Prefer the active book when an ID is shared across multiple books.
+       for (final book in {ab.current, ...ab.addressbooks.values}) {
+         if (!ab.addressbooks.containsKey(book.name())) continue;
+-        if (directory && !book.isPersonal() && book != ab.current)
+-          _loadBook(book);
++        if (!searchIndex &&
++            directory &&
++            !book.isPersonal() &&
++            book != ab.current) _loadBook(book);
+         for (final p in book.peers) {
+           if (directory || all.containsKey(p.id)) add(p, PeerTabIndex.ab, book);
+         }
+@@ -134,7 +152,21 @@ class _DirectoryState extends State<_Directory> {
+         if (directory || all.containsKey(p.id)) add(p, PeerTabIndex.group);
+       }
+     }
+-    _observe(all.keys.toSet());
++    if (searchIndex) {
++      for (final source in [
++        (gFFI.recentPeersModel, PeerTabIndex.recent),
++        (gFFI.favoritePeersModel, PeerTabIndex.fav)
++      ]) {
++        for (final p in source.$1.peers) {
++          add(p, source.$2);
++        }
++        for (final id in source.$1.restPeerIds) {
++          if (!all.containsKey(id)) add(Peer.fromJson({'id': id}), source.$2);
++        }
++      }
++    } else {
++      _observe(all.keys.toSet());
++    }
+     return all.entries.map((entry) {
+       final peers = entry.value.map((s) => s.peer);
+       String first(String Function(Peer) read) =>
+@@ -168,10 +200,12 @@ class _DirectoryState extends State<_Directory> {
+                 selected == '${d.merchant}/${d.store}');
+       }).toList();
+ 
+-  void submit(String query) {
+-    final entries = _entries();
++  void submit(String query, List<_Entry> entries) {
+     final target = supportSearchTarget(
+-        query, _visible(entries, query, scope).map((e) => e.device.id));
++        query,
++        entries
++            .where((e) => e.device.matchesSuggestion(query))
++            .map((e) => e.device.id));
+     if (target == null) return;
+     for (final entry in entries) {
+       if (entry.device.id == target) {
+@@ -191,6 +225,11 @@ class _DirectoryState extends State<_Directory> {
+                 content: SelectableText([
+                   if (d.name.isNotEmpty) d.name,
+                   'ID: ${d.id}',
++                  translate(d.online == null
++                      ? 'Unknown'
++                      : d.online!
++                          ? 'Online'
++                          : 'Offline'),
+                   if (d.platform.isNotEmpty) d.platform,
+                   if (d.model.isNotEmpty) d.model,
+                   if (d.groupName.isNotEmpty) d.groupName
+@@ -411,50 +450,54 @@ class _DirectoryState extends State<_Directory> {
+         : d.online!
+             ? 'Online'
+             : 'Offline';
+-    return InkWell(
+-        onDoubleTap: () => _connect(row),
+-        onTap: () => _details(row),
+-        hoverColor: const Color(0xfff3f4f6),
+-        child: _columns(
+-            Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+-              Text(
+-                  d.alias.isNotEmpty
+-                      ? d.alias
+-                      : d.name.isNotEmpty
+-                          ? d.name
+-                          : d.id,
+-                  maxLines: 1,
+-                  overflow: TextOverflow.ellipsis,
+-                  style: const TextStyle(fontWeight: FontWeight.w600)),
+-              Text([if (d.name.isNotEmpty) d.name, d.id].join(' · '),
+-                  maxLines: 1,
+-                  overflow: TextOverflow.ellipsis,
+-                  style: const TextStyle(
+-                      color: Color(0xff4b5563),
+-                      fontSize: 12,
+-                      fontFeatures: [ui.FontFeature.tabularFigures()]))
+-            ]),
+-            Text(translate(status),
+-                style: TextStyle(
+-                    color: d.online == true
+-                        ? const Color(0xff16a34a)
+-                        : const Color(0xff4b5563))),
+-            Text(d.model.isEmpty ? '—' : d.model,
+-                maxLines: 1, overflow: TextOverflow.ellipsis),
+-            Align(
+-                alignment: Alignment.centerLeft,
+-                child: TextButton(
+-                    style: TextButton.styleFrom(
+-                        padding: const EdgeInsets.symmetric(horizontal: 8)),
+-                    onPressed: () =>
+-                        d.online == true ? _connect(row) : _details(row),
+-                    child: FittedBox(
+-                        fit: BoxFit.scaleDown,
+-                        child: Text(
+-                            translate(d.online == true ? 'Connect' : 'Details'),
+-                            maxLines: 1,
+-                            softWrap: false,
+-                            overflow: TextOverflow.visible,
+-                            style: const TextStyle(color: _blue)))))));
++    return _DeviceMenu(
++        row: row,
++        directory: this,
++        child: InkWell(
++            onDoubleTap: () => _connect(row),
++            onTap: () => _details(row),
++            hoverColor: const Color(0xfff3f4f6),
++            child: _columns(
++                Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
++                  Text(
++                      d.alias.isNotEmpty
++                          ? d.alias
++                          : d.name.isNotEmpty
++                              ? d.name
++                              : d.id,
++                      maxLines: 1,
++                      overflow: TextOverflow.ellipsis,
++                      style: const TextStyle(fontWeight: FontWeight.w600)),
++                  Text([if (d.name.isNotEmpty) d.name, d.id].join(' · '),
++                      maxLines: 1,
++                      overflow: TextOverflow.ellipsis,
++                      style: const TextStyle(
++                          color: Color(0xff4b5563),
++                          fontSize: 12,
++                          fontFeatures: [ui.FontFeature.tabularFigures()]))
++                ]),
++                Text(translate(status),
++                    style: TextStyle(
++                        color: d.online == true
++                            ? const Color(0xff16a34a)
++                            : const Color(0xff4b5563))),
++                Text(d.model.isEmpty ? '—' : d.model,
++                    maxLines: 1, overflow: TextOverflow.ellipsis),
++                Align(
++                    alignment: Alignment.centerLeft,
++                    child: TextButton(
++                        style: TextButton.styleFrom(
++                            padding: const EdgeInsets.symmetric(horizontal: 8)),
++                        onPressed: () =>
++                            d.online == true ? _connect(row) : _details(row),
++                        child: FittedBox(
++                            fit: BoxFit.scaleDown,
++                            child: Text(
++                                translate(
++                                    d.online == true ? 'Connect' : 'Details'),
++                                maxLines: 1,
++                                softWrap: false,
++                                overflow: TextOverflow.visible,
++                                style: const TextStyle(color: _blue))))))));
+   }
+ }
+diff --git a/flutter/lib/steaddesk/support_home.dart b/flutter/lib/steaddesk/support_home.dart
+index cb308d8..d99cb82 100644
+--- a/flutter/lib/steaddesk/support_home.dart
++++ b/flutter/lib/steaddesk/support_home.dart
+@@ -1,4 +1,7 @@
+ import 'dart:async';
++import 'dart:convert';
++import 'dart:io';
++import 'package:path_provider/path_provider.dart';
+ import 'dart:math' as math;
+ import 'package:flutter/foundation.dart' show setEquals;
+ import 'dart:ui' as ui;
+@@ -21,6 +24,8 @@ import '../consts.dart';
+ import '../models/platform_model.dart';
+ 
+ part 'support_directory.dart';
++part 'support_search.dart';
++part 'support_device_menu.dart';
+ part 'support_home_bar.dart';
+ 
+ enum SupportPage {
+@@ -104,6 +109,8 @@ class _SupportHomeState extends State<SupportHome> {
+   void initState() {
+     super.initState();
+     WidgetsBinding.instance.addTimingsCallback(_measureGlass);
++    bind.mainLoadRecentPeers();
++    bind.mainLoadFavPeers();
+     final saved = bind.getLocalFlutterOption(k: _modeKey);
+     mode = _Rail.values
+         .firstWhere((m) => m.name == saved, orElse: () => _Rail.expanded);
+@@ -229,18 +236,15 @@ class _SupportHomeState extends State<SupportHome> {
+                                 focus: searchFocus,
+                                 search: search,
+                                 onSearch: _search,
+-                                onSubmit: (query) {
+-                                  if (query.trim().isEmpty) return;
+-                                  // Wait for onChanged's page/filter update to render.
+-                                  WidgetsBinding.instance
+-                                      .addPostFrameCallback((_) {
+-                                    if (mounted && search.text == query) {
+-                                      directoryKeys[page]
+-                                          ?.currentState
+-                                          ?.submit(query);
+-                                    }
+-                                  });
+-                                  WidgetsBinding.instance.scheduleFrame();
++                                directory: () =>
++                                    directoryKeys[page]?.currentState,
++                                jump: (scope) {
++                                  search.clear();
++                                  searchFocus.unfocus();
++                                  setState(() => page = SupportPage.devices);
++                                  directoryKeys[SupportPage.devices]
++                                      ?.currentState
++                                      ?.selectScope(scope);
+                                 }),
+                             const Divider(height: 1, color: Color(0xffe5e7eb)),
+                             Expanded(child: _body()),
+diff --git a/flutter/lib/steaddesk/support_home_bar.dart b/flutter/lib/steaddesk/support_home_bar.dart
+index b568192..7647c90 100644
+--- a/flutter/lib/steaddesk/support_home_bar.dart
++++ b/flutter/lib/steaddesk/support_home_bar.dart
+@@ -4,13 +4,15 @@ class _HomeHeader extends StatelessWidget {
+   final VoidCallback? restore;
+   final FocusNode focus;
+   final TextEditingController search;
+-  final ValueChanged<String> onSearch, onSubmit;
++  final ValueChanged<String> onSearch, jump;
++  final _DirectoryState? Function() directory;
+   const _HomeHeader(
+       {required this.restore,
+       required this.focus,
+       required this.search,
+       required this.onSearch,
+-      required this.onSubmit});
++      required this.directory,
++      required this.jump});
+ 
+   void _localDevice(BuildContext context, String id) {
+     showDialog<void>(
+@@ -37,30 +39,12 @@ class _HomeHeader extends StatelessWidget {
+               icon: const Icon(Icons.menu),
+               onPressed: restore),
+         Expanded(
+-            child: TextField(
+-                controller: search,
+-                focusNode: focus,
+-                onChanged: onSearch,
+-                onSubmitted: onSubmit,
+-                textInputAction: TextInputAction.search,
+-                maxLines: 1,
+-                decoration: InputDecoration(
+-                    isDense: true,
+-                    prefixIcon: const Icon(Icons.search),
+-                    hintText:
+-                        translate('Search merchants, stores, devices or IDs'),
+-                    suffixIcon: search.text.isEmpty
+-                        ? null
+-                        : IconButton(
+-                            icon: const Icon(Icons.clear),
+-                            tooltip: translate('Clear'),
+-                            onPressed: () {
+-                              search.clear();
+-                              onSearch('');
+-                              focus.requestFocus();
+-                            }),
+-                    border: const OutlineInputBorder(
+-                        borderRadius: BorderRadius.all(Radius.circular(8)))))),
++            child: _SupportSearchField(
++                search: search,
++                focus: focus,
++                onSearch: onSearch,
++                directory: directory,
++                jump: jump)),
+         const SizedBox(width: 12),
+         ValueListenableBuilder<TextEditingValue>(
+             valueListenable: gFFI.serverModel.serverId,
+diff --git a/flutter/lib/steaddesk/support_search.dart b/flutter/lib/steaddesk/support_search.dart
+new file mode 100644
+index 0000000..2e70e87
+--- /dev/null
++++ b/flutter/lib/steaddesk/support_search.dart
+@@ -0,0 +1,347 @@
++part of 'support_home.dart';
++
++typedef _Choice = ({String key, String label, _Entry? row, String? scope});
++
++class _SupportSearchField extends StatefulWidget {
++  final TextEditingController search;
++  final FocusNode focus;
++  final ValueChanged<String> onSearch, jump;
++  final _DirectoryState? Function() directory;
++  const _SupportSearchField(
++      {required this.search,
++      required this.focus,
++      required this.onSearch,
++      required this.jump,
++      required this.directory});
++  @override
++  State<_SupportSearchField> createState() => _SupportSearchFieldState();
++}
++
++class _SupportSearchFieldState extends State<_SupportSearchField> {
++  final portal = OverlayPortalController();
++  final scroll = ScrollController();
++  final tileKeys = <String, GlobalKey>{};
++  String? selected;
++  bool menuOpen = false;
++  @override
++  void initState() {
++    super.initState();
++    widget.focus.addListener(_focus);
++  }
++
++  @override
++  void dispose() {
++    widget.focus.removeListener(_focus);
++    scroll.dispose();
++    super.dispose();
++  }
++
++  void _focus() {
++    if (widget.focus.hasFocus) {
++      if (widget.search.text.trim().isNotEmpty) portal.show();
++    } else if (!menuOpen) {
++      _close();
++    }
++  }
++
++  void _close() {
++    selected = null;
++    if (portal.isShowing) portal.hide();
++  }
++
++  void _change(String value) {
++    selected = null;
++    widget.onSearch(value);
++    if (value.trim().isEmpty) {
++      _close();
++      return;
++    }
++    portal.show();
++  }
++
++  List<_Choice> _choices(List<_Entry> entries) {
++    final q = widget.search.text.trim();
++    final term = q.toLowerCase();
++    final groups = <String, String>{};
++    for (final e in entries) {
++      final d = e.device;
++      // Group navigation targets the address-book tree, not history-only peers.
++      if (d.merchant == null ||
++          (e.source.tab != PeerTabIndex.ab &&
++              e.source.tab != PeerTabIndex.group)) continue;
++      final merchant = d.merchant!;
++      final label =
++          [if (d.groupName.isNotEmpty) d.groupName, merchant].join(' · ');
++      final store = '$merchant/${d.store}';
++      if (label.toLowerCase().contains(term)) groups[merchant] = label;
++      if ('$label ${d.store}'.toLowerCase().contains(term) ||
++          store.toLowerCase().contains(term)) {
++        groups[store] = '$label › ${d.store}';
++      }
++    }
++    return [
++      if (RegExp(r'^[0-9 ]+$').hasMatch(q))
++        (key: 'direct', label: q, row: null, scope: null),
++      for (final e
++          in entries.where((e) => e.device.matchesSuggestion(q)).take(8))
++        (
++          key: 'peer/${e.device.id}',
++          label: e.device.alias.isNotEmpty
++              ? e.device.alias
++              : e.device.name.isNotEmpty
++                  ? e.device.name
++                  : e.device.id,
++          row: e,
++          scope: null
++        ),
++      for (final g in groups.entries)
++        (key: 'group/${g.key}', label: g.value, row: null, scope: g.key)
++    ];
++  }
++
++  bool _enabled(_Choice c) =>
++      c.key != 'direct' || directSupportId(widget.search.text) != null;
++
++  void _activate(_Choice? item) {
++    final dir = widget.directory();
++    if (dir == null) return;
++    final query = widget.search.text;
++    if (item != null && !_enabled(item)) return;
++    _close();
++    if (item?.scope != null) {
++      widget.jump(item!.scope!);
++      return;
++    }
++    if (item?.row != null) {
++      dir._connect(item!.row!);
++      return;
++    }
++    dir.submit(query, dir._entries(searchIndex: true));
++  }
++
++  KeyEventResult _key(FocusNode node, KeyEvent event) {
++    if (event is KeyUpEvent || !widget.search.value.composing.isCollapsed)
++      return KeyEventResult.ignored;
++    final k = event.logicalKey;
++    if (k == LogicalKeyboardKey.enter || k == LogicalKeyboardKey.numpadEnter) {
++      if (event is KeyDownEvent) _submit(widget.search.text);
++      return KeyEventResult.handled;
++    }
++    if (!portal.isShowing) return KeyEventResult.ignored;
++    if (k == LogicalKeyboardKey.escape) {
++      _close();
++      return KeyEventResult.handled;
++    }
++    if (k != LogicalKeyboardKey.arrowDown && k != LogicalKeyboardKey.arrowUp)
++      return KeyEventResult.ignored;
++    final dir = widget.directory();
++    if (dir == null) return KeyEventResult.ignored;
++    final items =
++        _choices(dir._entries(searchIndex: true)).where(_enabled).toList();
++    if (items.isNotEmpty) {
++      final i = items.indexWhere((x) => x.key == selected);
++      final j = i < 0
++          ? (k == LogicalKeyboardKey.arrowDown ? 0 : items.length - 1)
++          : (i + (k == LogicalKeyboardKey.arrowDown ? 1 : -1))
++              .clamp(0, items.length - 1)
++              .toInt();
++      setState(() => selected = items[j].key);
++      WidgetsBinding.instance.addPostFrameCallback((_) {
++        final ctx = tileKeys[items[j].key]?.currentContext;
++        if (ctx != null) Scrollable.ensureVisible(ctx, alignment: .5);
++      });
++    }
++    return KeyEventResult.handled;
++  }
++
++  void _submit(String _) {
++    final dir = widget.directory();
++    if (dir == null) return;
++    final items = _choices(dir._entries(searchIndex: true));
++    _activate(portal.isShowing
++        ? items.firstWhereOrNull((c) => c.key == selected)
++        : null);
++  }
++
++  @override
++  Widget build(BuildContext context) => LayoutBuilder(builder: (ctx, size) {
++        return OverlayPortal(
++            controller: portal,
++            overlayChildBuilder: (overlayContext) {
++              final box = ctx.findRenderObject() as RenderBox;
++              final overlay =
++                  Overlay.of(ctx).context.findRenderObject() as RenderBox;
++              final anchor = overlay
++                  .globalToLocal(box.localToGlobal(Offset(0, box.size.height)));
++              final space = overlay.size.height - anchor.dy - 8;
++              return Positioned(
++                  left: anchor.dx,
++                  top: anchor.dy + 4,
++                  width: size.maxWidth,
++                  child: TextFieldTapRegion(
++                      child: ConstrainedBox(
++                          constraints: BoxConstraints(
++                              maxHeight: space.clamp(0.0, 420.0).toDouble()),
++                          child: Material(
++                              color: Colors.white,
++                              shape: RoundedRectangleBorder(
++                                  borderRadius: BorderRadius.circular(8),
++                                  side: const BorderSide(
++                                      color: Color(0xffe5e7eb))),
++                              clipBehavior: Clip.antiAlias,
++                              elevation: 2,
++                              shadowColor: const Color(0x330b2e42),
++                              child: AnimatedBuilder(
++                                  animation: Listenable.merge([
++                                    gFFI.recentPeersModel,
++                                    if (widget.directory() case final dir?)
++                                      dir.presenceChanges,
++                                    gFFI.favoritePeersModel
++                                  ]),
++                                  builder: (_, __) => Obx(_results))))));
++            },
++            child: Focus(
++                onKeyEvent: _key,
++                canRequestFocus: false,
++                child: TextField(
++                    controller: widget.search,
++                    focusNode: widget.focus,
++                    onChanged: _change,
++                    onTap: _focus,
++                    onEditingComplete: () {},
++                    onSubmitted: _submit,
++                    textInputAction: TextInputAction.search,
++                    decoration: InputDecoration(
++                        isDense: true,
++                        prefixIcon: const Icon(Icons.search),
++                        hintText: translate(
++                            'Search merchants, stores, devices or IDs'),
++                        suffixIcon: widget.search.text.isEmpty
++                            ? null
++                            : IconButton(
++                                icon: const Icon(Icons.clear),
++                                tooltip: translate('Clear'),
++                                onPressed: () {
++                                  widget.search.clear();
++                                  _change('');
++                                  widget.focus.requestFocus();
++                                }),
++                        border: const OutlineInputBorder(
++                            borderRadius:
++                                BorderRadius.all(Radius.circular(8)))))));
++      });
++
++  Widget _results() {
++    final signedIn = gFFI.userModel.isLogin;
++    final dir = widget.directory();
++    final entries = dir?._entries(searchIndex: true) ?? <_Entry>[];
++    final items = _choices(entries);
++    final keys = items.map((c) => c.key).toSet();
++    tileKeys.removeWhere((key, _) => !keys.contains(key));
++    final devices = items.where((c) => c.row != null);
++    final groups = items.where((c) => c.scope != null);
++    Widget heading(String s) => Padding(
++        padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
++        child: Text(translate(s),
++            style: const TextStyle(fontSize: 12, color: Color(0xff4b5563))));
++    return Column(
++        mainAxisSize: MainAxisSize.min,
++        crossAxisAlignment: CrossAxisAlignment.stretch,
++        children: [
++          Flexible(
++              child: SingleChildScrollView(
++                  controller: scroll,
++                  child: Column(
++                      crossAxisAlignment: CrossAxisAlignment.stretch,
++                      children: [
++                        for (final c in items.where((c) => c.key == 'direct'))
++                          _tile(c, dir),
++                        heading('Devices'),
++                        for (final c in devices) _tile(c, dir),
++                        if (devices.isEmpty) heading('No devices'),
++                        if (signedIn) heading('Merchants and stores'),
++                        for (final c in groups) _tile(c, dir),
++                        if (signedIn && groups.isEmpty)
++                          heading('No matching groups'),
++                      ]))),
++          const Divider(height: 1),
++          Padding(
++              padding: const EdgeInsets.all(8),
++              child: Text(
++                  translate(
++                      '↑↓ Select   Enter Connect   Right-click More   Esc Close'),
++                  style: const TextStyle(fontSize: 12))),
++        ]);
++  }
++
++  Widget _tile(_Choice c, _DirectoryState? dir) {
++    final d = c.row?.device;
++    final prefix = widget.search.text.trim().replaceAll(' ', '');
++    final bold = d != null && d.id.startsWith(prefix) ? prefix.length : 0;
++    final key = tileKeys.putIfAbsent(c.key, () => GlobalKey());
++    final tile = Material(
++        key: key,
++        color: selected == c.key ? const Color(0xffe6f5fb) : Colors.white,
++        child: InkWell(
++            canRequestFocus: false,
++            hoverColor: const Color(0xfff3f4f6),
++            onTap: _enabled(c) ? () => _activate(c) : null,
++            child: Padding(
++                padding:
++                    const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
++                child: d == null
++                    ? Text(
++                        c.key == 'direct'
++                            ? '${translate("Direct connect ID")} ${c.label}'
++                            : c.label,
++                        style:
++                            TextStyle(color: _enabled(c) ? _ink : Colors.grey))
++                    : Row(children: [
++                        Expanded(
++                            child: Column(
++                                crossAxisAlignment: CrossAxisAlignment.start,
++                                children: [
++                              Text(c.label,
++                                  maxLines: 1, overflow: TextOverflow.ellipsis),
++                              Text.rich(
++                                  TextSpan(children: [
++                                    TextSpan(
++                                        text: d.id.substring(0, bold),
++                                        style: const TextStyle(
++                                            fontWeight: FontWeight.bold)),
++                                    TextSpan(
++                                        text: [
++                                      d.id.substring(bold),
++                                      if (d.groupName.isNotEmpty) d.groupName,
++                                      if (d.merchant != null) d.merchant,
++                                      if (d.store != null) d.store
++                                    ].join(' · '))
++                                  ]),
++                                  maxLines: 1,
++                                  overflow: TextOverflow.ellipsis,
++                                  style: const TextStyle(fontSize: 12))
++                            ])),
++                        Text(translate(d.online == null
++                            ? 'Unknown'
++                            : d.online!
++                                ? 'Online'
++                                : 'Offline')),
++                        if (d.model.isNotEmpty)
++                          Flexible(
++                              child: Padding(
++                                  padding: const EdgeInsets.only(left: 10),
++                                  child: Text(d.model,
++                                      maxLines: 1,
++                                      overflow: TextOverflow.ellipsis)))
++                      ]))));
++    if (c.row == null || dir == null) return tile;
++    return _DeviceMenu(
++        row: c.row!,
++        directory: dir,
++        onOpenChanged: (open) {
++          menuOpen = open;
++          if (!open && mounted && !widget.focus.hasFocus) _close();
++        },
++        child: tile);
++  }
++}
+diff --git a/flutter/tool/check_support_directory.dart b/flutter/tool/check_support_directory.dart
+index 0653b8b..4b15344 100644
+--- a/flutter/tool/check_support_directory.dart
++++ b/flutter/tool/check_support_directory.dart
+@@ -29,6 +29,11 @@ void main() {
+   final unknown = device(names: ['M0099-bad-SUNMI1'], platform: 'Android');
+   final assetOnly = device(names: ['M0099-S01-SUNMI2'], platform: 'Android');
+   final checks = <String, bool>{
++    'suggestions match a numeric prefix even with spaces':
++        till.matchesSuggestion('123 45') && !till.matchesSuggestion('345'),
++    'suggestions match device and merchant names':
++        till.matchesSuggestion('Test till') &&
++            till.matchesSuggestion('Test group'),
+     'complete IDs override partial matches':
+         supportSearchTarget('123 456 789', ['1234567890']) == '123456789' &&
+             supportSearchTarget('1 234 567 890', []) == '1234567890',
+diff --git a/src/lang/cn.rs b/src/lang/cn.rs
+index fdaddd1..da436b6 100644
+--- a/src/lang/cn.rs
++++ b/src/lang/cn.rs
+@@ -259,6 +259,15 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
+         ("Forget Password", "忘记密码"),
+         ("Favorites", "收藏"),
+         ("Devices", "设备"),
++        ("Direct connect ID", "直接连接 ID"),
++        ("Merchants and stores", "商户和门店"),
++        ("No matching groups", "没有匹配的商户或门店"),
++        ("↑↓ Select   Enter Connect   Right-click More   Esc Close", "↑↓ 选择　回车 连接　右键 更多操作　Esc 关闭"),
++        ("My groups", "我的分组"),
++        ("Add to group", "添加到分组"),
++        ("New group…", "新建分组…"),
++        ("New group", "新建分组"),
++        ("Operation failed", "操作失败"),
+         ("Recent connections", "最近连接"),
+         ("Device health", "设备健康"),
+         ("Session recordings", "会话录像"),
