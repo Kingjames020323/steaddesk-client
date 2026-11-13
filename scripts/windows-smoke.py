@@ -106,12 +106,16 @@ def application():
 
 window = wait_for("SteadDesk main window", application, 120)
 window.set_focus()
+version = (Path(__file__).resolve().parents[1] / "RELEASE_VERSION").read_text().strip()
 if not support:
     id_label = wait_for("merchant ID label", lambda: by_name(window, "This device ID"))
     help_label = wait_for("merchant help heading", lambda: by_name(window, "Need help?"))
     if any(by_name(window, label) for label in ("Enter remote ID", "Recent sessions", "Address book")):
         raise RuntimeError("Merchant offers an outbound connection")
-    save_evidence(window, "merchant-home", [id_label, help_label])
+    footer = wait_for("merchant panel version", lambda: by_name(window, "SteadDesk " + version))
+    if footer.rectangle().top < help_label.rectangle().bottom:
+        raise RuntimeError("Merchant version is outside the footer")
+    save_evidence(window, "merchant-home", [id_label, help_label, footer])
     print("PASS merchant incoming-only home", flush=True)
     sys.exit(0)
 
@@ -151,7 +155,6 @@ else:
 press(window, "About")
 source_name = "基于 RustDesk（AGPL-3.0） · Source code"
 wait_for("public source attribution", lambda: by_name(window, source_name))
-version = (Path(__file__).resolve().parents[1] / "RELEASE_VERSION").read_text().strip()
 version_label = "Version: " + version
 
 
