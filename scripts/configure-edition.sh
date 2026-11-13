@@ -48,6 +48,11 @@ if not merchant:
     manifest.unlink(missing_ok=True)
 else:
     base = (app / "main/AndroidManifest.xml").read_text(encoding="utf-8")
+    # Only the merchant receiver resumes service after an in-place update.
+    boot = '<action android:name="android.intent.action.BOOT_COMPLETED" />'
+    if base.count(boot) != 1:
+        raise ValueError("Expected a single Android boot action")
+    base = base.replace(boot, boot + '\n                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />')
     end = "    </application>"
     if base.count(end) != 1:
         raise ValueError("Unexpected Android main manifest")

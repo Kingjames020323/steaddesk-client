@@ -21,6 +21,9 @@ class StagingEditionTests(unittest.TestCase):
             main = app / "main/AndroidManifest.xml"
             original = ('<manifest xmlns:android="http://schemas.android.com/apk/res/android">\n'
                         '    <application><service android:name=".MainService"/>\n'
+                        '<receiver android:name=".BootReceiver"><intent-filter>'
+                        '<action android:name="android.intent.action.BOOT_COMPLETED" />'
+                        '</intent-filter></receiver>\n'
                         '    </application>\n</manifest>')
             main.write_text(original)
             assets = app / "steaddeskStaging"
@@ -35,6 +38,12 @@ class StagingEditionTests(unittest.TestCase):
                     self.assertEqual(classes, ["StagingPasswordProvider.java", "StagingPasswords.java"] if merchant else [])
                     selected = ET.parse(manifest if merchant else main)
                     self.assertIsNotNone(selected.find("application/service"))
+                    receiver = selected.find(f"application/receiver[@{ANDROID}name='.BootReceiver']")
+                    self.assertIsNotNone(receiver)
+                    actions = receiver.findall("intent-filter/action")
+                    self.assertEqual([a.attrib[ANDROID + "name"] for a in actions],
+                                     ["android.intent.action.BOOT_COMPLETED"] +
+                                     (["android.intent.action.MY_PACKAGE_REPLACED"] if merchant else []))
                     providers = selected.findall("application/provider")
                     self.assertEqual(len(providers), int(merchant))
                     if merchant:
