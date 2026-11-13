@@ -660,7 +660,7 @@ jobs:
         (
           cd flutter
           flutter pub get
-          flutter analyze --no-pub --no-fatal-infos --no-fatal-warnings lib/steaddesk/cases lib/models/model.dart lib/utils/multi_window_manager.dart lib/desktop/pages/desktop_home_page.dart lib/steaddesk/support_home.dart
+          flutter analyze --no-pub --no-fatal-infos --no-fatal-warnings lib/steaddesk/cases lib/models/model.dart lib/utils/multi_window_manager.dart lib/desktop/pages/desktop_home_page.dart lib/steaddesk/support_home.dart lib/desktop/pages/remote_page.dart lib/desktop/pages/remote_tab_page.dart lib/desktop/widgets/remote_toolbar.dart
           flutter test --no-pub test/steaddesk
         )
         # Restore this run's chosen setting for the actual installer.

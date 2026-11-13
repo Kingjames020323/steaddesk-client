@@ -29,7 +29,7 @@ if cases not in ("", "0", "1", "false", "true"):
 cases = not merchant and cases in ("true", "1")
 lib = tree / "flutter/lib/steaddesk"
 # The merchant and disabled builds never import the case form or its storage.
-for name in ("case_session", "case_inbox"):
+for name in ("case_session", "case_inbox", "history_host"):
     source = name if cases else name + "_off"
     (lib / (name + "_api.dart")).write_text(
         f"export 'cases/{source}.dart';\n", encoding="utf-8")
