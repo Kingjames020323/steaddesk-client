@@ -40,7 +40,7 @@ class StagingEditionTests(unittest.TestCase):
                     lib = tree / "flutter/lib/steaddesk"
                     self.assertIn(f"const casesEnabled = {str(enable).lower()};",
                                   (lib / "merchant_build.dart").read_text())
-                    for name in ("case_session", "case_inbox"):
+                    for name in ("case_session", "case_inbox", "history_host"):
                         target = name if enable else name + "_off"
                         self.assertEqual((lib / f"{name}_api.dart").read_text().strip(),
                                          f"export 'cases/{target}.dart';")
