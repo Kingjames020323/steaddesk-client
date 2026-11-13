@@ -1,4 +1,5 @@
 """Check edition selection when a build tree is reused in either direction."""
+import os
 import subprocess
 import tempfile
 import unittest
@@ -28,9 +29,21 @@ class StagingEditionTests(unittest.TestCase):
             main.write_text(original)
             assets = app / "steaddeskStaging"
             manifest = assets / "AndroidManifest.xml"
-            for edition in ("merchant", "support", "merchant"):
-                with self.subTest(edition=edition):
-                    subprocess.run(["bash", ROOT / "scripts/configure-edition.sh", tree, edition], check=True)
+            for edition, flag, enable in [
+                ("support", "", False), ("support", "true", True),
+                ("merchant", "true", False), ("support", "false", False),
+                ("merchant", "", False),
+            ]:
+                with self.subTest(edition=edition, flag=flag):
+                    subprocess.run(["bash", ROOT / "scripts/configure-edition.sh", tree, edition],
+                                   env={**os.environ, "STEADDESK_CASES": flag}, check=True)
+                    lib = tree / "flutter/lib/steaddesk"
+                    self.assertIn(f"const casesEnabled = {str(enable).lower()};",
+                                  (lib / "merchant_build.dart").read_text())
+                    for name in ("case_session", "case_inbox"):
+                        target = name if enable else name + "_off"
+                        self.assertEqual((lib / f"{name}_api.dart").read_text().strip(),
+                                         f"export 'cases/{target}.dart';")
                     self.assertEqual(main.read_text(), original)
                     merchant = edition == "merchant"
                     self.assertEqual(manifest.exists(), merchant)

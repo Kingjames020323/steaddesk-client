@@ -6,6 +6,9 @@ SteadDesk is an AGPL-3.0 remote support client based on RustDesk 1.5.0 for Windo
 
 `STEADDESK_EDITION=merchant bash scripts/apply-patches.sh` selects the incoming-only SteadDesk client (Windows or Android). Its remote sessions require a permanent password. `STEADDESK_EDITION=support bash scripts/apply-patches.sh` selects SteadDesk Support for Windows. The support client can initiate sessions. Its home screen has an **Allow incoming connections** switch, off by default. Each accepted inbound session requires a local click. Use separate build directories for the two Windows editions. In an extracted corresponding-source archive, run `bash scripts/configure-edition.sh upstream merchant` or `bash scripts/configure-edition.sh upstream support` before building.
 
+Windows support builds can enable local case closing with `STEADDESK_CASES=true bash scripts/configure-edition.sh upstream support` after applying the patches. In GitHub Actions, run **Build SteadDesk** on the preview branch and select **Enable case closing in the Windows support build** to obtain an enabled installer. The default is off. The merchant build always excludes the case implementation.
+
+
 PR builds upload three packages with individual SHA256SUMS. Windows artifacts are named `SteadDesk-Windows-x64-merchant` and `SteadDesk-Windows-x64-support`. Android uses `SteadDesk-Android-universal`. The APK requires signing before installation. The existing offline release bundle contains the merchant packages.
 
 ## Release procedure
