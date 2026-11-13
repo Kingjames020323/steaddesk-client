@@ -5,6 +5,11 @@ name: Build SteadDesk
   push:
     tags: ['v1.5.0-sd.*']
   workflow_dispatch:
+    inputs:
+      steaddesk_cases:
+        description: Enable case closing in the Windows support build
+        type: boolean
+        default: false
 permissions:
   contents: read
 env:
@@ -541,6 +546,7 @@ jobs:
     name: Windows x64 ${{ matrix.edition }}
     env:
       STEADDESK_EDITION: ${{ matrix.edition }}
+      STEADDESK_CASES: ${{ inputs.steaddesk_cases && 'true' || 'false' }}
     needs:
     - bridge
     runs-on: "${{ matrix.job.os }}"
@@ -646,6 +652,19 @@ jobs:
         fi
         head -n 100 "${VCPKG_ROOT}/buildtrees/ffmpeg/build-${{ matrix.job.vcpkg-triplet }}-rel-out.log" || true
       shell: bash
+    - name: Test support case closing with its feature enabled
+      if: matrix.edition == 'support'
+      shell: bash
+      run: |
+        STEADDESK_CASES=true bash .distribution/scripts/configure-edition.sh "$PWD" support
+        (
+          cd flutter
+          flutter pub get
+          flutter analyze --no-pub --no-fatal-infos --no-fatal-warnings lib/steaddesk/cases lib/models/model.dart lib/utils/multi_window_manager.dart lib/desktop/pages/desktop_home_page.dart lib/steaddesk/support_home.dart
+          flutter test --no-pub test/steaddesk
+        )
+        # Restore this run's chosen setting for the actual installer.
+        bash .distribution/scripts/configure-edition.sh "$PWD" support
     - name: Build rustdesk
       run: |+
         # Windows: build RustDesk

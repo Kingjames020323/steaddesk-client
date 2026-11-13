@@ -23,11 +23,22 @@ import sys
 tree = Path(sys.argv[1])
 merchant = sys.argv[2] == "false"
 phone = os.environ.get("STEADDESK_SUPPORT_PHONE", "").strip() if merchant else ""
+cases = os.environ.get("STEADDESK_CASES", "").strip().lower()
+if cases not in ("", "0", "1", "false", "true"):
+    raise ValueError("STEADDESK_CASES must be true, false, 1 or 0")
+cases = not merchant and cases in ("true", "1")
+lib = tree / "flutter/lib/steaddesk"
+# The merchant and disabled builds never import the case form or its storage.
+for name in ("case_session", "case_inbox"):
+    source = name if cases else name + "_off"
+    (lib / (name + "_api.dart")).write_text(
+        f"export 'cases/{source}.dart';\n", encoding="utf-8")
 def dart_string(value):
     return json.dumps(value, ensure_ascii=True).replace("$", r"\$")
 
 (tree / "flutter/lib/steaddesk/merchant_build.dart").write_text(
     "const merchantEdition = " + str(merchant).lower() + ";\n"
+    "const casesEnabled = " + str(cases).lower() + ";\n"
     "const merchantVersion = " + dart_string((tree / "RELEASE_VERSION").read_text().strip()) + ";\n"
     "const merchantPhone = String.fromEnvironment('STEADDESK_SUPPORT_PHONE', defaultValue: "
     + dart_string(phone) + ");\n", encoding="utf-8")
