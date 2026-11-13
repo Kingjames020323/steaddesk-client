@@ -1,0 +1,571 @@
+Subject: Restore the signed merchant and Agent through guarded peer checks
+
+diff --git a/build.rs b/build.rs
+index 28a7a5e..0e5c5e9 100644
+--- a/build.rs
++++ b/build.rs
+@@ -99,6 +99,14 @@ fn main() {
+         println!("cargo:rustc-link-lib=framework=ApplicationServices");
+     }
+     if target_os == "android" {
++        // This is the same edition input consumed by hbb_common and Gradle.
++        let selector = "libs/hbb_common/src/steaddesk_support.rs";
++        println!("cargo:rerun-if-changed={}", selector);
++        match std::fs::read_to_string(selector).expect("configured edition").trim() {
++            "false" => println!("cargo:rustc-cfg=steaddesk_merchant"),
++            "true" => (),
++            _ => panic!("invalid SteadDesk edition"),
++        }
+         build_android_ifaddrs();
+     }
+     println!("cargo:rerun-if-changed=build.rs");
+diff --git a/flutter/android/app/build.gradle b/flutter/android/app/build.gradle
+index d26bfe7..df4ab3e 100644
+--- a/flutter/android/app/build.gradle
++++ b/flutter/android/app/build.gradle
+@@ -75,6 +75,10 @@ android {
+         if (merchantEdition) {
+             main.manifest.srcFile 'src/steaddeskStaging/AndroidManifest.xml'
+             main.java.srcDir 'src/steaddeskStaging/java'
++            main.java.srcDir 'src/steaddeskMerchant/java'
++            main.res.srcDir 'src/steaddeskMerchant/res'
++        } else {
++            main.java.srcDir 'src/steaddeskSupport/java'
+         }
+ 
+         main.proto.srcDirs += '../../../libs/base/protos'
+diff --git a/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/BootReceiver.kt b/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/BootReceiver.kt
+index 6bc1809..ca353bf 100644
+--- a/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/BootReceiver.kt
++++ b/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/BootReceiver.kt
+@@ -20,24 +20,28 @@ class BootReceiver : BroadcastReceiver() {
+ 
+         val fromUpdate = intent.action == Intent.ACTION_MY_PACKAGE_REPLACED
+         if (fromUpdate || Intent.ACTION_BOOT_COMPLETED == intent.action || DEBUG_BOOT_COMPLETED == intent.action) {
+-            // check pre-permission
+-            if (!XXPermissions.isGranted(context, REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, SYSTEM_ALERT_WINDOW)){
+-                Log.d(logTag, "REQUEST_IGNORE_BATTERY_OPTIMIZATIONS or SYSTEM_ALERT_WINDOW is not granted")
+-                return
++            if (resumeService(context) && !fromUpdate && BuildConfig.SHOW_BOOT_TOAST) {
++                Toast.makeText(context, R.string.steaddesk_service_started, Toast.LENGTH_LONG).show()
+             }
++        }
++    }
+ 
++    companion object {
++        @JvmStatic fun resumeService(context: Context): Boolean {
++            if (!XXPermissions.isGranted(context, REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, SYSTEM_ALERT_WINDOW)) {
++                Log.d("tagBootReceiver", "Recovery permissions missing")
++                return false
++            }
+             val it = Intent(context, MainService::class.java).apply {
+                 action = ACT_INIT_MEDIA_PROJECTION_AND_SERVICE
+                 putExtra(EXT_INIT_FROM_BOOT, true)
+             }
+-            if (!fromUpdate && BuildConfig.SHOW_BOOT_TOAST) {
+-                Toast.makeText(context, R.string.steaddesk_service_started, Toast.LENGTH_LONG).show()
+-            }
+             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                 context.startForegroundService(it)
+             } else {
+                 context.startService(it)
+             }
++            return true
+         }
+     }
+ }
+diff --git a/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MainService.kt b/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MainService.kt
+index 766c279..8606de1 100644
+--- a/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MainService.kt
++++ b/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MainService.kt
+@@ -96,6 +96,7 @@ class MainService : Service() {
+     @Keep
+     fun rustGetByName(name: String): String {
+         return when (name) {
++            "steaddesk_self_heal_paused" -> MerchantRecovery.paused()
+             "steaddesk_file_scope" -> JSONObject().apply {
+                 put("storage", Environment.getExternalStorageDirectory().absolutePath)
+                 put("authorized", Build.VERSION.SDK_INT >= Build.VERSION_CODES.R &&
+@@ -259,9 +260,11 @@ class MainService : Service() {
+         FFI.startServer(configPath, homePath, "")
+ 
+         createForegroundNotification()
++        MerchantRecovery.start(this)
+     }
+ 
+     override fun onDestroy() {
++        MerchantRecovery.stop(this)
+         checkMediaPermission()
+         stopService(Intent(this, FloatingWindowService::class.java))
+         super.onDestroy()
+diff --git a/flutter/android/app/src/steaddeskMerchant/java/com/carriez/flutter_hbb/AgentWakeService.java b/flutter/android/app/src/steaddeskMerchant/java/com/carriez/flutter_hbb/AgentWakeService.java
+new file mode 100644
+index 0000000..e754321
+--- /dev/null
++++ b/flutter/android/app/src/steaddeskMerchant/java/com/carriez/flutter_hbb/AgentWakeService.java
+@@ -0,0 +1,36 @@
++package com.carriez.flutter_hbb;
++
++import android.app.Service;
++import android.content.Intent;
++import android.os.Binder;
++import android.os.IBinder;
++import android.os.Parcel;
++import android.os.RemoteException;
++
++/** The exported Binder never accepts a component, Intent or arguments from the caller. */
++public final class AgentWakeService extends Service {
++    private final Binder endpoint = new Binder() {
++        @Override protected boolean onTransact(int code, Parcel data, Parcel reply, int flags) throws RemoteException {
++            if (code != FIRST_CALL_TRANSACTION && code != FIRST_CALL_TRANSACTION + 1)
++                return super.onTransact(code, data, reply, flags);
++            data.enforceInterface("com.steaddesk.remote.IWakeService");
++            enforceCallingPermission("com.steaddesk.remote.permission.WAKE_SERVICE", "Agent signature required");
++            String[] packages = getPackageManager().getPackagesForUid(Binder.getCallingUid());
++            if (packages == null || packages.length != 1 || !"com.steaddesk.agent".equals(packages[0]))
++                throw new SecurityException("Agent UID required");
++            long identity = Binder.clearCallingIdentity();
++            try {
++                int state = MerchantRecovery.status();
++                if (code == FIRST_CALL_TRANSACTION && state == 0 && !MerchantRecovery.restore(AgentWakeService.this))
++                    throw new IllegalStateException("Recovery unavailable");
++                if (reply != null) {
++                    reply.writeNoException();
++                    if (code == FIRST_CALL_TRANSACTION + 1) reply.writeInt(state);
++                }
++                return true;
++            } finally { Binder.restoreCallingIdentity(identity); }
++        }
++    };
++
++    @Override public IBinder onBind(Intent intent) { return endpoint; }
++}
+diff --git a/flutter/android/app/src/steaddeskMerchant/java/com/carriez/flutter_hbb/MerchantRecovery.java b/flutter/android/app/src/steaddeskMerchant/java/com/carriez/flutter_hbb/MerchantRecovery.java
+new file mode 100644
+index 0000000..ecfebb9
+--- /dev/null
++++ b/flutter/android/app/src/steaddeskMerchant/java/com/carriez/flutter_hbb/MerchantRecovery.java
+@@ -0,0 +1,46 @@
++package com.carriez.flutter_hbb;
++
++import android.content.ComponentName;
++import android.content.Context;
++import android.content.ServiceConnection;
++import com.steaddesk.recovery.PeerWatchdog;
++
++/** Loaded only by the merchant edition. Native state also covers sessions during FGS teardown. */
++public final class MerchantRecovery {
++    private static PeerWatchdog watchdog;
++    private static ServiceConnection publication;
++
++    static { System.loadLibrary("rustdesk"); }
++    private static native int sessionState();
++
++    public static synchronized void start(MainService service) {
++        if (watchdog != null) return;
++        watchdog = new PeerWatchdog(service, new ComponentName("com.steaddesk.agent",
++                "com.meshcentral.agent.MerchantWakeService"), "com.steaddesk.agent.IWakeConnection");
++        publication = PeerWatchdog.publish(service, AgentWakeService.class);
++        watchdog.start();
++    }
++
++    public static synchronized void stop(MainService service) {
++        if (watchdog == null) return;
++        watchdog.stop();
++        PeerWatchdog.unpublish(service, publication);
++        publication = null;
++        watchdog = null;
++    }
++
++    static synchronized int status() {
++        int session = sessionState();
++        return session == 0 ? (watchdog == null ? 0 : 1) : session;
++    }
++
++    static synchronized boolean restore(Context context) {
++        return status() != 0 || BootReceiver.resumeService(context);
++    }
++
++    public static synchronized String paused() {
++        return watchdog == null ? "" : Boolean.toString(watchdog.isPaused());
++    }
++
++    private MerchantRecovery() {}
++}
+diff --git a/flutter/android/app/src/steaddeskMerchant/java/com/steaddesk/recovery/PeerWatchdog.java b/flutter/android/app/src/steaddeskMerchant/java/com/steaddesk/recovery/PeerWatchdog.java
+new file mode 100644
+index 0000000..8618dd9
+--- /dev/null
++++ b/flutter/android/app/src/steaddeskMerchant/java/com/steaddesk/recovery/PeerWatchdog.java
+@@ -0,0 +1,299 @@
++package com.steaddesk.recovery;
++
++import android.content.ComponentName;
++import android.content.Context;
++import android.content.Intent;
++import android.content.RestrictionsManager;
++import android.content.ServiceConnection;
++import android.content.SharedPreferences;
++import android.content.pm.PackageManager;
++import android.content.pm.ServiceInfo;
++import android.os.Bundle;
++import android.os.Handler;
++import android.os.HandlerThread;
++import android.os.IBinder;
++import android.os.Parcel;
++import android.os.RemoteException;
++import android.preference.PreferenceManager;
++import android.util.AtomicFile;
++import android.util.Log;
++import org.json.JSONObject;
++import java.io.BufferedReader;
++import java.io.File;
++import java.io.FileNotFoundException;
++import java.io.FileOutputStream;
++import java.io.IOException;
++import java.io.InputStreamReader;
++import java.nio.charset.StandardCharsets;
++import java.text.SimpleDateFormat;
++import java.util.ArrayDeque;
++import java.util.ArrayList;
++import java.util.Date;
++import java.util.List;
++import java.util.Locale;
++import java.util.TimeZone;
++
++/** One fixed peer per build. Passive probing must not restart a stopped package. */
++public final class PeerWatchdog {
++    private static final long PERIOD = 300_000L, HOUR = 3_600_000L;
++    private static final int MAX_WAKES = 3;
++    private static final int WAKE = IBinder.FIRST_CALL_TRANSACTION, STATUS = WAKE + 1;
++    private final Context app;
++    private final ComponentName peer;
++    private final String descriptor;
++    private final SharedPreferences budget;
++    private final HandlerThread thread = new HandlerThread("Peer health");
++    private Handler worker;
++    private Probe active;
++    private volatile boolean running;
++
++    public PeerWatchdog(Context context, ComponentName peer, String descriptor) {
++        app = context.getApplicationContext();
++        this.peer = peer;
++        this.descriptor = descriptor;
++        budget = app.getSharedPreferences("self_heal_budget", Context.MODE_PRIVATE);
++    }
++
++    /** Keep the read-only query reachable with bind flags=0 while the real service is live. */
++    public static ServiceConnection publish(Context context, Class<?> endpoint) {
++        ServiceConnection hold = new ServiceConnection() {
++            public void onServiceConnected(ComponentName name, IBinder service) {}
++            public void onServiceDisconnected(ComponentName name) {}
++        };
++        try {
++            if (context.bindService(new Intent(context, endpoint), hold, Context.BIND_AUTO_CREATE)) return hold;
++        } catch (SecurityException denied) {
++            Log.w("PeerWatchdog", "Local status endpoint denied");
++        }
++        unpublish(context, hold);
++        return null;
++    }
++
++    public static void unpublish(Context context, ServiceConnection hold) {
++        if (hold == null) return;
++        try {
++            context.unbindService(hold);
++        } catch (IllegalArgumentException unregistered) {
++            // A failed bind can either register its dispatcher or fail before registration.
++        }
++    }
++
++    public void start() {
++        if (running) return;
++        thread.start();
++        worker = new Handler(thread.getLooper());
++        running = true;
++        worker.post(this::checkNow);
++    }
++
++    public void stop() {
++        if (!running) return;
++        running = false;
++        worker.post(() -> {
++            if (active != null) active.close();
++            worker.removeCallbacksAndMessages(null);
++            thread.quitSafely();
++        });
++    }
++
++    private boolean enabled() {
++        String key = "self_heal_enabled";
++        RestrictionsManager manager = (RestrictionsManager) app.getSystemService(Context.RESTRICTIONS_SERVICE);
++        Bundle restrictions = manager == null ? null : manager.getApplicationRestrictions();
++        if (restrictions != null && restrictions.containsKey(key)) return restrictions.getBoolean(key);
++        return PreferenceManager.getDefaultSharedPreferences(app).getBoolean(key, true);
++    }
++
++    // Serialize reservations across overlapping service instances as well as Binder callbacks.
++    // A clock rollback conservatively retains future timestamps. Never overwrite corrupt history.
++    static List<Long> recent(String history, long now) {
++        List<Long> values = new ArrayList<>();
++        if (!history.isEmpty()) {
++            for (String stamp : history.split(",", -1)) {
++                long time = Long.parseLong(stamp);
++                if (time > now - HOUR) values.add(time);
++            }
++        }
++        return values;
++    }
++
++    public boolean isPaused() {
++        synchronized (PeerWatchdog.class) {
++            try { return recent(budget.getString("attempts", ""), System.currentTimeMillis()).size() >= MAX_WAKES; }
++            catch (RuntimeException invalid) { return true; }
++        }
++    }
++
++    private boolean reserve(String cause) {
++        if (!running || !enabled()) {
++            log("result", cause, "disabled");
++            return false;
++        }
++        synchronized (PeerWatchdog.class) {
++            long now = System.currentTimeMillis();
++            try {
++                List<Long> history = recent(budget.getString("attempts", ""), now);
++                if (history.size() >= MAX_WAKES) {
++                    log("result", cause, "rate_limited");
++                    return false;
++                }
++                history.add(now);
++                StringBuilder encoded = new StringBuilder();
++                for (long value : history) {
++                    if (encoded.length() > 0) encoded.append(',');
++                    encoded.append(value);
++                }
++                if (!budget.edit().putString("attempts", encoded.toString()).commit()) {
++                    log("result", cause, "budget_unavailable");
++                    return false;
++                }
++            } catch (RuntimeException invalid) {
++                log("result", cause, "budget_unavailable");
++                return false;
++            }
++        }
++        log("wake", cause, "reserved");
++        return true;
++    }
++
++    private static String wakePermission(String packageName) {
++        return packageName + ".permission." +
++                ("com.steaddesk.agent".equals(packageName) ? "WAKE_CONNECTION" : "WAKE_SERVICE");
++    }
++
++    void checkNow() {
++        if (!running) return;
++        worker.postDelayed(this::checkNow, PERIOD);
++        if (active != null) return;
++        try {
++            PackageManager packages = app.getPackageManager();
++            ServiceInfo info = packages.getServiceInfo(peer, 0);
++            String required = wakePermission(peer.getPackageName());
++            String reversePermission = wakePermission(app.getPackageName());
++            if (!info.exported || !required.equals(info.permission) ||
++                    app.checkSelfPermission(required) != PackageManager.PERMISSION_GRANTED ||
++                    packages.checkPermission(reversePermission, peer.getPackageName()) != PackageManager.PERMISSION_GRANTED) {
++                log("check", "peer_permission", "denied");
++                return;
++            }
++        } catch (PackageManager.NameNotFoundException | SecurityException unavailable) {
++            log("check", "peer_endpoint", "unavailable");
++            return;
++        }
++        new Probe(false).bind();
++    }
++
++    private final class Probe implements ServiceConnection {
++        final boolean charged;
++        boolean needsUnbind;
++        final Runnable timeout = () -> unavailable("timeout");
++        Probe(boolean charged) { this.charged = charged; }
++
++        void bind() {
++            active = this;
++            try {
++                needsUnbind = true;
++                boolean bound = app.bindService(new Intent().setComponent(peer), this,
++                        charged ? Context.BIND_AUTO_CREATE : 0);
++                if (!bound) { unavailable("not_bound"); return; }
++                worker.postDelayed(timeout, charged ? 10_000L : 2_000L);
++            } catch (SecurityException denied) {
++                close();
++                log("check", "bind", "denied");
++            } catch (RuntimeException failure) {
++                close();
++                log("check", "bind", "failed");
++            }
++        }
++
++        public void onServiceConnected(ComponentName name, IBinder binder) {
++            worker.post(() -> inspect(binder));
++        }
++        public void onServiceDisconnected(ComponentName name) { worker.post(() -> unavailable("disconnected")); }
++        public void onBindingDied(ComponentName name) { worker.post(() -> unavailable("binding_died")); }
++        public void onNullBinding(ComponentName name) { worker.post(() -> unavailable("null_binding")); }
++
++        void close() {
++            worker.removeCallbacks(timeout);
++            if (active == this) active = null;
++            if (needsUnbind) {
++                needsUnbind = false;
++                unpublish(app, this);
++            }
++        }
++        void unavailable(String reason) {
++            if (active != this) return;
++            close();
++            log(charged ? "result" : "check", reason, "unavailable");
++            // AUTO_CREATE can start the target process, so it consumes a slot before binding.
++            if (!charged && reserve(reason)) new Probe(true).bind();
++        }
++
++        void inspect(IBinder binder) {
++            if (!running || active != this) return;
++            worker.removeCallbacks(timeout);
++            try {
++                int state = transact(binder, STATUS);
++                if (state != 0) {
++                    log(charged ? "result" : "check", "peer_status",
++                            state == 2 ? "in_session" : state == 1 ? "healthy" : "unknown");
++                    return;
++                }
++                if (!charged && !reserve("service_stopped")) return;
++                if (!running || !enabled()) { log("result", "switch", "disabled"); return; }
++                // The peer independently rechecks its live sessions when it receives WAKE.
++                transact(binder, WAKE);
++                log("result", "wake_request", "acknowledged");
++            } catch (RemoteException | RuntimeException failure) {
++                log(charged ? "result" : "check", "transaction", "failed");
++            } finally { close(); }
++        }
++
++        int transact(IBinder binder, int code) throws RemoteException {
++            Parcel request = Parcel.obtain(), reply = Parcel.obtain();
++            try {
++                request.writeInterfaceToken(descriptor);
++                if (!binder.transact(code, request, reply, 0)) throw new RemoteException("unsupported");
++                reply.readException();
++                if (code == STATUS && reply.dataAvail() < 4) return 3;
++                return code == STATUS ? reply.readInt() : 0;
++            } finally { reply.recycle(); request.recycle(); }
++        }
++    }
++
++    static ArrayDeque<String> readHistory(BufferedReader input) throws IOException {
++        ArrayDeque<String> lines = new ArrayDeque<>();
++        String line;
++        while ((line = input.readLine()) != null) {
++            if (lines.size() == 499) lines.removeFirst();
++            lines.addLast(line);
++        }
++        return lines;
++    }
++
++    /** Atomic replacement leaves a complete 500-line JSONL file after process death. */
++    private void log(String action, String reason, String result) {
++        synchronized (PeerWatchdog.class) {
++            AtomicFile file = new AtomicFile(new File(app.getFilesDir(), "self-heal.jsonl"));
++            FileOutputStream output = null;
++            try {
++                ArrayDeque<String> lines;
++                try (BufferedReader input = new BufferedReader(new InputStreamReader(file.openRead(), StandardCharsets.UTF_8))) {
++                    lines = readHistory(input);
++                } catch (FileNotFoundException firstRun) {
++                    lines = new ArrayDeque<>();
++                }
++                SimpleDateFormat utc = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.ROOT);
++                utc.setTimeZone(TimeZone.getTimeZone("UTC"));
++                lines.add(new JSONObject().put("time", utc.format(new Date())).put("action", action)
++                        .put("reason", reason).put("result", result).toString());
++                output = file.startWrite();
++                for (String entry : lines) output.write((entry + "\n").getBytes(StandardCharsets.UTF_8));
++                file.finishWrite(output);
++            } catch (Exception failure) {
++                if (output != null) file.failWrite(output);
++                Log.w("PeerWatchdog", "Local recovery log unavailable");
++            }
++        }
++    }
++}
+diff --git a/flutter/android/app/src/steaddeskMerchant/res/values/recovery.xml b/flutter/android/app/src/steaddeskMerchant/res/values/recovery.xml
+new file mode 100644
+index 0000000..15cd257
+--- /dev/null
++++ b/flutter/android/app/src/steaddeskMerchant/res/values/recovery.xml
+@@ -0,0 +1 @@
++<resources><string name="merchant_self_heal">Allow SteadDesk to wake the companion Agent</string></resources>
+diff --git a/flutter/android/app/src/steaddeskMerchant/res/xml/merchant_restrictions.xml b/flutter/android/app/src/steaddeskMerchant/res/xml/merchant_restrictions.xml
+new file mode 100644
+index 0000000..e9354cb
+--- /dev/null
++++ b/flutter/android/app/src/steaddeskMerchant/res/xml/merchant_restrictions.xml
+@@ -0,0 +1,4 @@
++<restrictions xmlns:android="http://schemas.android.com/apk/res/android">
++    <restriction android:key="self_heal_enabled" android:restrictionType="bool"
++        android:title="@string/merchant_self_heal" android:defaultValue="true" />
++</restrictions>
+diff --git a/flutter/android/app/src/steaddeskSupport/java/com/carriez/flutter_hbb/MerchantRecovery.java b/flutter/android/app/src/steaddeskSupport/java/com/carriez/flutter_hbb/MerchantRecovery.java
+new file mode 100644
+index 0000000..528ca45
+--- /dev/null
++++ b/flutter/android/app/src/steaddeskSupport/java/com/carriez/flutter_hbb/MerchantRecovery.java
+@@ -0,0 +1,9 @@
++package com.carriez.flutter_hbb;
++
++/** Shared MainService lifecycle hooks are inert in the support build. */
++public final class MerchantRecovery {
++    public static void start(MainService service) {}
++    public static void stop(MainService service) {}
++    public static String paused() { return ""; }
++    private MerchantRecovery() {}
++}
+diff --git a/src/flutter_ffi.rs b/src/flutter_ffi.rs
+index b9a96e8..a08011c 100644
+--- a/src/flutter_ffi.rs
++++ b/src/flutter_ffi.rs
+@@ -3034,6 +3034,18 @@ pub mod server_side {
+         JNIEnv,
+     };
+ 
++    /// 2 = an authorized incoming session, 0 = idle, 3 = unknown. Never expose identities.
++    #[cfg(steaddesk_merchant)]
++    #[no_mangle]
++    pub extern "system" fn Java_com_carriez_flutter_1hbb_MerchantRecovery_sessionState(
++        _env: JNIEnv,
++        _class: JClass,
++    ) -> jni::sys::jint {
++        crate::server::AUTHED_CONNS.lock().map_or(3, |active| {
++            if active.is_empty() { 0 } else { 2 }
++        })
++    }
++
+     use crate::start_server;
+ 
+     #[no_mangle]
+diff --git a/src/hbbs_http/sync.rs b/src/hbbs_http/sync.rs
+index 728e1e8..a1b5a6f 100644
+--- a/src/hbbs_http/sync.rs
++++ b/src/hbbs_http/sync.rs
+@@ -242,6 +242,12 @@ async fn start_hbbs_sync_async() {
+                 }
+                 let modified_at = LocalConfig::get_option("strategy_timestamp").parse::<i64>().unwrap_or(0);
+                 v["modified_at"] = json!(modified_at);
++                #[cfg(all(target_os = "android", steaddesk_merchant))]
++                if let Ok(value) = scrap::android::call_main_service_get_by_name("steaddesk_self_heal_paused") {
++                    if let Ok(paused) = value.parse::<bool>() {
++                        v["selfHealPaused"] = json!(paused);
++                    }
++                }
+                 let response = crate::post_request(url.clone(), v.to_string(), "").await;
+                 if let Err(err) = &response {
+                     hbb_common::throttled_log!(API_LOG_INTERVAL, warn, "Heartbeat failed: {err:?}");

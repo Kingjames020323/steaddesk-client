@@ -16,6 +16,7 @@ staging_assets=$(cd "$(dirname "$0")/../android-staging" && pwd)
 python3 - "$tree" "$support" "$staging_assets" <<'PY'
 import json
 import os
+import re
 import shutil
 from pathlib import Path
 import sys
@@ -59,6 +60,15 @@ if not merchant:
     manifest.unlink(missing_ok=True)
 else:
     base = (app / "main/AndroidManifest.xml").read_text(encoding="utf-8")
+    cert = os.environ.get("STEADDESK_AGENT_CERT_SHA256", "").strip().upper()
+    if cert and not re.fullmatch(r"[0-9A-F]{64}", cert):
+        raise ValueError("Expected 64 hex digits for STEADDESK_AGENT_CERT_SHA256")
+    recovery = (assets / "recovery-manifest.xml").read_text(encoding="utf-8")
+    recovery = recovery.replace("__AGENT_CERT__", cert or "@null").replace(
+        "__WAKE_PROTECTION__", "signature|knownSigner" if cert else "signature")
+    if base.count("<queries>") != 1:
+        raise ValueError("Expected one queries section")
+    base = base.replace("<queries>", recovery + '\n    <queries>\n        <package android:name="com.steaddesk.agent" />')
     # Only the merchant receiver resumes service after an in-place update.
     boot = '<action android:name="android.intent.action.BOOT_COMPLETED" />'
     if base.count(boot) != 1:

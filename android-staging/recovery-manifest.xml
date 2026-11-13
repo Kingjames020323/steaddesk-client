@@ -1,0 +1,3 @@
+    <uses-permission android:name="com.steaddesk.agent.permission.WAKE_CONNECTION" />
+    <permission android:name="com.steaddesk.remote.permission.WAKE_SERVICE"
+        android:protectionLevel="__WAKE_PROTECTION__" android:knownCerts="__AGENT_CERT__" />

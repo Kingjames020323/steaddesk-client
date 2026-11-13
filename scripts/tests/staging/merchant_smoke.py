@@ -21,6 +21,13 @@ def check_manifest(path):
     manifest = ET.parse(path).getroot()
     android = "{http://schemas.android.com/apk/res/android}"
     assert manifest.get("package") == MERCHANT, "Wrong edition package"
+    service = manifest.find(f"./application/service[@{android}name='com.carriez.flutter_hbb.AgentWakeService']")
+    assert service is not None and service.get(android + "exported") == "true", "Missing merchant wake service"
+    wake = MERCHANT + ".permission.WAKE_SERVICE"
+    assert service.get(android + "permission") == wake
+    assert manifest.find(f"./permission[@{android}name='{wake}']") is not None
+    assert manifest.find(f"./uses-permission[@{android}name='com.steaddesk.agent.permission.WAKE_CONNECTION']") is not None
+    assert manifest.find(f"./queries/package[@{android}name='com.steaddesk.agent']") is not None
     providers = [p for p in manifest.findall("./application/provider")
                  if p.get(android + "authorities") == AUTHORITY]
     assert len(providers) == 1, "Expected one merchant staging provider"
