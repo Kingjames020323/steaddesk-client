@@ -21,6 +21,7 @@ class StagingEditionTests(unittest.TestCase):
             (tree / "RELEASE_VERSION").write_text("1.5.0-sd.1")
             main = app / "main/AndroidManifest.xml"
             original = ('<manifest xmlns:android="http://schemas.android.com/apk/res/android">\n'
+                        '    <queries></queries>\n'
                         '    <application><service android:name=".MainService"/>\n'
                         '<receiver android:name=".BootReceiver"><intent-filter>'
                         '<action android:name="android.intent.action.BOOT_COMPLETED" />'
@@ -36,7 +37,8 @@ class StagingEditionTests(unittest.TestCase):
             ]:
                 with self.subTest(edition=edition, flag=flag):
                     subprocess.run(["bash", ROOT / "scripts/configure-edition.sh", tree, edition],
-                                   env={**os.environ, "STEADDESK_CASES": flag}, check=True)
+                                   env={**os.environ, "STEADDESK_CASES": flag,
+                                        "STEADDESK_AGENT_CERT_SHA256": "aa" * 32 if flag else ""}, check=True)
                     lib = tree / "flutter/lib/steaddesk"
                     self.assertIn(f"const casesEnabled = {str(enable).lower()};",
                                   (lib / "merchant_build.dart").read_text())
@@ -50,6 +52,17 @@ class StagingEditionTests(unittest.TestCase):
                     classes = sorted(p.name for p in assets.rglob("*.java"))
                     self.assertEqual(classes, ["StagingPasswordProvider.java", "StagingPasswords.java"] if merchant else [])
                     selected = ET.parse(manifest if merchant else main)
+                    self.assertEqual(selected.find(f"queries/package[@{ANDROID}name='com.steaddesk.agent']") is not None, merchant)
+                    wake = selected.find(f"application/service[@{ANDROID}name='com.carriez.flutter_hbb.AgentWakeService']")
+                    permission = selected.find(f"permission[@{ANDROID}name='com.steaddesk.remote.permission.WAKE_SERVICE']")
+                    self.assertEqual(wake is not None, merchant)
+                    self.assertEqual(permission is not None, merchant)
+                    self.assertEqual(selected.find(f"uses-permission[@{ANDROID}name='com.steaddesk.agent.permission.WAKE_CONNECTION']") is not None, merchant)
+                    if merchant:
+                        self.assertEqual(wake.attrib[ANDROID + "permission"], permission.attrib[ANDROID + "name"])
+                        self.assertEqual(wake.attrib[ANDROID + "exported"], "true")
+                        self.assertEqual(permission.attrib[ANDROID + "protectionLevel"], "signature|knownSigner" if flag else "signature")
+                        self.assertEqual(permission.attrib[ANDROID + "knownCerts"], "AA" * 32 if flag else "@null")
                     self.assertIsNotNone(selected.find("application/service"))
                     receiver = selected.find(f"application/receiver[@{ANDROID}name='.BootReceiver']")
                     self.assertIsNotNone(receiver)
