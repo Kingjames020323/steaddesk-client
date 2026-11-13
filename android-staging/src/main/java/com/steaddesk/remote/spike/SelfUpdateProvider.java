@@ -67,7 +67,7 @@ public final class SelfUpdateProvider extends ContentProvider {
         }
         if (!"update".equals(method) || arg != null || extras != null && !extras.isEmpty())
             throw new IllegalArgumentException("expected update with staged APK");
-        if (Build.VERSION.SDK_INT < 31) throw new UnsupportedOperationException("requires Android 12+");
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) throw new UnsupportedOperationException("requires Android 11+");
 
         // PackageInstaller must see the merchant's UID, including for installers-of-record checks.
         long identity = Binder.clearCallingIdentity();
@@ -89,7 +89,9 @@ public final class SelfUpdateProvider extends ContentProvider {
         PackageInstaller.SessionParams params = new PackageInstaller.SessionParams(
                 PackageInstaller.SessionParams.MODE_FULL_INSTALL);
         params.setAppPackageName(context.getPackageName());
-        params.setRequireUserAction(PackageInstaller.SessionParams.USER_ACTION_NOT_REQUIRED);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            params.setRequireUserAction(PackageInstaller.SessionParams.USER_ACTION_NOT_REQUIRED);
+        }
         int id = installer.createSession(params);
         boolean submitted = false;
         try (PackageInstaller.Session session = installer.openSession(id)) {
@@ -101,7 +103,8 @@ public final class SelfUpdateProvider extends ContentProvider {
                 session.fsync(out);
             }
             Intent result = new Intent(context, UpdateReceiver.class).setAction(UpdateReceiver.RESULT);
-            PendingIntent callback = PendingIntent.getBroadcast(context, id, result, PendingIntent.FLAG_MUTABLE);
+            PendingIntent callback = PendingIntent.getBroadcast(context, id, result,
+                    Build.VERSION.SDK_INT >= Build.VERSION_CODES.S ? PendingIntent.FLAG_MUTABLE : 0);
             Log.i("SDSPIKE", "submit session=" + id + " candidate=" + candidate.versionName
                     + " canRequestInstalls=" + context.getPackageManager().canRequestPackageInstalls());
             session.commit(callback.getIntentSender());

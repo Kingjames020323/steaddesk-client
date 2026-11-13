@@ -69,6 +69,10 @@ cat SIGNER-SHA256.txt
 | OrderPAD 3 / Android 14 | N+1 → 同一 N+1 | 待测 | 待测 | 待测 | 待测 | 待测 |
 | D3 PRO / Android 13 | N → N+1 | 待测 | 待测 | 待测 | 待测 | 待测 |
 | D3 PRO / Android 13 | N+1 → 同一 N+1 | 待测 | 待测 | 待测 | 待测 | 待测 |
+| 其他安卓平板（Fire / onn，回填实际系统） | N → N+1 | 待测 | 待测 | 待测 | 待测 | 待测 |
+| 其他安卓平板（同一台） | N+1 → 同一 N+1 | 待测 | 待测 | 待测 | 待测 | 待测 |
+
+**Android 11 对照。** Fire OS 8 基于 Android 11（API 30），onn 请记录实际 API。API 30 上探针提交普通自更新会话，预期首先收到 `STATUS_PENDING_USER_ACTION`（−1）；人工同意后才可能收到成功（0）。系统来源限制或厂商拦截可能直接返回失败，请记录实际数值。API 31 起才请求免确认。用 `adb shell getprop ro.build.version.sdk` 区分这两条路径。[Amazon Fire OS 8](https://developer.amazon.com/docs/fire-tablets/fire-os-8.html) · [Android 安装会话参数](https://developer.android.com/reference/android/content/pm/PackageInstaller.SessionParams#setRequireUserAction(int))
 
 **截图清单。** 每台保留 N 和 N+1 的商户面板版本、两轮中实际出现的确认/拦截/录屏界面、客服端首次有画面的时间和对应 session 的状态日志。可用外部录像记录无窗口的两分钟。回填前遮去设备 ID、序列号、账号和业务画面。
 
