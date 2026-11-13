@@ -31,3 +31,7 @@ PR builds upload three packages with individual SHA256SUMS. Windows artifacts ar
 Store the signing material on the signing workstation or its removable media. The workflow only needs a GitHub token to create the draft. Windows builds without a publisher signature and unsigned APKs are staging artifacts; Android installation requires a signed APK. Earlier demo APKs used a temporary signing certificate, so Android may reject an in-place upgrade to the offline-signed release.
 
 The source archive includes the distribution tools, patches and the patched upstream source with its pinned submodules. After extraction the source under `upstream/` is already patched. Hosted runner images, OS packages, Flutter dependency resolution and upstream's custom Windows engine download can vary between runs. Verify the assets from the release under test.
+
+### Android merchant self-update
+
+Before committing a future self-update session, compare the candidate APK's numeric version code with the installed package's version code. Submit only a strictly newer version. Skip an equal version and reject a downgrade. Both SUNMI models returned `STATUS_SUCCESS` when reinstalling the same APK, so this callback alone cannot establish that the version increased. [S1 device results](https://github.com/Kingjames020323/steaddesk-client/blob/0c34aee/docs/research/S1-self-update.md)
