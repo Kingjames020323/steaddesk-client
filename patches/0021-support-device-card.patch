@@ -514,10 +514,14 @@ index f940487..ce8207b 100644
  
    List<String> _managedStores(_DirectoryState dir) {
 diff --git a/flutter/lib/steaddesk/support_directory.dart b/flutter/lib/steaddesk/support_directory.dart
-index e5be28e..9112768 100644
+index e5be28e..2ede8e3 100644
 --- a/flutter/lib/steaddesk/support_directory.dart
 +++ b/flutter/lib/steaddesk/support_directory.dart
-@@ -21,7 +21,29 @@ class _DirectoryState extends State<_Directory> {
+@@ -17,11 +17,32 @@ class _DirectoryState extends State<_Directory> {
+   final presenceChanges = ValueNotifier(0);
+   final presence = <String, bool>{};
+   final lastReport = <String, DateTime>{};
+-  final loadedBooks = <BaseAb>{};
    final closed = <String>{};
    Set<String> ids = {};
    String scope = '';
@@ -547,7 +551,36 @@ index e5be28e..9112768 100644
    late final Timer timer;
  
    @override
-@@ -171,10 +193,17 @@ class _DirectoryState extends State<_Directory> {
+@@ -90,17 +111,6 @@ class _DirectoryState extends State<_Directory> {
+     WidgetsBinding.instance.addPostFrameCallback((_) => _query());
+   }
+ 
+-  void _loadBook(BaseAb book) {
+-    if (book.initialized || !loadedBooks.add(book)) return;
+-    WidgetsBinding.instance.addPostFrameCallback((_) {
+-      if (mounted &&
+-          gFFI.userModel.isLogin &&
+-          gFFI.abModel.addressbooks[book.name()] == book &&
+-          !book.initialized &&
+-          !book.abPulling) book.pullAb(quiet: true);
+-    });
+-  }
+-
+   @override
+   void dispose() {
+     timer.cancel();
+@@ -140,10 +150,6 @@ class _DirectoryState extends State<_Directory> {
+       // Prefer the active book when an ID is shared across multiple books.
+       for (final book in {ab.current, ...ab.addressbooks.values}) {
+         if (!ab.addressbooks.containsKey(book.name())) continue;
+-        if (!searchIndex &&
+-            directory &&
+-            !book.isPersonal() &&
+-            book != ab.current) _loadBook(book);
+         for (final p in book.peers) {
+           if (directory || all.containsKey(p.id)) add(p, PeerTabIndex.ab, book);
+         }
+@@ -171,10 +177,17 @@ class _DirectoryState extends State<_Directory> {
        final peers = entry.value.map((s) => s.peer);
        String first(String Function(Peer) read) =>
            peers.map(read).firstWhere((s) => s.isNotEmpty, orElse: () => '');
@@ -566,7 +599,7 @@ index e5be28e..9112768 100644
              hostnames: peers.map((p) => p.hostname).toList(),
              platform: first((p) => p.platform),
              groupName: first((p) => p.device_group_name),
-@@ -253,6 +282,13 @@ class _DirectoryState extends State<_Directory> {
+@@ -253,6 +266,13 @@ class _DirectoryState extends State<_Directory> {
            Listenable.merge([gFFI.recentPeersModel, gFFI.favoritePeersModel]),
        builder: (_, __) => Obx(() {
              final entries = _entries();
@@ -580,7 +613,7 @@ index e5be28e..9112768 100644
              final devices = entries.map((e) => e.device);
              final byScope = <String, (int, int)>{};
              final stores = <String, Set<String>>{};
-@@ -274,8 +310,10 @@ class _DirectoryState extends State<_Directory> {
+@@ -274,8 +294,10 @@ class _DirectoryState extends State<_Directory> {
              return LayoutBuilder(builder: (context, size) {
                final treeWidth = size.maxWidth >= 850 ? 212.0 : 158.0;
                // Keep columns usable at very small desktop window sizes.
@@ -593,7 +626,7 @@ index e5be28e..9112768 100644
                return SingleChildScrollView(
                    scrollDirection: Axis.horizontal,
                    child: SizedBox(
-@@ -345,7 +383,21 @@ class _DirectoryState extends State<_Directory> {
+@@ -345,7 +367,21 @@ class _DirectoryState extends State<_Directory> {
                                                    color: Color(0xffeef0f2)),
                                            itemBuilder: (_, i) =>
                                                _row(rows[i]))),
@@ -616,7 +649,7 @@ index e5be28e..9112768 100644
                        ])));
              });
            }));
-@@ -455,7 +507,7 @@ class _DirectoryState extends State<_Directory> {
+@@ -455,7 +491,7 @@ class _DirectoryState extends State<_Directory> {
          directory: this,
          child: InkWell(
              onDoubleTap: () => _connect(row),
@@ -625,7 +658,7 @@ index e5be28e..9112768 100644
              hoverColor: const Color(0xfff3f4f6),
              child: _columns(
                  Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-@@ -489,7 +541,7 @@ class _DirectoryState extends State<_Directory> {
+@@ -489,7 +525,7 @@ class _DirectoryState extends State<_Directory> {
                          style: TextButton.styleFrom(
                              padding: const EdgeInsets.symmetric(horizontal: 8)),
                          onPressed: () =>
@@ -635,7 +668,7 @@ index e5be28e..9112768 100644
                              fit: BoxFit.scaleDown,
                              child: Text(
 diff --git a/flutter/lib/steaddesk/support_home.dart b/flutter/lib/steaddesk/support_home.dart
-index d99cb82..775d277 100644
+index d99cb82..63371dd 100644
 --- a/flutter/lib/steaddesk/support_home.dart
 +++ b/flutter/lib/steaddesk/support_home.dart
 @@ -23,7 +23,10 @@ import '../consts.dart';
@@ -649,7 +682,83 @@ index d99cb82..775d277 100644
  part 'support_search.dart';
  part 'support_device_menu.dart';
  part 'support_home_bar.dart';
-@@ -213,6 +216,9 @@ class _SupportHomeState extends State<SupportHome> {
+@@ -87,6 +90,53 @@ class _SupportHomeState extends State<SupportHome> {
+       p: GlobalKey<_DirectoryState>(),
+   };
+   final searchFocus = FocusNode();
++  final Set<BaseAb> _indexedBooks = {};
++  late final _indexListener = 'support-search-index-${identityHashCode(this)}';
++  late final Worker _loginListener;
++  bool _loadingBooks = false;
++  bool _rescanBooks = false;
++
++  Future<void> _startIndex() async {
++    if (!mounted || !gFFI.userModel.isLogin) return;
++    // Profiles may arrive after initState (cache, sign-in, or another pull).
++    // AbModel notifies _indexSharedBooks when its list/current pull completes.
++    await gFFI.abModel.pullAb(force: null, quiet: true);
++    await _indexSharedBooks();
++  }
++
++  Future<void> _indexSharedBooks() async {
++    final ab = gFFI.abModel;
++    if (!mounted || !gFFI.userModel.isLogin || !ab.listInitialized) return;
++    if (_loadingBooks) {
++      _rescanBooks = true;
++      return;
++    }
++    _loadingBooks = true;
++    try {
++      do {
++        _rescanBooks = false;
++        final account = gFFI.userModel.userName.value;
++        final books = ab.addressbooks.values.toList();
++        _indexedBooks.retainAll(books);
++        for (final book in books) {
++          if (!mounted || gFFI.userModel.userName.value != account) break;
++          if (!book.isPersonal() &&
++              identical(ab.addressbooks[book.name()], book)) {
++            await _loadBook(book);
++          }
++        }
++      } while (mounted && _rescanBooks);
++      final directory = directoryKeys[page]?.currentState;
++      if (mounted && directory != null) directory.presenceChanges.value++;
++    } finally {
++      _loadingBooks = false;
++    }
++  }
++
++  Future<void> _loadBook(BaseAb book) async {
++    if (book.initialized || book.abPulling || !_indexedBooks.add(book)) return;
++    await book.pullAb(quiet: true);
++  }
+ 
+   void _search(String value) => setState(() {
+         if (value.isNotEmpty) page = SupportPage.devices;
+@@ -100,6 +150,8 @@ class _SupportHomeState extends State<SupportHome> {
+   @override
+   void dispose() {
+     WidgetsBinding.instance.removeTimingsCallback(_measureGlass);
++    _loginListener.dispose();
++    gFFI.abModel.removePeerUpdateListener(_indexListener);
+     search.dispose();
+     searchFocus.dispose();
+     super.dispose();
+@@ -109,6 +161,12 @@ class _SupportHomeState extends State<SupportHome> {
+   void initState() {
+     super.initState();
+     WidgetsBinding.instance.addTimingsCallback(_measureGlass);
++    gFFI.abModel.addPeerUpdateListener(_indexListener, _indexSharedBooks);
++    _loginListener = ever<String>(gFFI.userModel.userName, (_) {
++      _indexedBooks.clear();
++      _startIndex();
++    });
++    WidgetsBinding.instance.addPostFrameCallback((_) => _startIndex());
+     bind.mainLoadRecentPeers();
+     bind.mainLoadFavPeers();
+     final saved = bind.getLocalFlutterOption(k: _modeKey);
+@@ -213,6 +271,9 @@ class _SupportHomeState extends State<SupportHome> {
                          borderRadius: BorderRadius.circular(6))))),
          child: CallbackShortcuts(
              bindings: {
