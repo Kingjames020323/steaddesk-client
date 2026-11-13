@@ -1,13 +1,15 @@
 # S1 · 商米商户版能否无人操作地更新自己
 
-**待真机回填。** 测试对象是没有 Device Owner 权限的 SteadDesk。每台设备做两轮，第一轮从 N 升到 N+1，第二轮再提交同一份 N+1 APK。系统安装回调、设备实际显示的界面、客服能否恢复画面各自记一项。
+**Jason 真机结果（2026-11-13）。** OrderPAD 3 和 D3 PRO 各做一次升级、一次同版本重装，四次均静默成功，录屏自动恢复。现场没有演练服务器，客服端 120 秒内取得实时首帧的用时未测。
+
+ 测试对象是没有 Device Owner 权限的 SteadDesk。每台设备做两轮，第一轮从 N 升到 N+1，第二轮再提交同一份 N+1 APK。系统安装回调、设备实际显示的界面、客服能否恢复画面各自记一项。
 
 ## 上游依据
 
 - Android 12 起，具有安装来源授权的安装方自更新时，可以请求 `USER_ACTION_NOT_REQUIRED`。还须声明 `UPDATE_PACKAGES_WITHOUT_USER_ACTION`，待装应用在 Android 13 的 target 至少为 30，在 Android 14 至少为 31。本次两个 APK 的 target 都是 36。安装器仍须处理 `STATUS_PENDING_USER_ACTION`。[SessionParams.setRequireUserAction](https://developer.android.com/reference/android/content/pm/PackageInstaller.SessionParams#setRequireUserAction(int)) · [检查安装来源授权](https://developer.android.com/reference/android/content/pm/PackageManager#canRequestPackageInstalls())
 - S1 在应用 UID 下创建、写入、同步并提交安装会话。系统通过可变、显式指向本应用私有接收器的 PendingIntent 回传状态。两台商米的固件可能对后台确认窗口采取不同策略，日志和屏幕分别保留。[Session.commit](https://developer.android.com/reference/android/content/pm/PackageInstaller.Session#commit(android.content.IntentSender)) · [安装状态和确认 Intent](https://developer.android.com/reference/android/content/pm/PackageInstaller#STATUS_PENDING_USER_ACTION)
 - 包替换广播进入商户版已有开机路径。它检查电池优化及悬浮窗权限，显示启动 Toast，启动 MainService；服务收到启动标志后恢复服务并按原流程请求录屏。即使安装静默，也可能出现录屏确认或没有可用画面。[Android 包替换广播](https://developer.android.com/reference/android/content/Intent#ACTION_MY_PACKAGE_REPLACED) · [RustDesk 1.5.0 BootReceiver.kt L19–44](https://github.com/rustdesk/rustdesk/blob/fada664df7a294d1d1a9ca3e7cd3637069122f17/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/BootReceiver.kt#L19-L44) · [MainService.kt L346–364](https://github.com/rustdesk/rustdesk/blob/fada664df7a294d1d1a9ca3e7cd3637069122f17/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MainService.kt#L346-L364) · [已有商户开机补丁](../../patches/0011-merchant-android-boot.patch)
-- Android 构建从 RELEASE_VERSION 取版本名，以 68 加末段编号作 versionCode。商户面板底部显示同源生成的 merchantVersion。[版本补丁](../../patches/0007-release-version.patch) · [商户面板](../../patches/0015-merchant-panel.patch) · [版本选择脚本](../../scripts/configure-edition.sh)
+- Android 构建从 RELEASE_VERSION 取版本名，以 68 加末段编号作 versionCode。0015 把同源生成的 merchantVersion 放在帮助区；Jason 在商米面板底部未看到版本号。[版本补丁](../../patches/0007-release-version.patch) · [商户面板](../../patches/0015-merchant-panel.patch) · [版本选择脚本](../../scripts/configure-edition.sh)
 
 ## Jason 的真机步骤
 
@@ -61,14 +63,14 @@ cat SIGNER-SHA256.txt
 
 ### 回填表
 
-每格按实际情况写。权限使用「前 → 后」，无障碍同时写能否实际操作；有人工介入写明发生在何时。
+以下安装耗时约计，来自 Jason 的真机回填。授权保留及录屏自动恢复由设备侧观察。安装期间无确认框、无商米拦截；安装来源或商米白名单的具体设置未单独回填。包替换后观察到「RustDesk 服务已开启」Toast。
 
 | 设备 / 系统 | 轮次 | 安装界面 / 其他 UI | session / 状态码顺序 / 实装版本 | 120 秒内首帧（秒） | 录屏 / 无障碍 / 悬浮窗（前 → 后） | 安装来源 / 商米白名单或拦截 |
 | --- | --- | --- | --- | --- | --- | --- |
-| OrderPAD 3 / Android 14 | N → N+1 | 待测 | 待测 | 待测 | 待测 | 待测 |
-| OrderPAD 3 / Android 14 | N+1 → 同一 N+1 | 待测 | 待测 | 待测 | 待测 | 待测 |
-| D3 PRO / Android 13 | N → N+1 | 待测 | 待测 | 待测 | 待测 | 待测 |
-| D3 PRO / Android 13 | N+1 → 同一 N+1 | 待测 | 待测 | 待测 | 待测 | 待测 |
+| OrderPAD 3 / Android 14 / 4.5.30 | N → N+1 | 静默，无确认框 | 346715368 / 0 / N+1，约 5 秒 | 未测（无演练服务器） | 三项均保留，录屏自动恢复 | 无商米拦截 |
+| OrderPAD 3 / Android 14 / 4.5.30 | N+1 → 同一 N+1 | 静默，无确认框 | 239996453 / 0 / N+1，约 3 秒 | 未测（无演练服务器） | 三项均保留，录屏自动恢复 | 无商米拦截 |
+| D3 PRO / Android 13 / 4.0.78 | N → N+1 | 静默，无确认框 | 1560028814 / 0 / N+1，约 4 秒 | 未测（无演练服务器） | 三项均保留，录屏自动恢复 | 无商米拦截 |
+| D3 PRO / Android 13 / 4.0.78 | N+1 → 同一 N+1 | 静默，无确认框 | 2037210608 / 0 / N+1，约 4 秒 | 未测（无演练服务器） | 三项均保留，录屏自动恢复 | 无商米拦截 |
 | 其他安卓平板（Fire / onn，回填实际系统） | N → N+1 | 待测 | 待测 | 待测 | 待测 | 待测 |
 | 其他安卓平板（同一台） | N+1 → 同一 N+1 | 待测 | 待测 | 待测 | 待测 | 待测 |
 
@@ -76,4 +78,4 @@ cat SIGNER-SHA256.txt
 
 **截图清单。** 每台保留 N 和 N+1 的商户面板版本、两轮中实际出现的确认/拦截/录屏界面、客服端首次有画面的时间和对应 session 的状态日志。可用外部录像记录无窗口的两分钟。回填前遮去设备 ID、序列号、账号和业务画面。
 
-**正式功能边界。** 本分支只验证系统能力。正式更新从自有服务器下载，并在提交安装前校验受信签名及 SHA-256；正式客户端移除 adb 触发、实验公钥设置及测试域名。能否批量无人值守升级，等两台真机回填后再判断。
+**正式功能边界。** 本分支只验证系统能力。正式更新从自有服务器下载，并在提交安装前校验受信签名及 SHA-256；正式客户端移除 adb 触发、实验公钥设置及测试域名。同版本重装在两台设备上也返回成功（0）。正式更新在提交安装会话前，须比较待装 APK 和已安装包的数值 versionCode，只有严格递增才提交，同版本跳过、低版本拒绝。状态 0 只表示该次安装成功。
