@@ -14,6 +14,8 @@ ET.register_namespace("tools", "http://schemas.android.com/tools")
 a = "{" + android + "}"
 xml = ET.parse(manifest)
 root = xml.getroot()
+if root.find(f"uses-permission[@{a}name='android.permission.SYSTEM_ALERT_WINDOW']") is None:
+    raise ValueError("S6b requires the merchant overlay permission from the upstream manifest")
 app = root.find("application")
 service, = app.findall(f"service[@{a}name='.MainService']")
 if service.get(a+"exported") != "false":
