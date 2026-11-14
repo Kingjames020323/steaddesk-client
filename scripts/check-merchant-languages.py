@@ -18,14 +18,20 @@ def rust_catalog(path):
     return {json.loads(k): json.loads(v) for k, v in PAIR.findall(path.read_text())}
 
 
-def android_catalog(app, suffix):
+def android_strings(app, suffix):
     result = {}
     for source_set in ("main", "steaddeskMerchant"):
         for path in sorted((app / source_set / "res" / ("values" + suffix)).glob("*.xml")):
             for item in ET.parse(path).getroot().findall("string"):
-                value = "".join(item.itertext()).replace(r'\"', '"').replace(r"\'", "'")
-                result[item.attrib["name"]] = value
+                result[item.attrib["name"]] = item
     return result
+
+
+def android_catalog(strings):
+    return {
+        name: "".join(item.itertext()).replace(r'\"', '"').replace(r"\'", "'")
+        for name, item in strings.items()
+    }
 
 
 def android_uses(app):
@@ -68,8 +74,11 @@ def rows_for(source):
     catalogs = {language: rust_catalog(source / "src/lang" / (name + ".rs"))
                 for language, name in zip(LANGUAGES, ("en", "cn", "es"))}
     app = source / "flutter/android/app/src"
-    native = {lang: android_catalog(app, suffix)
-              for lang, suffix in zip(LANGUAGES, ("", "-zh", "-es"))}
+    resources = {lang: android_strings(app, suffix)
+                 for lang, suffix in zip(LANGUAGES, ("", "-zh", "-es"))}
+    native = {lang: android_catalog(strings) for lang, strings in resources.items()}
+    untranslated = {name for name, item in resources["en"].items()
+                    if item.get("translatable") == "false"}
     panel = (source / "flutter/lib/steaddesk/merchant_panel.dart").read_text()
     declared = {key for keys in groups.values() for key in keys}
     rows = {}
@@ -98,6 +107,13 @@ def rows_for(source):
     # Check the union so removing a default AND its translations still fails
     # when code, a manifest or an Android restriction references the resource.
     for resource in sorted(android_uses(app).union(*(set(table) for table in native.values()))):
+        if resource in untranslated:
+            if not native["en"][resource].strip():
+                errors.append(f"Android: en: empty non-translatable resource {resource}")
+            for lang in ("zh", "es"):
+                if resource in native[lang]:
+                    errors.append(f"Android: {lang}: non-translatable resource {resource} has a translation")
+            continue
         values = [native[lang].get(resource, "") for lang in LANGUAGES]
         for lang, value in zip(LANGUAGES, values):
             if not value.strip():
