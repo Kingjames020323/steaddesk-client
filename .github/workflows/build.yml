@@ -81,6 +81,8 @@ jobs:
     - name: Apply distribution patches and assets
       shell: bash
       run: bash .distribution/scripts/apply-patches.sh "$GITHUB_WORKSPACE"
+    - name: Check merchant translations in the patched source
+      run: python3 .distribution/scripts/check-merchant-languages.py "$GITHUB_WORKSPACE"
     - name: Test Android merchant file scope on an isolated filesystem
       shell: bash
       run: |

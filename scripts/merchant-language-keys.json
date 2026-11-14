@@ -1,0 +1,106 @@
+{
+  "Merchant panel": [
+    "This device ID",
+    "Generating ...",
+    "Copy ID",
+    "Ready · No active assistance",
+    "Ready",
+    "Not ready",
+    "Remote assistance in progress",
+    "End remote assistance",
+    "Need help?",
+    "Give your device ID to support.",
+    "Support phone",
+    "Minimize",
+    "SteadDesk {}"
+  ],
+  "Language menu": [
+    "Language",
+    "Use device language",
+    "English",
+    "Chinese",
+    "Spanish",
+    "Could not save the language."
+  ],
+  "First-time setup": [
+    "First-time setup",
+    "Checking",
+    "Granted",
+    "Not granted",
+    "Screen Capture",
+    "Input Control",
+    "Notifications",
+    "Battery optimization exemption",
+    "Set a permanent password"
+  ],
+  "Android input permission": [
+    "How to get Android input permission?",
+    "android_input_permission_tip1",
+    "In Android accessibility settings, turn on the SteadDesk service to allow remote input.",
+    "Cancel",
+    "Open System Setting"
+  ],
+  "Password setup": [
+    "Set Password",
+    "Password",
+    "Confirmation",
+    "Prompt",
+    "The confirmation is not identical.",
+    "Failed",
+    "password-hidden-tip",
+    "preset-password-in-use-tip",
+    "Remove",
+    "OK",
+    "digit",
+    "uppercase",
+    "lowercase",
+    "length>=8",
+    "Weak",
+    "Medium",
+    "Strong"
+  ],
+  "Android incoming requests": [
+    "Transfer file",
+    "View camera",
+    "Terminal",
+    "Share screen",
+    "Do you accept?",
+    "android_new_connection_tip",
+    "Voice call",
+    "android_new_voice_call_tip",
+    "Dismiss",
+    "Accept"
+  ],
+  "Android deployment": [
+    "Deploy",
+    "server_requires_deployment_tip",
+    "token is required!",
+    "Successful",
+    "API Token",
+    "Custom ID (optional)"
+  ],
+  "Windows connection manager": [
+    "Remote assistance",
+    "Connection manager"
+  ],
+  "Windows tray and About": [
+    "Show panel",
+    "About",
+    "Service is running",
+    "{} sessions",
+    "Version"
+  ],
+  "Windows installation": [
+    "Install",
+    "Installation",
+    "Installation Path",
+    "Change Path",
+    "Create start menu shortcuts",
+    "Create desktop icon",
+    "Install {} Printer",
+    "agreement_tip",
+    "End-user license agreement",
+    "Accept and Install",
+    "Run without install"
+  ]
+}
