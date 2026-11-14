@@ -14,6 +14,13 @@
     "Minimize",
     "SteadDesk {}"
   ],
+  "Merchant remote pause": [
+    "Pause remote support",
+    "Resume remote support",
+    "Remote support is paused",
+    "This will end remote support until you resume it.",
+    "Could not change the remote support setting."
+  ],
   "Language menu": [
     "Language",
     "Use device language",

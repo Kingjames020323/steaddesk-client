@@ -3,6 +3,8 @@
             android:authorities="com.steaddesk.remote.staging"
             android:exported="true"
             android:grantUriPermissions="false" />
+        <receiver android:name="com.carriez.flutter_hbb.MerchantRemotePaused"
+            android:enabled="false" android:exported="false" />
         <service android:name="com.carriez.flutter_hbb.AgentWakeService"
             android:exported="true" android:permission="com.steaddesk.remote.permission.WAKE_SERVICE" />
         <meta-data android:name="android.content.APP_RESTRICTIONS" android:resource="@xml/merchant_restrictions" />
