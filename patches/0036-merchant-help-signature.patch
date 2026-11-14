@@ -1,0 +1,354 @@
+diff --git a/build.rs b/build.rs
+index 0e5c5e9..9f45274 100644
+--- a/build.rs
++++ b/build.rs
+@@ -98,15 +98,19 @@ fn main() {
+         build_mac();
+         println!("cargo:rustc-link-lib=framework=ApplicationServices");
+     }
+-    if target_os == "android" {
+-        // This is the same edition input consumed by hbb_common and Gradle.
+-        let selector = "libs/hbb_common/src/steaddesk_support.rs";
+-        println!("cargo:rerun-if-changed={}", selector);
+-        match std::fs::read_to_string(selector).expect("configured edition").trim() {
+-            "false" => println!("cargo:rustc-cfg=steaddesk_merchant"),
+-            "true" => (),
+-            _ => panic!("invalid SteadDesk edition"),
++    let selector = "libs/hbb_common/src/steaddesk_support.rs";
++    println!("cargo:rerun-if-changed={}", selector);
++    match std::fs::read_to_string(selector).expect("configured edition").trim() {
++        "false" => {
++            println!("cargo:rustc-cfg=steaddesk_help_merchant");
++            if target_os == "android" {
++                println!("cargo:rustc-cfg=steaddesk_merchant");
++            }
+         }
++        "true" => (),
++        _ => panic!("invalid SteadDesk edition"),
++    }
++    if target_os == "android" {
+         build_android_ifaddrs();
+     }
+     println!("cargo:rerun-if-changed=build.rs");
+diff --git a/flutter/lib/models/native_model.dart b/flutter/lib/models/native_model.dart
+index d56d58f..2716a79 100644
+--- a/flutter/lib/models/native_model.dart
++++ b/flutter/lib/models/native_model.dart
+@@ -14,6 +14,8 @@ import 'package:path_provider/path_provider.dart';
+ 
+ import '../common.dart';
+ import '../generated_bridge.dart';
++import '../steaddesk/help_signer.dart';
++import '../steaddesk/merchant_build.dart' show merchantEdition;
+ 
+ final class RgbaFrame extends Struct {
+   @Uint32()
+@@ -60,6 +62,7 @@ class PlatformFFI {
+ 
+   RustdeskImpl get ffiBind => _ffiBind;
+   F3? _session_get_rgba;
++  MerchantHelpSigner? helpSigner;
+ 
+   static get localeName => Platform.localeName;
+ 
+@@ -157,6 +160,7 @@ class PlatformFFI {
+         debugPrint('Failed to get documents directory: $e');
+       }
+       _ffiBind = RustdeskImpl(dylib);
++      if (merchantEdition) helpSigner = MerchantHelpSigner(dylib);
+ 
+       if (isLinux) {
+         if (isMain) {
+diff --git a/flutter/lib/steaddesk/help_signer.dart b/flutter/lib/steaddesk/help_signer.dart
+new file mode 100644
+index 0000000..3233054
+--- /dev/null
++++ b/flutter/lib/steaddesk/help_signer.dart
+@@ -0,0 +1,57 @@
++import 'dart:convert';
++import 'dart:ffi';
++
++import 'package:ffi/ffi.dart';
++
++typedef _NativeSign = UintPtr Function(
++    Pointer<Uint8>, UintPtr, Pointer<Uint8>, UintPtr);
++typedef _Sign = int Function(Pointer<Uint8>, int, Pointer<Uint8>, int);
++
++/// Keep the receipt in application-private storage. Only [request] goes into the
++/// HTTPS POST body. Supply the original receipt when re-signing an expired retry.
++class SignedMerchantHelp {
++  final String receiptSecret;
++  final Map<String, dynamic> request;
++  SignedMerchantHelp._(this.receiptSecret, this.request);
++}
++
++class MerchantHelpSigner {
++  final DynamicLibrary _core;
++  MerchantHelpSigner(this._core);
++
++  SignedMerchantHelp sign(
++      {required String category,
++      String message = '',
++      String screenshotSha256 = '',
++      String? receiptSecret}) {
++    final input = utf8.encode(jsonEncode({
++      'category': category,
++      'message': message,
++      'screenshot_sha256': screenshotSha256,
++      if (receiptSecret != null) 'receipt_secret': receiptSecret,
++    }));
++    const capacity = 8192;
++    if (input.length > capacity) {
++      throw ArgumentError('Help fields exceed byte limit');
++    }
++    final fn = _core.lookupFunction<_NativeSign, _Sign>('steaddesk_sign_help');
++    final src = calloc<Uint8>(input.length);
++    final dest = calloc<Uint8>(capacity);
++    try {
++      src.asTypedList(input.length).setAll(0, input);
++      final count = fn(src, input.length, dest, capacity);
++      if (count <= 0 || count > capacity) {
++        throw StateError('Cannot sign help request');
++      }
++      final envelope = jsonDecode(utf8.decode(dest.asTypedList(count)))
++          as Map<String, dynamic>;
++      return SignedMerchantHelp._(envelope['receipt_secret'] as String,
++          envelope['request'] as Map<String, dynamic>);
++    } finally {
++      src.asTypedList(input.length).fillRange(0, input.length, 0);
++      dest.asTypedList(capacity).fillRange(0, capacity, 0);
++      calloc.free(src);
++      calloc.free(dest);
++    }
++  }
++}
+diff --git a/src/lib.rs b/src/lib.rs
+index 649f3ef..9c7706d 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -1,6 +1,8 @@
+ #[cfg(any(test, not(target_os = "linux")))]
+ mod audio_resampler;
+ mod keyboard;
++#[cfg(steaddesk_help_merchant)]
++mod steaddesk_help;
+ /// cbindgen:ignore
+ pub mod platform;
+ #[cfg(not(any(target_os = "android", target_os = "ios")))]
+diff --git a/src/steaddesk_help.rs b/src/steaddesk_help.rs
+new file mode 100644
+index 0000000..f3f03c0
+--- /dev/null
++++ b/src/steaddesk_help.rs
+@@ -0,0 +1,192 @@
++//! Only the merchant edition links this C ABI. No caller-controlled key, device ID,
++//! timestamp, nonce or signing domain is accepted. All lengths are bytes.
++use hbb_common::{
++    base64::{
++        engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
++        Engine,
++    },
++    config::Config,
++    sha2::{Digest, Sha256},
++    sodiumoxide::{
++        self,
++        crypto::{auth::hmacsha256, sign},
++        randombytes::randombytes_into,
++        utils::memzero,
++    },
++};
++use serde_derive::Deserialize;
++use serde_json::json;
++use std::{
++    panic::catch_unwind,
++    slice,
++    time::{SystemTime, UNIX_EPOCH},
++};
++
++#[derive(Deserialize)]
++#[serde(deny_unknown_fields)]
++struct HelpFields {
++    category: String,
++    message: String,
++    screenshot_sha256: String,
++    // Only supplied when re-signing an expired request whose first response was lost.
++    receipt_secret: Option<String>,
++}
++
++fn valid(fields: &HelpFields) -> bool {
++    matches!(
++        fields.category.as_str(),
++        "printer" | "menu" | "checkout" | "network" | "frozen" | "other"
++    ) && fields.message.len() <= 1024
++        && (fields.screenshot_sha256.is_empty()
++            || (fields.screenshot_sha256.len() == 64
++                && fields
++                    .screenshot_sha256
++                    .bytes()
++                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))))
++}
++
++fn canonical(device: &str, ts: u64, nonce: &str, fields: &HelpFields) -> String {
++    format!("SteadDesk-help-v1\ndevice_id={}\nts={}\nnonce={}\ncategory={}\nmessage_sha256={:x}\nscreenshot_sha256={}\n",
++        device, ts, nonce, fields.category, Sha256::digest(fields.message.as_bytes()), fields.screenshot_sha256)
++}
++
++fn envelope(input: &[u8]) -> Option<Vec<u8>> {
++    let fields: HelpFields = serde_json::from_slice(input).ok()?;
++    if !valid(&fields) {
++        return None;
++    }
++    sodiumoxide::init().ok()?;
++    let device = Config::get_id_or(String::new());
++    if !(9..=10).contains(&device.len()) || !device.bytes().all(|b| b.is_ascii_digit()) {
++        return None;
++    }
++    let (mut raw, public) = Config::get_existing_key_pair()?;
++    let signing_key = sign::SecretKey::from_slice(&raw);
++    memzero(&mut raw);
++    let signing_key = signing_key?;
++    let public = sign::PublicKey::from_slice(&public)?;
++    let ts = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
++    let receipt = match fields.receipt_secret.as_deref() {
++        None => hmacsha256::gen_key(),
++        Some(value) => {
++            let mut decoded = URL_SAFE_NO_PAD.decode(value).ok()?;
++            let key = hmacsha256::Key::from_slice(&decoded);
++            memzero(&mut decoded);
++            key?
++        }
++    };
++    let mut salt = [0u8; 16];
++    randombytes_into(&mut salt);
++    let mut auth = hmacsha256::State::init(&receipt.0);
++    auth.update(b"SteadDesk-help-receipt-v1\0");
++    auth.update(&salt);
++    let nonce = URL_SAFE_NO_PAD.encode(&auth.finalize().0[..16]);
++    let bytes = canonical(&device, ts, &nonce, &fields);
++    let signature = sign::sign_detached(bytes.as_bytes(), &signing_key);
++    if !sign::verify_detached(&signature, bytes.as_bytes(), &public) {
++        return None;
++    }
++    // The receipt has its own HTTPS authorization header. Never include it in the request body.
++    serde_json::to_vec(&json!({
++        "receipt_secret": URL_SAFE_NO_PAD.encode(receipt.0),
++        "request": {
++            "v": 1, "device_id": device, "ts": ts, "nonce": nonce,
++            "category": fields.category, "message": fields.message, "screenshot_sha256": fields.screenshot_sha256,
++            "sig": STANDARD.encode(signature.to_bytes()), "public_key": STANDARD.encode(public.0),
++            "receipt_salt": URL_SAFE_NO_PAD.encode(salt)
++        }
++    })).ok()
++}
++
++/// # Safety
++/// The Dart caller owns distinct readable and writable buffers with the specified sizes.
++/// Returns the exact JSON byte count, or zero on invalid input, absent identity or failure.
++#[no_mangle]
++pub unsafe extern "C" fn steaddesk_sign_help(
++    input: *const u8,
++    size: usize,
++    out: *mut u8,
++    capacity: usize,
++) -> usize {
++    if input.is_null() || out.is_null() || size == 0 || size > 8192 || capacity != 8192 {
++        return 0;
++    }
++    catch_unwind(|| {
++        let input = slice::from_raw_parts(input, size);
++        let Some(mut result) = envelope(input) else {
++            return 0;
++        };
++        let count = result.len();
++        if count > capacity {
++            memzero(&mut result);
++            return 0;
++        }
++        std::ptr::copy_nonoverlapping(result.as_ptr(), out, count);
++        memzero(&mut result);
++        count
++    })
++    .unwrap_or(0)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn signature_binds_each_field_and_preserves_message_bytes() {
++        sodiumoxide::init().unwrap();
++        let (pk, sk) = sign::gen_keypair();
++        let fields = HelpFields {
++            category: "printer".into(),
++            message: "  打印机\n".into(),
++            screenshot_sha256: String::new(),
++            receipt_secret: None,
++        };
++        let bytes = canonical("790001001", 1794636000, "AAECAwQFBgcICQoLDA0ODw", &fields);
++        let sig = sign::sign_detached(bytes.as_bytes(), &sk);
++        assert!(sign::verify_detached(&sig, bytes.as_bytes(), &pk));
++        let trimmed_hash = format!("{:x}", Sha256::digest(fields.message.trim().as_bytes()));
++        for edit in [
++            bytes.replace("790001001", "790001002"),
++            bytes.replace("1794636000", "1794636001"),
++            bytes.replace("AAECAwQFBgcICQoLDA0ODw", "AAAAAAAAAAAAAAAAAAAAAA"),
++            bytes.replace("printer", "other"),
++            bytes.replace(
++                &format!("{:x}", Sha256::digest(fields.message.as_bytes())),
++                &trimmed_hash,
++            ),
++            bytes.replace(
++                "screenshot_sha256=",
++                &format!("screenshot_sha256={}", "0".repeat(64)),
++            ),
++            bytes.replace("\n", "\r\n"),
++            bytes.trim_end().to_owned(),
++        ] {
++            assert!(!sign::verify_detached(&sig, edit.as_bytes(), &pk));
++        }
++    }
++
++    #[test]
++    fn canonical_vector_and_input_limits() {
++        let mut f = HelpFields {
++            category: "printer".into(),
++            message: "测试打印机".into(),
++            screenshot_sha256: String::new(),
++            receipt_secret: None,
++        };
++        let bytes = canonical("790001001", 1794636000, "AAECAwQFBgcICQoLDA0ODw", &f);
++        assert_eq!(bytes.len(), 197);
++        assert_eq!(
++            format!("{:x}", Sha256::digest(bytes.as_bytes())),
++            "17b0f6aa72bfa5cf56800b3bf494f927de8092de749c5b5538b97f40b568c480"
++        );
++        assert!(valid(&f));
++        f.message = "é".repeat(512);
++        assert!(valid(&f));
++        f.message.push('x');
++        assert!(!valid(&f));
++        f.message.clear();
++        f.category = "hardware".into();
++        assert!(!valid(&f));
++    }
++}
+diff --git a/libs/hbb_common/src/config.rs b/libs/hbb_common/src/config.rs
+index 7a4231a..e383a02 100644
+--- a/libs/hbb_common/src/config.rs
++++ b/libs/hbb_common/src/config.rs
+@@ -628,12 +628,8 @@ impl Config {
+         suffix: &str,
+     ) -> T {
+         let file = Self::file_(suffix);
+-        let cfg = load_path(file);
+-        #[cfg(not(target_os = "android"))]
+-        if suffix.is_empty() {
+-            log::trace!("{:?}", cfg);
+-        }
+-        cfg
++        // The identity configuration contains the device secret key.
++        load_path(file)
+     }
+ 
+     fn store_<T: serde::Serialize>(config: &T, suffix: &str) {
