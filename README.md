@@ -51,6 +51,10 @@ The support build records ordinary outgoing remote desktop sessions locally by d
 
 Set `STEADDESK_METRICS=false` when configuring the build (or in the GitHub Actions repository variables) to disable both collection and export. Merchant builds always omit the recorder.
 
+### Support session reconnect
+
+The desktop support edition keeps the same remote window during a retryable disconnection. It sends up to three automatic reconnect requests. After the third unsuccessful request, choose **Retry** or **End session**. Password prompts and insecure-connection refusals remain under user control. Set `STEADDESK_RECONNECT=false` at build time to use the upstream retry behavior.
+
 ### Support session quality
 
 The support toolbar starts in Auto. During the first five seconds after the route is ready it collects new delay reports. With samples available, relay or a median above 150 ms selects Low. Otherwise it selects Balanced, including when there are no samples. A manual choice takes over for the session. The quality indicator turns grey after five seconds without a fresh delay. Hover over it for display frame rates.

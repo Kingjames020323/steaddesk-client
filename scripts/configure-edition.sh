@@ -37,6 +37,10 @@ quality = os.environ.get("STEADDESK_QUALITY", "").strip().lower()
 if quality not in ("", "0", "1", "false", "true"):
     raise ValueError("STEADDESK_QUALITY must be true, false, 1 or 0")
 quality_enabled = not merchant and quality not in ("0", "false")
+reconnect = os.environ.get("STEADDESK_RECONNECT", "").strip().lower()
+if reconnect not in ("", "0", "1", "false", "true"):
+    raise ValueError("STEADDESK_RECONNECT must be true, false, 1 or 0")
+reconnect_enabled = not merchant and reconnect not in ("0", "false")
 module = "support_metrics" if enabled else "support_metrics_off"
 (lib / "metrics_api.dart").write_text(f"export 'metrics/{module}.dart';\n", encoding="utf-8")
 # The merchant and disabled builds never import the case form or its storage.
@@ -50,6 +54,7 @@ def dart_string(value):
 (tree / "flutter/lib/steaddesk/merchant_build.dart").write_text(
     "const merchantEdition = " + str(merchant).lower() + ";\n"
     "const qualityEnabled = " + str(quality_enabled).lower() + ";\n"
+    "const reconnectEnabled = " + str(reconnect_enabled).lower() + ";\n"
     "const casesEnabled = " + str(cases).lower() + ";\n"
     "const merchantVersion = " + dart_string((tree / "RELEASE_VERSION").read_text().strip()) + ";\n"
     "const merchantPhone = String.fromEnvironment('STEADDESK_SUPPORT_PHONE', defaultValue: "
