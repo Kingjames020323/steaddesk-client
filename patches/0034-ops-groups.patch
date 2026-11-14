@@ -1,0 +1,2853 @@
+diff --git a/flutter/lib/models/ab_model.dart b/flutter/lib/models/ab_model.dart
+index 80742f7..c778ea5 100644
+--- a/flutter/lib/models/ab_model.dart
++++ b/flutter/lib/models/ab_model.dart
+@@ -13,6 +13,8 @@ import 'package:bot_toast/bot_toast.dart';
+ 
+ import '../utils/http_service.dart' as http;
+ import '../common.dart';
++import '../steaddesk/merchant_build.dart' show opsGroupsEnabled;
++import '../steaddesk/shared_profiles.dart';
+ 
+ final syncAbOption = 'sync-ab-with-recent-sessions';
+ bool shouldSyncAb() {
+@@ -68,6 +70,8 @@ class AbModel {
+   var _syncAllFromRecent = true;
+   var _syncFromRecentLock = false;
+   var _timerCounter = 0;
++  int _profilesRevision = 0;
++  Future<void> _cacheWrites = Future.value();
+   var _cacheLoadOnceFlag = false;
+   var _pulledOnce = false;
+   var listInitialized = false;
+@@ -101,6 +105,10 @@ class AbModel {
+     _currentName.value = '';
+     _listPullError.value = '';
+     _pulledOnce = false;
++    if (opsGroupsEnabled) {
++      _profilesRevision++;
++      await _cacheWrites;
++    }
+     await bind.mainClearAb();
+     listInitialized = false;
+   }
+@@ -145,6 +153,7 @@ class AbModel {
+     debugPrint("pullAb, force: $force, quiet: $quiet");
+     if (!listInitialized || force == ForcePullAb.listAndCurrent) {
+       try {
++        final session = opsGroupsEnabled ? bind.mainGetLocalOption(key: 'access_token') : null;
+         // Read personal guid every time to avoid upgrading the server without closing the main window
+         _personalAbGuid = null;
+         // `true`: continue init. `false`: stop, error already recorded.
+@@ -161,7 +170,21 @@ class AbModel {
+           abProfiles.add(AbProfile(_personalAbGuid!, _personalAddressBookName,
+               gFFI.userModel.userName.value, null, ShareRule.read.value, null));
+           // get all address book name
+-          await _getSharedAbProfiles(abProfiles, quiet: quiet);
++          final complete = await _getSharedAbProfiles(abProfiles, quiet: quiet);
++          if (opsGroupsEnabled) {
++            if (!complete || session != bind.mainGetLocalOption(key: 'access_token')) return;
++            _profilesRevision++;
++            final allowed = {for (final p in abProfiles) p.name: p.guid};
++            pruneSharedBooks<BaseAb>(addressbooks, allowed,
++                (book) => book.sharedProfile()?.guid, (book) {
++              book.peers.clear();
++              book.tags.clear();
++              book.tagColors.clear();
++              book.sharedProfile()?.info = null;
++            });
++            // Persist the revocation even if the next peers request fails.
++            await _saveCache();
++          }
+           addressbooks.removeWhere((key, value) =>
+               abProfiles.firstWhereOrNull((e) => e.name == key) == null);
+           for (int i = 0; i < abProfiles.length; i++) {
+@@ -299,6 +322,7 @@ class AbModel {
+     try {
+       var uri0 = Uri.parse(api);
+       final pageSize = 100;
++      final pages = SharedProfilePages();
+       var total = 0;
+       int current = 0;
+       do {
+@@ -330,6 +354,14 @@ class AbModel {
+         if (statusCode != 200) {
+           throw 'HTTP $statusCode';
+         }
++        if (opsGroupsEnabled) {
++          if (!pages.add(json)) {
++            total = pages.expected!;
++            continue;
++          }
++          profiles.addAll(pages.named(_personalAddressBookName).map(AbProfile.fromJson));
++          return true;
++        }
+         if (json.containsKey('total')) {
+           if (total == 0) total = json['total'];
+           if (json.containsKey('data')) {
+@@ -347,7 +379,7 @@ class AbModel {
+             }
+           }
+         }
+-      } while (current * pageSize < total);
++      } while (opsGroupsEnabled || current * pageSize < total);
+       return true;
+     } catch (err) {
+       debugPrint('_getSharedAbProfiles err: ${err.toString()}');
+@@ -601,14 +633,25 @@ class AbModel {
+ // #endregion
+ 
+ // #region cache
+-  _saveCache() {
++  Future<void> _saveCache() async {
+     try {
+       var ab_entries = _serializeCache();
+       Map<String, dynamic> m = <String, dynamic>{
+         "access_token": bind.mainGetLocalOption(key: 'access_token'),
+         "ab_entries": ab_entries,
+       };
+-      bind.mainSaveAb(json: jsonEncode(m));
++      final encoded = jsonEncode(m);
++      if (opsGroupsEnabled) {
++        final next = _cacheWrites.then((_) async {
++          if (m['access_token'] == bind.mainGetLocalOption(key: 'access_token')) {
++            await bind.mainSaveAb(json: encoded);
++          }
++        });
++        _cacheWrites = next.catchError((Object _) {});
++        await next;
++      } else {
++        bind.mainSaveAb(json: encoded);
++      }
+     } catch (e) {
+       debugPrint('ab save:$e');
+     }
+@@ -644,7 +687,10 @@ class AbModel {
+       _cacheLoadOnceFlag = true;
+       final access_token = bind.mainGetLocalOption(key: 'access_token');
+       if (access_token.isEmpty) return;
++      final revision = _profilesRevision;
+       final cache = await bind.mainLoadAb();
++      if (opsGroupsEnabled && (revision != _profilesRevision || revision != 0 ||
++          access_token != bind.mainGetLocalOption(key: 'access_token'))) return;
+       if (currentAbLoading.value) return;
+       final data = jsonDecode(cache);
+       if (data == null || data['access_token'] != access_token) return;
+diff --git a/flutter/lib/steaddesk/device_card.dart b/flutter/lib/steaddesk/device_card.dart
+index 0520d9d..3bdfd9a 100644
+--- a/flutter/lib/steaddesk/device_card.dart
++++ b/flutter/lib/steaddesk/device_card.dart
+@@ -96,7 +96,7 @@ class _DeviceCardState extends State<_DeviceCard> {
+   void initState() {
+     super.initState();
+     groups = _groups();
+-    _PersonalGroups.changes.addListener(_reloadGroups);
++    if (!_useOps) _PersonalGroups.changes.addListener(_reloadGroups);
+     focus.addListener(_blur);
+   }
+ 
+@@ -109,8 +109,9 @@ class _DeviceCardState extends State<_DeviceCard> {
+     }
+   }
+ 
+-  Future<List<String>> _groups() =>
+-      _PersonalGroups.store.forDevice(account, widget.row.device.id);
++  Future<List<String>> _groups() => _useOps
++      ? Future.value([])
++      : _PersonalGroups.store.forDevice(account, widget.row.device.id);
+   void _reloadGroups() => setState(() => groups = _groups());
+   void _blur() {
+     if (!focus.hasFocus) _save();
+@@ -139,7 +140,7 @@ class _DeviceCardState extends State<_DeviceCard> {
+     focus.removeListener(_blur);
+     focus.dispose();
+     editor.dispose();
+-    _PersonalGroups.changes.removeListener(_reloadGroups);
++    if (!_useOps) _PersonalGroups.changes.removeListener(_reloadGroups);
+     super.dispose();
+   }
+ 
+@@ -286,13 +287,15 @@ class _DeviceCardState extends State<_DeviceCard> {
+                               crossAxisAlignment: WrapCrossAlignment.center,
+                               children: [
+                                 TextButton(
+-                                    onPressed: () => dir._connect(row),
++                                    onPressed: dir._restricted(d.id)
++                                        ? null
++                                        : () => dir._connect(row),
+                                     child: Text(translate('Connect'))),
+                                 TextButton(
+-                                    onPressed: () => connectInPeerTab(context,
+-                                        row.source.peer, row.source.tab,
+-                                        addressBook: book,
+-                                        isFileTransfer: true),
++                                    onPressed: dir._restricted(d.id)
++                                        ? null
++                                        : () =>
++                                            dir._connect(row, transfer: true),
+                                     child: Text(translate('Transfer file'))),
+                                 TextButton(
+                                     onPressed: () => dir._details(row),
+@@ -317,7 +320,13 @@ class _DeviceCardState extends State<_DeviceCard> {
+                             [d.model, d.platform]
+                                 .where((s) => s.isNotEmpty)
+                                 .join(' · ')),
+-                      if (d.merchant != null)
++                      if (_useOps)
++                        for (final group in dir.ops?.shared ?? <OpsGroup>[])
++                          if (group.deviceIds.contains(d.id))
++                            _info('共享分组', group.name,
++                                tap: () =>
++                                    dir.selectScope('shared/${group.id}')),
++                      if (!_useOps && d.merchant != null)
+                         _info(
+                             'Merchant / store',
+                             [
+@@ -327,11 +336,17 @@ class _DeviceCardState extends State<_DeviceCard> {
+                             ].join(' › '),
+                             tap: () =>
+                                 dir.selectScope('${d.merchant}/${d.store}')),
+-                      FutureBuilder<List<String>>(
+-                          future: groups,
+-                          builder: (_, snap) => (snap.data ?? []).isEmpty
+-                              ? const SizedBox.shrink()
+-                              : _info('My groups', snap.data!.join(' · '))),
++                      if (_useOps)
++                        for (final group in dir.groups)
++                          if (group.devices.contains(d.id))
++                            _info('My groups', group.name,
++                                tap: () => dir.selectScope('mine/${group.id}')),
++                      if (!_useOps)
++                        FutureBuilder<List<String>>(
++                            future: groups,
++                            builder: (_, snap) => (snap.data ?? []).isEmpty
++                                ? const SizedBox.shrink()
++                                : _info('My groups', snap.data!.join(' · '))),
+                       if (shared)
+                         _info(
+                             'Access password',
+diff --git a/flutter/lib/steaddesk/ops_group_controls.dart b/flutter/lib/steaddesk/ops_group_controls.dart
+new file mode 100644
+index 0000000..a0972c4
+--- /dev/null
++++ b/flutter/lib/steaddesk/ops_group_controls.dart
+@@ -0,0 +1,369 @@
++part of 'support_home.dart';
++
++const _useOps = opsGroupsEnabled && !merchantEdition;
++
++extension _OpsControls on _DirectoryState {
++  bool get opsAdmin => ops != null && gFFI.userModel.isAdmin.value;
++  bool get canWrite => ops?.online == true;
++  bool get canManage => canWrite && opsAdmin;
++  OpsGroup? serverGroup(String id) =>
++      [...?ops?.mine, ...?ops?.shared].firstWhereOrNull((g) => g.id == id);
++
++  Widget _unavailable(String id, PersonalGroup group) => ListTile(
++      leading: const Icon(Icons.lock_outline),
++      title: Text(id),
++      subtitle: const Text('无权限或已移除'),
++      trailing: IconButton(
++        tooltip: '从我的分组移除',
++        icon: const Icon(Icons.remove_circle_outline),
++        onPressed:
++            !canWrite ? null : () => privateMembers(group, [id], remove: true),
++      ));
++
++  Widget _opsTree(Widget all) {
++    final store = ops;
++    final shared = store?.shared ?? <OpsGroup>[];
++    final viewed = store?.serverTime?.toLocal();
++    final time = viewed == null
++        ? ''
++        : '${viewed.hour.toString().padLeft(2, '0')}:${viewed.minute.toString().padLeft(2, '0')}';
++    Widget node(OpsGroup group, bool child) => OpsGroupTile(
++        name: group.name,
++        childGroup: child,
++        selected: scope == 'shared/${group.id}',
++        pending: group.pending,
++        admin: opsAdmin,
++        online: canWrite,
++        onSelect: () => selectScope('shared/${group.id}'),
++        onAction: (action) => _sharedAction(action, group));
++    final parentIds = shared.map((g) => g.id).toSet();
++    return ListView(children: [
++      all,
++      ListTile(
++          dense: true,
++          title: const Text('共享分组'),
++          trailing: opsAdmin
++              ? IconButton(
++                  tooltip: '新建共享分组',
++                  icon: const Icon(Icons.add),
++                  onPressed:
++                      canManage ? () => _sharedAction('create', null) : null)
++              : null),
++      if (!canWrite)
++        Padding(
++            padding: const EdgeInsets.symmetric(horizontal: 12),
++            child: Text(widget.store?.signedOut == true
++                ? '登录已过期，请重新登录。'
++                : time.isEmpty
++                    ? '离线，暂无已同步的分组'
++                    : '离线，显示的是 $time 的数据')),
++      if (store?.problem != null && store?.signedOut != true)
++        Padding(
++            padding: const EdgeInsets.symmetric(horizontal: 12),
++            child: Text(store!.problem!)),
++      for (final parent
++          in shared.where((g) => !parentIds.contains(g.parentId))) ...[
++        node(parent, false),
++        for (final child in shared.where((g) => g.parentId == parent.id))
++          node(child, true),
++      ],
++      ListTile(
++          dense: true,
++          selected: scope == '?',
++          title: const Text('未分组'),
++          onTap: () => selectScope('?')),
++      const Divider(height: 1),
++      ListTile(
++          dense: true,
++          title: const Text('我的分组'),
++          trailing: IconButton(
++              tooltip: '新建我的分组',
++              icon: const Icon(Icons.add),
++              onPressed: canWrite ? () => createGroup(account) : null)),
++      for (final group in groups) personalNode(group, account),
++    ]);
++  }
++
++  Future<void> privateMembers(PersonalGroup group, Iterable<String> ids,
++      {bool remove = false}) async {
++    if (!canWrite) return;
++    await _opsEdit(
++        title: remove ? '从我的分组移除' : '加入我的分组',
++        personal: true,
++        group: serverGroup(group.id),
++        version: group.version,
++        method: 'PATCH',
++        route: 'me/groups/${group.id}',
++        fields: {remove ? 'remove' : 'add': ids.join(', ')});
++  }
++
++  Future<void> _sharedAction(String action, OpsGroup? group) async {
++    final store = ops;
++    if (store == null ||
++        (group != null && !store.shared.any((g) => g.id == group.id))) return;
++    if (action == 'details' && group != null) {
++      try {
++        if (!await currentOpsIdentity(store)) return;
++        final g = store.online ? await store.detail(group.id) : group;
++        if (!mounted || !identical(store, ops)) return;
++        await _detailsGroup(g.name, [
++          if (g.owner != null) '负责人 · ${g.owner}',
++          if (g.viewers != null) '可见名单 · ${g.viewers!.join(', ')}',
++          if (g.pending) '同步中',
++          ...g.deviceIds,
++        ]);
++      } on OpsError catch (e) {
++        if (mounted && identical(store, ops)) showToast(e.toString());
++      }
++      return;
++    }
++    if (!canManage) return;
++    if (action == 'move' && group != null) {
++      final options = store.shared.where((g) => g.id != group.id).toList();
++      final to = await showDialog<OpsGroup>(
++          context: context,
++          builder: (ctx) => SimpleDialog(title: const Text('移动到分组'), children: [
++                if (options.isEmpty) const ListTile(title: Text('没有其他分组')),
++                for (final g in options)
++                  SimpleDialogOption(
++                      onPressed: () => Navigator.pop(ctx, g),
++                      child: Text(g.name)),
++              ]));
++      if (to == null || !mounted || !identical(ops, store)) return;
++      await _opsEdit(
++          title: '${group.name} → ${to.name}',
++          group: group,
++          destination: to,
++          method: 'POST',
++          route: 'devices/move',
++          fields: {'device': ''});
++      return;
++    }
++    final create = action == 'create';
++    final fields = switch (action) {
++      'create' || 'edit' => {
++          'name': group?.name ?? '',
++          'owner': group?.owner ?? '',
++          'parent_id': group?.parentId ?? ''
++        },
++      'viewers' => {'viewers': group?.viewers?.join(', ') ?? ''},
++      'devices' => {'add': '', 'remove': ''},
++      _ => <String, String>{},
++    };
++    final route = create ? 'groups' : 'groups/${group!.id}';
++    await _opsEdit(
++        title: switch (action) {
++          'create' => '新建共享分组',
++          'edit' => '修改分组',
++          'delete' => '删除分组',
++          'devices' => '增减设备',
++          _ => '谁能看到',
++        },
++        group: group,
++        method: switch (action) {
++          'delete' => 'DELETE',
++          'edit' => 'PATCH',
++          'viewers' => 'PUT',
++          _ => 'POST',
++        },
++        route: action == 'devices' || action == 'viewers'
++            ? '$route/$action'
++            : route,
++        fields: fields);
++  }
++
++  Future<void> _opsEdit(
++      {required String title,
++      required String method,
++      required String route,
++      required Map<String, String> fields,
++      OpsGroup? group,
++      OpsGroup? destination,
++      bool personal = false,
++      int? version}) async {
++    final store = ops;
++    if (store == null || !canWrite || (!personal && !canManage)) return;
++    var expected = version ?? group?.version;
++    var toVersion = destination?.version;
++    var busy = false;
++    var error = '';
++    var latest = '';
++    final draft = Map<String, String>.from(fields);
++    const labels = {
++      'name': '分组名',
++      'owner': '负责人账号',
++      'parent_id': '上级分组',
++      'viewers': '可见账号（逗号分隔）',
++      'add': '加入设备 ID（逗号分隔）',
++      'remove': '移除设备 ID（逗号分隔）',
++      'device': '要移动的设备 ID',
++      'device_ids': '设备 ID（逗号分隔）',
++    };
++    List<String> items(String value) => value
++        .split(RegExp(r'[,，\s]+'))
++        .where((id) => id.isNotEmpty)
++        .toSet()
++        .toList();
++    await showDialog<void>(
++        context: context,
++        builder: (ctx) => StatefulBuilder(
++            builder: (ctx, paint) => AnimatedBuilder(
++                animation: store,
++                builder: (_, __) {
++                  final valid = mounted &&
++                      identical(store, ops) &&
++                      (personal || opsAdmin);
++                  if (!valid)
++                    return AlertDialog(title: const Text('账号或权限已更改'), actions: [
++                      TextButton(
++                          onPressed: () => Navigator.pop(ctx),
++                          child: const Text('关闭'))
++                    ]);
++                  return AlertDialog(
++                      title: Text(title),
++                      content: SizedBox(
++                          width: 360,
++                          child: SingleChildScrollView(
++                              child: Column(
++                                  mainAxisSize: MainAxisSize.min,
++                                  crossAxisAlignment: CrossAxisAlignment.start,
++                                  children: [
++                                if (group != null) Text(group.name),
++                                if (method == 'DELETE')
++                                  const Text('确认删除这个分组？设备将保留。'),
++                                for (final key in fields.keys)
++                                  if (key == 'parent_id')
++                                    DropdownButtonFormField<String>(
++                                        value: store.shared
++                                                .any((g) => g.id == draft[key])
++                                            ? draft[key]
++                                            : '',
++                                        decoration: InputDecoration(
++                                            labelText: labels[key]),
++                                        items: [
++                                          const DropdownMenuItem(
++                                              value: '', child: Text('无')),
++                                          for (final g in store.shared.where(
++                                              (g) =>
++                                                  g.parentId == null &&
++                                                  g.id != group?.id))
++                                            DropdownMenuItem(
++                                                value: g.id,
++                                                child: Text(g.name)),
++                                        ],
++                                        onChanged: busy || !store.online
++                                            ? null
++                                            : (v) => draft[key] = v ?? '')
++                                  else
++                                    TextFormField(
++                                        initialValue: draft[key],
++                                        enabled: !busy && store.online,
++                                        decoration: InputDecoration(
++                                            labelText: labels[key]),
++                                        onChanged: (value) =>
++                                            draft[key] = value),
++                                if (error.isNotEmpty)
++                                  Text(error,
++                                      style:
++                                          const TextStyle(color: Colors.red)),
++                                if (latest.isNotEmpty) SelectableText(latest),
++                              ]))),
++                      actions: [
++                        TextButton(
++                            onPressed: busy ? null : () => Navigator.pop(ctx),
++                            child: const Text('取消')),
++                        TextButton(
++                            onPressed: !store.online || busy
++                                ? null
++                                : () async {
++                                    if (!mounted ||
++                                        !identical(store, ops) ||
++                                        (!personal && !canManage)) return;
++                                    paint(() {
++                                      busy = true;
++                                      error = '';
++                                    });
++                                    try {
++                                      final data = <String, dynamic>{
++                                        for (final e in draft.entries)
++                                          e.key: [
++                                            'viewers',
++                                            'add',
++                                            'remove',
++                                            'device_ids'
++                                          ].contains(e.key)
++                                              ? items(e.value)
++                                              : e.key == 'parent_id' &&
++                                                      e.value.isEmpty
++                                                  ? null
++                                                  : e.value.trim()
++                                      };
++                                      var path = route;
++                                      if (destination != null) {
++                                        final id = directSupportId(
++                                            draft['device'] ?? '');
++                                        if (id == null)
++                                          throw const FormatException();
++                                        path = 'devices/$id/move';
++                                        data.clear();
++                                        data['from'] = {
++                                          'id': group!.id,
++                                          'version': expected
++                                        };
++                                        data['to'] = {
++                                          'id': destination.id,
++                                          'version': toVersion
++                                        };
++                                      }
++                                      if (!await currentOpsIdentity(store) ||
++                                          (!personal && !canManage)) {
++                                        throw const OpsError(
++                                            403, '账号或权限已更改，请重新打开分组。');
++                                      }
++                                      await store.write(method, path,
++                                          version: destination == null
++                                              ? expected
++                                              : null,
++                                          body:
++                                              method == 'DELETE' ? null : data);
++                                      if (ctx.mounted) Navigator.pop(ctx);
++                                    } on OpsError catch (e) {
++                                      if (!ctx.mounted ||
++                                          !mounted ||
++                                          !identical(store, ops)) return;
++                                      paint(() {
++                                        error = e.toString();
++                                        if (e.status == 409 && group != null) {
++                                          final current = serverGroup(group.id);
++                                          final to = destination == null
++                                              ? null
++                                              : serverGroup(destination.id);
++                                          final snapshots = [
++                                            if (current != null) current,
++                                            if (to != null) to
++                                          ];
++                                          latest = snapshots
++                                              .map((g) =>
++                                                  '服务器版本 ${g.version} · ${g.name}\n负责人：${g.owner ?? '—'}\n可见账号：${g.viewers?.join(', ') ?? '—'}\n设备：${g.deviceIds.join(', ')}')
++                                              .join('\n');
++                                          expected =
++                                              current?.version ?? expected;
++                                          toVersion = to?.version ?? toVersion;
++                                        }
++                                      });
++                                    } on FormatException {
++                                      if (ctx.mounted)
++                                        paint(() => error = '请输入有效的设备 ID。');
++                                    } catch (_) {
++                                      if (ctx.mounted)
++                                        paint(() => error = '保存失败，请检查网络后重试。');
++                                    } finally {
++                                      if (ctx.mounted)
++                                        paint(() => busy = false);
++                                    }
++                                  },
++                            child: Text(latest.isEmpty ? '保存' : '确认后保存')),
++                      ]);
++                })));
++  }
++}
+diff --git a/flutter/lib/steaddesk/ops_group_tile.dart b/flutter/lib/steaddesk/ops_group_tile.dart
+new file mode 100644
+index 0000000..e142f6b
+--- /dev/null
++++ b/flutter/lib/steaddesk/ops_group_tile.dart
+@@ -0,0 +1,46 @@
++import 'package:flutter/material.dart';
++
++class OpsGroupTile extends StatelessWidget {
++  final String name;
++  final bool selected, childGroup, pending, admin, online;
++  final VoidCallback onSelect;
++  final ValueChanged<String> onAction;
++
++  const OpsGroupTile(
++      {super.key,
++      required this.name,
++      required this.selected,
++      required this.childGroup,
++      required this.pending,
++      required this.admin,
++      required this.online,
++      required this.onSelect,
++      required this.onAction});
++
++  @override
++  Widget build(BuildContext context) => ListTile(
++      dense: true,
++      contentPadding: EdgeInsets.only(left: childGroup ? 28 : 10, right: 2),
++      selected: selected,
++      title: Text(name, overflow: TextOverflow.ellipsis),
++      subtitle: pending ? const Text('同步中') : null,
++      onTap: onSelect,
++      trailing: PopupMenuButton<String>(
++          tooltip: '分组选项',
++          onSelected: onAction,
++          itemBuilder: (_) => [
++                const PopupMenuItem(value: 'details', child: Text('查看详情')),
++                if (admin)
++                  for (final entry in const {
++                    'edit': '修改分组',
++                    'viewers': '谁能看到',
++                    'devices': '增减设备',
++                    'move': '移动设备',
++                    'delete': '删除分组'
++                  }.entries)
++                    PopupMenuItem(
++                        enabled: online,
++                        value: entry.key,
++                        child: Text(entry.value)),
++              ]));
++}
+diff --git a/flutter/lib/steaddesk/ops_groups.dart b/flutter/lib/steaddesk/ops_groups.dart
+new file mode 100644
+index 0000000..fdf316c
+--- /dev/null
++++ b/flutter/lib/steaddesk/ops_groups.dart
+@@ -0,0 +1,522 @@
++import 'dart:async';
++import 'dart:convert';
++import 'dart:io';
++
++import 'package:flutter/foundation.dart';
++import 'package:uuid/uuid.dart';
++
++import 'personal_groups.dart';
++
++class OpsError implements Exception {
++  final int status;
++  final String message;
++  const OpsError(this.status, this.message);
++  @override
++  String toString() => message;
++}
++
++class OpsGroup {
++  final String id, name;
++  final Set<String> deviceIds;
++  final int version;
++  final String? parentId, owner, abGuid;
++  final List<String>? viewers;
++  final bool pending;
++  final DateTime updatedAt;
++
++  OpsGroup._(this.id, this.name, this.deviceIds, this.version, this.parentId,
++      this.owner, this.abGuid, this.viewers, this.pending, this.updatedAt);
++
++  factory OpsGroup.fromJson(Map<String, dynamic> row) => OpsGroup._(
++        row['id'] as String,
++        row['name'] as String,
++        Set.unmodifiable((row['device_ids'] as List).cast<String>()),
++        row['version'] as int,
++        row['parent_id'] as String?,
++        row['owner'] as String?,
++        row['ab_guid'] as String?,
++        row['viewers'] == null
++            ? null
++            : List.unmodifiable((row['viewers'] as List).cast<String>()),
++        row['projection'] == 'pending',
++        DateTime.parse(row['updated_at']).toUtc(),
++      );
++
++  // Only cache fields interpreted by this client; detail responses also contain audit.
++  Map<String, dynamic> toJson() => {
++        'id': id,
++        'name': name,
++        'device_ids': deviceIds.toList(),
++        'version': version,
++        'parent_id': parentId,
++        'owner': owner,
++        'ab_guid': abGuid,
++        'viewers': viewers,
++        'projection': pending ? 'pending' : 'ok',
++        'updated_at': updatedAt.toIso8601String(),
++      };
++}
++
++class OpsGroupStore extends ChangeNotifier {
++  final Uri _base;
++  final String _token;
++  final String account;
++  final File cache;
++  final PersonalGroups local;
++  final Future<void> Function() refreshBooks;
++  final HttpClient _http = HttpClient()
++    ..connectionTimeout = const Duration(seconds: 8)
++    ..findProxy = ((_) => 'DIRECT');
++  final Duration pollInterval, reconnectDelay;
++  OpsGroupStore(
++      {required Uri origin,
++      required String token,
++      required this.account,
++      required this.cache,
++      required this.local,
++      required this.refreshBooks,
++      this.pollInterval = const Duration(minutes: 5),
++      this.reconnectDelay = const Duration(seconds: 1)})
++      : _base = _endpoint(origin),
++        _token = token {
++    if (account.isEmpty || token.isEmpty) throw ArgumentError('Missing login');
++  }
++
++  static Uri _endpoint(Uri origin) {
++    final loopback = origin.host == 'localhost' ||
++        (InternetAddress.tryParse(origin.host)?.isLoopback ?? false);
++    if ((origin.scheme != 'https' && !(origin.scheme == 'http' && loopback)) ||
++        origin.host.isEmpty ||
++        origin.userInfo.isNotEmpty ||
++        origin.hasQuery ||
++        origin.hasFragment ||
++        !{'', '/', '/ops/v1', '/ops/v1/'}.contains(origin.path)) {
++      throw ArgumentError('Invalid ops origin');
++    }
++    return origin.replace(path: '/ops/v1/');
++  }
++
++  List<OpsGroup> _shared = const [], _mine = const [];
++  List<OpsGroup> get shared => _shared;
++  List<OpsGroup> get mine => _mine;
++  DateTime? _serverTime;
++  DateTime? get serverTime => _serverTime;
++  bool _online = false, _ended = false, _disposed = false;
++  bool get online => _online;
++  bool get signedOut => _ended;
++  String? problem;
++  bool get _active => !_ended && !_disposed;
++  static const _expired = OpsError(401, '登录已过期，请重新登录。');
++  static const _unavailable = OpsError(0, '无法连接分组服务，请检查网络后重试。');
++  Future<void>? _start, _refresh, _logout;
++  Future<void> _work = Future.value();
++  Timer? _poll, _retry;
++  int _retries = 0;
++  String? _cursor, _pendingCursor;
++  Timer? _eventTimer;
++  HttpClient? _feed;
++  bool _readingEvents = false;
++  int _connection = 0;
++  bool _migrated = false;
++
++  // Order replacement and removal across login instances sharing the same file.
++  static final Map<String, Future<void>> _fileWork = {};
++  Future<void> _file(Future<void> Function() action) {
++    final key = cache.absolute.path;
++    final next = (_fileWork[key] ?? Future<void>.value()).then((_) => action());
++    final tail = next.then<void>((_) {}, onError: (Object _) {});
++    _fileWork[key] = tail;
++    tail.then((_) {
++      if (identical(_fileWork[key], tail)) _fileWork.remove(key);
++    });
++    return next;
++  }
++
++  void _check() {
++    if (!_active) throw _expired;
++  }
++
++  Future<T> _queue<T>(Future<T> Function() action) {
++    final next = _work.then((_) {
++      _check();
++      return action();
++    });
++    _work = next.then<void>((_) {}, onError: (Object _) {});
++    return next;
++  }
++
++  static List<OpsGroup> _list(dynamic values) =>
++      List.unmodifiable((values as List)
++          .where((r) => r['deleted'] != true)
++          .map((r) => OpsGroup.fromJson(r as Map<String, dynamic>)));
++
++  Future<void> _load() => _file(() async {
++        if (!_active || !await cache.exists()) return;
++        try {
++          final row = jsonDecode(await cache.readAsString());
++          if (row['origin'] != _base.toString() || row['account'] != account) {
++            return;
++          }
++          final shared = _list(row['shared']), mine = _list(row['mine']);
++          final stamp = DateTime.parse(row['server_time']).toUtc();
++          _check();
++          _shared = shared;
++          _mine = mine;
++          _serverTime = stamp;
++          notifyListeners();
++        } on FormatException {
++          return;
++        } on TypeError {
++          return;
++        }
++      });
++
++  Future<void> _save() => _file(() async {
++        if (!_active) return;
++        final snapshot = jsonEncode({
++          'account': account,
++          'origin': _base.toString(),
++          'shared': _shared,
++          'mine': _mine,
++          'server_time': _serverTime!.toIso8601String()
++        });
++        await cache.parent.create(recursive: true);
++        final tmp = File('${cache.path}.${const Uuid().v4()}.tmp');
++        try {
++          await tmp.writeAsString(snapshot, flush: true);
++          if (_active) await tmp.rename(cache.path);
++        } finally {
++          if (await tmp.exists()) await tmp.delete();
++        }
++      });
++
++  Future<void> start() => _start ??= _begin();
++  Future<void> _begin() async {
++    try {
++      await _load();
++    } on FileSystemException {/* network still available */}
++    if (!_active) return;
++    try {
++      await refresh();
++    } on OpsError {/* cached/offline state is observable */}
++    if (!_active) return;
++    _poll = Timer.periodic(pollInterval, (_) => _backgroundRefresh());
++    unawaited(_events());
++  }
++
++  Future<HttpClientResponse> _open(String method, String route,
++      {Map<String, dynamic>? body,
++      int? version,
++      bool stream = false,
++      HttpClient? client}) async {
++    _check();
++    if (!RegExp(r'^[a-zA-Z0-9_-]+(?:/[a-zA-Z0-9_-]+)*$').hasMatch(route)) {
++      throw const OpsError(400, '无效的分组地址。');
++    }
++    final req = await (client ?? _http)
++        .openUrl(method, _base.resolve(route))
++        .timeout(const Duration(seconds: 10));
++    _check();
++    req.followRedirects = false;
++    req.headers.set(HttpHeaders.authorizationHeader, 'Bearer $_token');
++    req.headers.set(HttpHeaders.acceptHeader,
++        stream ? 'text/event-stream' : 'application/json');
++    if (stream && _cursor != null) req.headers.set('Last-Event-ID', _cursor!);
++    if (method != 'GET') {
++      req.headers.set('Idempotency-Key', const Uuid().v4());
++      if (version != null) req.headers.set('If-Match', '"$version"');
++      if (body != null) {
++        req.headers.contentType = ContentType.json;
++        final bytes = utf8.encode(jsonEncode(body));
++        req.contentLength = bytes.length;
++        req.add(bytes);
++      } else {
++        req.contentLength = 0;
++      }
++    }
++    final response = await req.close().timeout(const Duration(seconds: 15));
++    _check();
++    if (response.statusCode == 401) {
++      await logout();
++      throw _expired;
++    }
++    return response;
++  }
++
++  static OpsError _error(int status, String text) {
++    switch (status) {
++      case 403:
++        return OpsError(status, '只有管理员可以修改分组。');
++      case 404:
++        return OpsError(status, '这个分组已不存在，或你没有权限查看。');
++      case 409:
++        return OpsError(status, '这个分组刚被别人改过，请查看最新内容后再保存。');
++      case 412:
++        return OpsError(status, '缺少分组版本，请刷新后重试。');
++      case 422:
++        if (text.contains('unknown_device')) {
++          return OpsError(status, '找不到这台设备，请确认它已经完成出货登记。');
++        }
++        if (text.contains('同名') || text.contains('already')) {
++          return OpsError(status, '已有同名分组。');
++        }
++        return OpsError(status, '分组内容不符合要求，请核对名称和设备数量。');
++      case 429:
++        return OpsError(status, '操作太频繁，请稍后再试。');
++      default:
++        return OpsError(
++            status, status >= 500 ? _unavailable.message : '分组请求失败，请检查后重试。');
++    }
++  }
++
++  Future<Map<String, dynamic>> _json(String method, String route,
++      {Map<String, dynamic>? body, int? version}) async {
++    try {
++      final response = await _open(method, route, body: body, version: version);
++      final text = await utf8.decoder
++          .bind(response)
++          .join()
++          .timeout(const Duration(seconds: 15));
++      _check();
++      if (response.statusCode < 200 || response.statusCode >= 300) {
++        throw _error(response.statusCode, text);
++      }
++      return text.isEmpty ? {} : jsonDecode(text) as Map<String, dynamic>;
++    } on OpsError {
++      rethrow;
++    } on Exception {
++      throw _unavailable;
++    } on TypeError {
++      throw _unavailable;
++    }
++  }
++
++  Future<void> _import() async {
++    if (_migrated) return;
++    final groups = await local.list(account);
++    _check();
++    if (groups.isNotEmpty) {
++      final result = await _json('POST', 'me/groups/import', body: {
++        'format': 'steaddesk.my-groups',
++        'format_version': 1,
++        'groups': [
++          for (final group in groups)
++            {
++              'local_id': group.id,
++              'name': group.name,
++              'device_ids': group.devices.toList(),
++              'updated_at': group.updatedAt.toIso8601String(),
++            }
++        ]
++      });
++      final expected = groups.map((g) => g.id).toSet();
++      final mapping = result['mapping'];
++      if (mapping is! List ||
++          !mapping.every((r) =>
++              r is Map &&
++              r['id'] is String &&
++              (r['id'] as String).isNotEmpty &&
++              {'created', 'merged', 'already_imported'}.contains(r['result']) &&
++              expected.remove(r['local_id'])) ||
++          expected.isNotEmpty) {
++        throw const OpsError(0, '迁移回执不完整，已保留本地分组。');
++      }
++      _check();
++      await local.finishImport(account, groups, active: () => _active);
++    }
++    _check();
++    _migrated = (await local.list(account)).isEmpty;
++  }
++
++  Future<void> refresh() => _refresh ??= _queue(_snapshot).whenComplete(() {
++        _refresh = null;
++      });
++
++  Future<void> _snapshot() async {
++    String? issue;
++    try {
++      try {
++        await _import();
++      } on OpsError catch (error) {
++        if (error.status == 401) rethrow;
++        issue = '个人分组迁移未完成，已保留本地数据。';
++      } on FileSystemException {
++        issue = '个人分组迁移未完成，已保留本地数据。';
++      }
++      final groups = await _json('GET', 'groups');
++      final shared = _list(groups['groups']);
++      final stamp = DateTime.parse(groups['server_time']).toUtc();
++      final mine = _list((await _json('GET', 'me/groups'))['groups']);
++      _check();
++      await refreshBooks();
++      _check();
++      _shared = shared;
++      _mine = mine;
++      _serverTime = stamp;
++      _online = true;
++      try {
++        await _save();
++      } on FileSystemException {
++        issue ??= '分组缓存写入失败。';
++      }
++      _check();
++      problem = issue;
++      notifyListeners();
++    } catch (error) {
++      if (_active) {
++        _online = false;
++        problem = error is OpsError ? error.message : _unavailable.message;
++        notifyListeners();
++      }
++      if (error is OpsError) rethrow;
++      throw _unavailable;
++    }
++  }
++
++  Future<OpsGroup> detail(String id) => _queue(() async {
++        final row = await _json(
++            'GET', '${id.startsWith('m_') ? 'me/groups' : 'groups'}/$id');
++        return OpsGroup.fromJson(row);
++      });
++
++  Future<void> write(String method, String route,
++      {Map<String, dynamic>? body, int? version}) {
++    if (!_active) return Future.error(_expired);
++    if (!_online) return Future.error(const OpsError(0, '离线时无法编辑分组。'));
++    return _queue(() async {
++      if (!_online) throw const OpsError(0, '离线时无法编辑分组。');
++      try {
++        await _json(method, route, body: body, version: version);
++      } on OpsError catch (error) {
++        if (error.status == 409 || error.status == 404 || error.status == 403) {
++          try {
++            await _snapshot();
++          } on OpsError {/* return the original conflict */}
++        } else if (_active && (error.status == 0 || error.status >= 500)) {
++          _online = false;
++          problem = error.message;
++          notifyListeners();
++        }
++        rethrow;
++      }
++      await _snapshot();
++    });
++  }
++
++  void _backgroundRefresh() {
++    unawaited(refresh().catchError((Object _) {}));
++  }
++
++  // The retained feed can replay 1000 records at once. Keep one trailing
++  // cursor per connection, independent of the network read or a slow snapshot.
++  void _scheduleEvents(int connection) {
++    if (!_active ||
++        _connection != connection ||
++        _eventTimer != null ||
++        _readingEvents ||
++        _pendingCursor == null) return;
++    _eventTimer = Timer(const Duration(seconds: 2), () async {
++      _eventTimer = null;
++      if (!_active || _connection != connection) return;
++      final cursor = _pendingCursor;
++      _pendingCursor = null;
++      _readingEvents = true;
++      try {
++        await _queue(_snapshot);
++        if (_active && _connection == connection) _cursor = cursor;
++      } on OpsError {
++        if (_active && _connection == connection) _pendingCursor ??= cursor;
++      } finally {
++        _readingEvents = false;
++        _scheduleEvents(_connection);
++      }
++    });
++  }
++
++  Future<void> _events() async {
++    final connection = ++_connection;
++    final feed = HttpClient()
++      ..connectionTimeout = const Duration(seconds: 8)
++      ..findProxy = ((_) => 'DIRECT');
++    _feed = feed;
++    try {
++      final res = await _open('GET', 'events', stream: true, client: feed);
++      if (res.statusCode != 200 ||
++          res.headers.contentType?.mimeType != 'text/event-stream') {
++        await res.drain<void>().timeout(const Duration(seconds: 10));
++        return;
++      }
++      // Subscribe first, then resnapshot. The server can silently discard old
++      // events and filters revocations from the former viewer's stream.
++      await _queue(_snapshot);
++      String? eventId;
++      await for (final line in res
++          .timeout(const Duration(seconds: 55))
++          .transform(utf8.decoder)
++          .transform(const LineSplitter())) {
++        _check();
++        if (line.startsWith(':')) {
++          _retries = 0;
++          continue;
++        }
++        if (line.startsWith('id:')) {
++          final id = line.substring(3).trim();
++          if (RegExp(r'^[0-9]{1,18}$').hasMatch(id)) eventId = id;
++        } else if (line.isEmpty && eventId != null) {
++          _pendingCursor = eventId;
++          _scheduleEvents(connection);
++          _retries = 0;
++          eventId = null;
++        }
++      }
++    } catch (_) {
++      // Periodic full reads also run while the stream is down.
++    } finally {
++      feed.close(force: true);
++      _feed = null;
++      _connection++;
++      _pendingCursor = null;
++      _eventTimer?.cancel();
++      _eventTimer = null;
++      if (_active) {
++        const delays = [1, 2, 5, 10, 30];
++        final delay = delays[_retries];
++        if (_retries < delays.length - 1) _retries++;
++        _retry = Timer(reconnectDelay * delay, () => unawaited(_events()));
++        _backgroundRefresh();
++      }
++    }
++  }
++
++  Future<void> logout() {
++    if (_logout != null) return _logout!;
++    _ended = true;
++    _stop();
++    _shared = const [];
++    _mine = const [];
++    _serverTime = null;
++    _online = false;
++    problem = _expired.message;
++    final clear = _file(() async {
++      if (await cache.exists()) await cache.delete();
++    });
++    _logout = clear;
++    if (!_disposed) notifyListeners();
++    return clear;
++  }
++
++  void _stop() {
++    _eventTimer?.cancel();
++    _retry?.cancel();
++    _poll?.cancel();
++    _feed?.close(force: true);
++    _http.close(force: true);
++  }
++
++  @override
++  void dispose() {
++    _disposed = true;
++    _stop();
++    super.dispose();
++  }
++}
+diff --git a/flutter/lib/steaddesk/personal_groups.dart b/flutter/lib/steaddesk/personal_groups.dart
+index 17ce4e9..663edc0 100644
+--- a/flutter/lib/steaddesk/personal_groups.dart
++++ b/flutter/lib/steaddesk/personal_groups.dart
+@@ -7,7 +7,9 @@ class PersonalGroup {
+   String name;
+   final Set<String> devices;
+   DateTime updatedAt;
+-  PersonalGroup(this.id, this.name, this.devices, this.updatedAt);
++  final int version;
++  PersonalGroup(this.id, this.name, this.devices, this.updatedAt,
++      {this.version = 0});
+ 
+   factory PersonalGroup.create(String name, Iterable<String> devices) =>
+       PersonalGroup(
+@@ -162,6 +164,28 @@ class PersonalGroups {
+       _locked((_, accounts) async =>
+           [...?accounts[account]]..sort((a, b) => a.name.compareTo(b.name)));
+ 
++  // Archive only records confirmed by the import response. A concurrent local
++  // edit stays in place for another idempotent import using the same local ID.
++  Future<void> finishImport(String account, List<PersonalGroup> confirmed,
++          {required bool Function() active}) =>
++      _locked((file, accounts) async {
++        if (!active() || confirmed.isEmpty) return;
++        final groups = accounts[account];
++        if (groups == null) return;
++        final snapshots = {for (final g in confirmed) g.id: jsonEncode(g)};
++        final finished =
++            groups.where((g) => snapshots[g.id] == jsonEncode(g)).toList();
++        if (finished.isEmpty) return;
++        final stamp = DateTime.now().toUtc().microsecondsSinceEpoch;
++        final backup = File(
++            '${file.parent.path}/my-groups.imported-$stamp-${const Uuid().v4()}.json');
++        await _save(backup, {account: finished});
++        if (!active()) return;
++        groups.removeWhere(finished.contains);
++        await _save(file, accounts);
++        onChanged();
++      });
++
+   Future<List<String>> forDevice(String account, String id) async =>
+       account.isEmpty
+           ? []
+diff --git a/flutter/lib/steaddesk/shared_profiles.dart b/flutter/lib/steaddesk/shared_profiles.dart
+new file mode 100644
+index 0000000..c9ed6f7
+--- /dev/null
++++ b/flutter/lib/steaddesk/shared_profiles.dart
+@@ -0,0 +1,62 @@
++// rustdesk-api v2.7 returns the entire list with total=0, including data=null
++// when there are no shared profiles. Other compatible issuers may paginate.
++class SharedProfilePages {
++  final profiles = <String, Map<String, dynamic>>{};
++  int? expected;
++
++  bool add(Map<String, dynamic> page) {
++    final total = page['total'];
++    final rows = page['data'];
++    if (total is! int ||
++        total < 0 ||
++        !page.containsKey('data') ||
++        (expected != null && expected != total) ||
++        !(rows is List || (rows == null && total == 0))) {
++      throw const FormatException('Invalid shared profile listing');
++    }
++    expected = total;
++    for (final row in (rows as List? ?? const [])) {
++      if (row is! Map<String, dynamic> ||
++          row['guid'] is! String ||
++          (row['guid'] as String).isEmpty ||
++          row['name'] is! String ||
++          (row['name'] as String).isEmpty ||
++          profiles.containsKey(row['guid'])) {
++        throw const FormatException('Invalid or repeated shared profile');
++      }
++      profiles[row['guid']] = Map.of(row);
++    }
++    if (total > 0 && (profiles.length > total || (rows as List).isEmpty)) {
++      throw const FormatException('Incomplete shared profile listing');
++    }
++    return total == 0 || profiles.length == total;
++  }
++
++  // Upstream addresses its in-memory books by name. Give equal display names
++  // separate slots, including when a shared book has the reserved personal name.
++  Iterable<Map<String, dynamic>> named(String personalName) sync* {
++    final used = {personalName};
++    for (final id in profiles.keys.toList()..sort()) {
++      final profile = profiles[id]!;
++      var name = profile['name'] as String;
++      while (!used.add(name)) {
++        name = '$name [$id]';
++      }
++      yield {...profile, 'name': name};
++    }
++  }
++}
++
++// Remove an entire cached book (including its in-memory peer credentials) when
++// the confirmed GUID changes, even if its display name was immediately reused.
++bool pruneSharedBooks<T>(Map<String, T> books, Map<String, String> allowed,
++    String? Function(T) guid, void Function(T) discard) {
++  var changed = false;
++  books.removeWhere((name, book) {
++    if (allowed.containsKey(name) && allowed[name] == guid(book)) return false;
++    discard(book);
++    changed = true;
++    return true;
++  });
++  return changed;
++}
+diff --git a/flutter/lib/steaddesk/support_device_menu.dart b/flutter/lib/steaddesk/support_device_menu.dart
+index 785adb2..d1a6f71 100644
+--- a/flutter/lib/steaddesk/support_device_menu.dart
++++ b/flutter/lib/steaddesk/support_device_menu.dart
+@@ -34,17 +34,22 @@ class _DeviceMenuState extends State<_DeviceMenu> {
+   List<String> stores = [];
+   String owner = "";
+   int opening = 0;
++  OpsGroupStore? originStore;
++  List<OpsGroup> sharedChoices = [];
+   String get account => gFFI.userModel.userName.value;
+   void _error() => showToast(translate('Operation failed'));
+   Future<void> _open(Offset position) async {
+     final serial = ++opening;
+     final id = widget.row.device.id, user = account;
++    final store = widget.directory.ops;
+     try {
+       final favs = await bind.mainGetFav();
+       List<PersonalGroup> choices = [];
+       if (user.isNotEmpty) {
+         try {
+-          choices = await _PersonalGroups.store.list(user);
++          choices = _useOps
++              ? widget.directory.groups
++              : await _PersonalGroups.store.list(user);
+         } catch (_) {
+           if (mounted) _error();
+         }
+@@ -52,12 +57,15 @@ class _DeviceMenuState extends State<_DeviceMenu> {
+       if (!mounted ||
+           widget.row.device.id != id ||
+           serial != opening ||
+-          user != account) return;
++          user != account ||
++          (_useOps && !identical(store, widget.directory.ops))) return;
+       setState(() {
++        originStore = store;
++        sharedChoices = store?.shared.toList() ?? [];
+         favorite = favs.contains(id);
+         groups = choices;
+         owner = user;
+-        stores = user.isNotEmpty && gFFI.userModel.isAdmin.value
++        stores = !_useOps && user.isNotEmpty && gFFI.userModel.isAdmin.value
+             ? _managedStores(widget.directory)
+             : [];
+       });
+@@ -128,6 +136,8 @@ class _DeviceMenuState extends State<_DeviceMenu> {
+   @override
+   Widget build(BuildContext context) {
+     final row = widget.row, dir = widget.directory, id = row.device.id;
++    final writable =
++        !_useOps || (dir.canWrite && identical(originStore, dir.ops));
+     final style = MenuStyle(
+         backgroundColor: const WidgetStatePropertyAll(Colors.white),
+         side:
+@@ -139,21 +149,26 @@ class _DeviceMenuState extends State<_DeviceMenu> {
+         onOpen: () => widget.onOpenChanged?.call(true),
+         onClose: () => widget.onOpenChanged?.call(false),
+         menuChildren: [
+-          _button('Connect', () => dir._connect(row)),
++          _button(
++              'Connect', dir._restricted(id) ? null : () => dir._connect(row)),
+           _button(
+               'Transfer file',
+-              () => connectInPeerTab(
+-                  dir.context, row.source.peer, row.source.tab,
+-                  addressBook: row.source.book, isFileTransfer: true)),
++              dir._restricted(id)
++                  ? null
++                  : () => dir._connect(row, transfer: true)),
+           _button('Device status', () => dir._details(row)),
+           if (dir.selectedGroup case final group?
+               when group.devices.contains(id))
+             _button(
+                 'Remove from this group',
+-                () => dir.changeGroup(
+-                    () => _PersonalGroups.store
+-                        .members(owner, group.id, [id], remove: true),
+-                    owner)),
++                !writable
++                    ? null
++                    : _useOps
++                        ? () => dir.privateMembers(group, [id], remove: true)
++                        : () => dir.changeGroup(
++                            () => _PersonalGroups.store
++                                .members(owner, group.id, [id], remove: true),
++                            owner)),
+           const Divider(height: 1),
+           SubmenuButton(
+               menuStyle: style,
+@@ -162,8 +177,27 @@ class _DeviceMenuState extends State<_DeviceMenu> {
+                 if (owner == account)
+                   for (final group in groups)
+                     MenuItemButton(
+-                        onPressed: () => _add(group.id, owner, id),
++                        onPressed: !writable
++                            ? null
++                            : _useOps
++                                ? () => dir.privateMembers(group, [id])
++                                : () => _add(group.id, owner, id),
+                         child: Text(group.name)),
++                if (_useOps &&
++                    dir.opsAdmin &&
++                    owner == account &&
++                    identical(originStore, dir.ops))
++                  for (final g in sharedChoices)
++                    MenuItemButton(
++                        onPressed: !writable
++                            ? null
++                            : () => dir._opsEdit(
++                                title: '加入共享分组',
++                                group: g,
++                                method: 'POST',
++                                route: 'groups/${g.id}/devices',
++                                fields: {'add': id}),
++                        child: Text(g.name)),
+                 if (stores.isNotEmpty &&
+                     account == owner &&
+                     gFFI.userModel.isAdmin.value) ...[
+@@ -174,9 +208,11 @@ class _DeviceMenuState extends State<_DeviceMenu> {
+                 const Divider(height: 1),
+                 _button(
+                     'New group…',
+-                    owner.isEmpty || owner != account
++                    owner.isEmpty || owner != account || !writable
+                         ? null
+-                        : () => _newGroup(owner, id)),
++                        : _useOps
++                            ? () => dir.createGroup(owner, [id])
++                            : () => _newGroup(owner, id)),
+               ],
+               child: Text(translate('Add to group'))),
+           _button(favorite ? 'Remove from Favorites' : 'Add to Favorites',
+diff --git a/flutter/lib/steaddesk/support_directory.dart b/flutter/lib/steaddesk/support_directory.dart
+index f2461c2..522f895 100644
+--- a/flutter/lib/steaddesk/support_directory.dart
++++ b/flutter/lib/steaddesk/support_directory.dart
+@@ -6,7 +6,8 @@ typedef _Entry = ({SupportDevice device, _Source source});
+ class _Directory extends StatefulWidget {
+   final SupportPage page;
+   final String query;
+-  const _Directory(this.page, this.query, {super.key});
++  final OpsGroupStore? store;
++  const _Directory(this.page, this.query, this.store, {super.key});
+   @override
+   State<_Directory> createState() => _DirectoryState();
+ }
+@@ -28,15 +29,35 @@ class _DirectoryState extends State<_Directory> {
+   String cardOwnerKey = '';
+   var filter = DeviceFilter.all;
+   String get account => gFFI.userModel.userName.value;
+-  List<PersonalGroup> groups = [];
++  List<PersonalGroup> localGroups = [];
++  OpsGroupStore? get ops {
++    final store = widget.store;
++    final home = context.findAncestorStateOfType<_SupportHomeState>();
++    return store != null &&
++            !store.signedOut &&
++            store.account == account &&
++            identical(home?._ops, store) &&
++            bind.mainGetLocalOption(key: 'access_token') == home?._opsToken
++        ? store
++        : null;
++  }
++
++  List<PersonalGroup> get groups => !_useOps
++      ? localGroups
++      : [
++          for (final g in ops?.mine ?? <OpsGroup>[])
++            PersonalGroup(g.id, g.name, g.deviceIds, g.updatedAt,
++                version: g.version),
++        ];
+   String groupsOwner = '';
+   int groupLoad = 0;
+   late final Worker groupLogin;
+-  PersonalGroup? get selectedGroup => groupsOwner == account
++  PersonalGroup? get selectedGroup => (_useOps || groupsOwner == account)
+       ? groups.firstWhereOrNull((g) => 'mine/${g.id}' == scope)
+       : null;
+ 
+   Future<void> _reloadGroups() async {
++    if (_useOps) return;
+     final owner = account;
+     final request = ++groupLoad;
+     try {
+@@ -45,7 +66,7 @@ class _DirectoryState extends State<_Directory> {
+       if (mounted && account == owner && request == groupLoad) {
+         setState(() {
+           groupsOwner = owner;
+-          groups = loaded;
++          localGroups = loaded;
+           if (scope.startsWith('mine/') && selectedGroup == null) scope = '';
+         });
+       }
+@@ -68,16 +89,31 @@ class _DirectoryState extends State<_Directory> {
+ 
+   _Entry? sessionDevice;
+   void _openSessionDevice(String id) {
+-    final known = _entries(searchIndex: true).firstWhereOrNull((e) => e.device.id == id);
++    if (_restricted(id)) return;
++    final known =
++        _entries(searchIndex: true).firstWhereOrNull((e) => e.device.id == id);
+     // A direct-ID session can precede address-book or recent-peer indexing.
+-    final entry = known ?? (device: SupportDevice(id: id, alias: '', hostnames: [],
+-        platform: '', groupName: '', online: null),
+-        source: (peer: Peer.fromJson({'id': id}), book: null, tab: PeerTabIndex.recent));
++    final entry = known ??
++        (
++          device: SupportDevice(
++              id: id,
++              alias: '',
++              hostnames: [],
++              platform: '',
++              groupName: '',
++              online: null),
++          source: (
++            peer: Peer.fromJson({'id': id}),
++            book: null,
++            tab: PeerTabIndex.recent
++          )
++        );
+     sessionDevice = entry;
+     _openCard(entry);
+   }
+ 
+   void _openCard(_Entry row) {
++    if (_restricted(row.device.id)) return;
+     if (widget.page != SupportPage.devices) {
+       _details(row);
+       return;
+@@ -129,6 +165,13 @@ class _DirectoryState extends State<_Directory> {
+   @override
+   void didUpdateWidget(_Directory old) {
+     super.didUpdateWidget(old);
++    if (_useOps && old.store != widget.store) {
++      scope = '';
++      selectedDevice = null;
++      sessionDevice = null;
++      closed.clear();
++      localAliases.clear();
++    }
+     if (old.query != widget.query && widget.query.isNotEmpty) {
+       scope = '';
+       if (old.query.isEmpty) filter = DeviceFilter.all;
+@@ -199,11 +242,13 @@ class _DirectoryState extends State<_Directory> {
+         if (!all.containsKey(id)) add(Peer.fromJson({'id': id}), tab);
+       }
+     }
+-    if (gFFI.userModel.isLogin) {
++    if (gFFI.userModel.isLogin && (!_useOps || ops != null)) {
+       final ab = gFFI.abModel;
+       // Prefer the active book when an ID is shared across multiple books.
+       for (final book in {ab.current, ...ab.addressbooks.values}) {
+-        if (!ab.addressbooks.containsKey(book.name())) continue;
++        if (_useOps
++            ? !identical(ab.addressbooks[book.name()], book)
++            : !ab.addressbooks.containsKey(book.name())) continue;
+         for (final p in book.peers) {
+           if (directory || all.containsKey(p.id)) add(p, PeerTabIndex.ab, book);
+         }
+@@ -225,7 +270,7 @@ class _DirectoryState extends State<_Directory> {
+         }
+       }
+     }
+-    if (directory && groupsOwner == account) {
++    if (!_useOps && directory && groupsOwner == account) {
+       for (final group in groups) {
+         for (final id in group.devices) {
+           if (!all.containsKey(id))
+@@ -260,23 +305,66 @@ class _DirectoryState extends State<_Directory> {
+     }).toList();
+   }
+ 
+-  void _connect(_Entry row) =>
+-      connectInPeerTab(context, row.source.peer, row.source.tab,
+-          addressBook: row.source.book);
+-
+-  List<_Entry> _visible(List<_Entry> entries, String query, String selected) =>
+-      entries.where((row) {
+-        final d = row.device;
+-        return d.contains(query) &&
+-            d.matches(filter) &&
+-            (selected.isEmpty ||
+-                (selected.startsWith('mine/') &&
+-                    selectedGroup?.devices.contains(d.id) == true) ||
+-                (selected == '?' && d.merchant == null) ||
+-                (selected == '*' && d.merchant != null) ||
+-                selected == d.merchant ||
+-                selected == '${d.merchant}/${d.store}');
+-      }).toList();
++  Future<bool> currentOpsIdentity(OpsGroupStore store) async {
++    final home = context.findAncestorStateOfType<_SupportHomeState>();
++    final origin = Uri.tryParse(await bind.mainGetApiServer());
++    return mounted &&
++        home != null &&
++        home._opsOrigin == origin &&
++        identical(ops, store);
++  }
++
++  Map<String, _Source> _bookSources = {};
++  Set<String> _missingPersonal = {};
++  bool _restricted(String id) => _useOps && _missingPersonal.contains(id);
++
++  Map<String, _Source> _sharedSources() => {
++        if (gFFI.userModel.isLogin && (!_useOps || ops != null))
++          for (final book in gFFI.abModel.addressbooks.values)
++            if (!book.isPersonal())
++              for (final p in book.peers)
++                p.id: (peer: p, book: book, tab: PeerTabIndex.ab),
++      };
++
++  void _connect(_Entry row, {bool transfer = false}) {
++    var source = row.source;
++    if (_useOps) {
++      final id = row.device.id;
++      final current = _sharedSources()[id];
++      if (current == null &&
++          (source.book != null ||
++              (ops?.mine.any((g) => g.deviceIds.contains(id)) ?? false)))
++        return;
++      source = current ?? source;
++    }
++    connectInPeerTab(context, source.peer, source.tab,
++        addressBook: source.book, isFileTransfer: transfer);
++  }
++
++  Set<String> get assigned =>
++      {for (final g in ops?.shared ?? <OpsGroup>[]) ...g.deviceIds};
++
++  List<_Entry> _visible(List<_Entry> entries, String query, String selected) {
++    final mine = selectedGroup;
++    final used = _useOps && selected == '?' ? assigned : const <String>{};
++    final shared = _useOps && selected.startsWith('shared/')
++        ? ops?.shared.firstWhereOrNull((g) => 'shared/${g.id}' == selected)
++        : null;
++    return entries.where((row) {
++      final d = row.device;
++      return d.contains(query) &&
++          d.matches(filter) &&
++          (selected.isEmpty ||
++              (selected.startsWith('mine/') &&
++                  mine?.devices.contains(d.id) == true) ||
++              (shared?.deviceIds.contains(d.id) == true) ||
++              (selected == '?' &&
++                  (_useOps ? !used.contains(d.id) : d.merchant == null)) ||
++              (selected == '*' && d.merchant != null) ||
++              selected == d.merchant ||
++              selected == '${d.merchant}/${d.store}');
++    }).toList();
++  }
+ 
+   void submit(String query, List<_Entry> entries) {
+     final target = supportSearchTarget(
+@@ -284,7 +372,11 @@ class _DirectoryState extends State<_Directory> {
+         entries
+             .where((e) => e.device.matchesSuggestion(query))
+             .map((e) => e.device.id));
+-    if (target == null) return;
++    if (target == null ||
++        _restricted(target) ||
++        (_useOps &&
++            (ops?.mine.any((g) => g.deviceIds.contains(target)) ?? false) &&
++            !_sharedSources().containsKey(target))) return;
+     for (final entry in entries) {
+       if (entry.device.id == target) {
+         _connect(entry);
+@@ -330,15 +422,29 @@ class _DirectoryState extends State<_Directory> {
+       animation:
+           Listenable.merge([gFFI.recentPeersModel, gFFI.favoritePeersModel]),
+       builder: (_, __) => Obx(() {
++            if (_useOps) {
++              _bookSources = _sharedSources();
++              _missingPersonal = {
++                for (final group in ops?.mine ?? <OpsGroup>[])
++                  for (final id in group.deviceIds)
++                    if (!_bookSources.containsKey(id)) id
++              };
++            }
+             final entries = _entries();
+             if (cardOwnerKey != _cardKey) {
+               sessionDevice = null;
+               cardOwnerKey = _cardKey;
+               selectedDevice = bind.getLocalFlutterOption(k: cardOwnerKey);
+             }
+-            final card = widget.page == SupportPage.devices
+-                ? entries.firstWhereOrNull((e) => e.device.id == selectedDevice) ??
+-                    (sessionDevice?.device.id == selectedDevice ? sessionDevice : null)
++            final card = widget.page == SupportPage.devices &&
++                    (!_useOps ||
++                        (selectedDevice != null &&
++                            !_restricted(selectedDevice!)))
++                ? entries.firstWhereOrNull(
++                        (e) => e.device.id == selectedDevice) ??
++                    (sessionDevice?.device.id == selectedDevice
++                        ? sessionDevice
++                        : null)
+                 : null;
+             final devices = entries.map((e) => e.device);
+             final byScope = <String, (int, int)>{};
+@@ -355,10 +461,25 @@ class _DirectoryState extends State<_Directory> {
+                     (previous.$1 + (d.online == true ? 1 : 0), previous.$2 + 1);
+               }
+             }
+-            final selected = byScope.containsKey(scope) || selectedGroup != null
++            final selected = byScope.containsKey(scope) ||
++                    selectedGroup != null ||
++                    (_useOps &&
++                        (scope == '?' ||
++                            (ops?.shared
++                                    .any((g) => 'shared/${g.id}' == scope) ==
++                                true)))
+                 ? scope
+                 : '';
+             final rows = _visible(entries, widget.query, selected);
++            final missing = _useOps && selectedGroup != null
++                ? selectedGroup!.devices
++                    .where((id) =>
++                        !_bookSources.containsKey(id) &&
++                        id.contains(widget.query))
++                    .toList()
++                : <String>[];
++            if (_useOps && selectedGroup != null)
++              rows.removeWhere((r) => !_bookSources.containsKey(r.device.id));
+             final grouped = widget.page == SupportPage.devices;
+             return LayoutBuilder(builder: (context, size) {
+               final treeWidth = size.maxWidth >= 850 ? 212.0 : 158.0;
+@@ -426,16 +547,20 @@ class _DirectoryState extends State<_Directory> {
+                               const Divider(
+                                   height: 1, color: Color(0xffe5e7eb)),
+                               Expanded(
+-                                  child: rows.isEmpty
++                                  child: rows.isEmpty && missing.isEmpty
+                                       ? Center(child: _emptyResults(entries))
+                                       : ListView.separated(
+-                                          itemCount: rows.length,
++                                          itemCount:
++                                              rows.length + missing.length,
+                                           separatorBuilder: (_, __) =>
+                                               const Divider(
+                                                   height: 1,
+                                                   color: Color(0xffeef0f2)),
+-                                          itemBuilder: (_, i) =>
+-                                              _row(rows[i]))),
++                                          itemBuilder: (_, i) => i < rows.length
++                                              ? _row(rows[i])
++                                              : _unavailable(
++                                                  missing[i - rows.length],
++                                                  selectedGroup!))),
+                             ])),
+                         if (card != null) ...[
+                           const VerticalDivider(width: 1),
+@@ -457,7 +582,9 @@ class _DirectoryState extends State<_Directory> {
+ 
+   Widget _emptyResults(List<_Entry> entries) {
+     final id = directSupportId(widget.query);
+-    if (id != null && !entries.any((e) => e.device.id == id)) {
++    if (id != null &&
++        !_restricted(id) &&
++        !entries.any((e) => e.device.id == id)) {
+       // Typing only searches. The operator must explicitly start a connection.
+       return TextButton(
+           onPressed: () => connect(context, id),
+@@ -512,6 +639,7 @@ class _DirectoryState extends State<_Directory> {
+             onSecondaryTapDown: (e) =>
+                 managedMenu(key, label, e.globalPosition, owner),
+             child: node(key, label, depth, branch: branch));
++    if (_useOps) return _opsTree(node('', translate('All devices'), 0));
+     return ListView(children: [
+       node('', translate('All devices'), 0),
+       managed('*', translate('My merchants'), 0, branch: true),
+diff --git a/flutter/lib/steaddesk/support_group_tree.dart b/flutter/lib/steaddesk/support_group_tree.dart
+index fac1188..57346b4 100644
+--- a/flutter/lib/steaddesk/support_group_tree.dart
++++ b/flutter/lib/steaddesk/support_group_tree.dart
+@@ -51,6 +51,15 @@ extension _GroupTree on _DirectoryState {
+ 
+   Future<void> createGroup(String owner,
+       [Iterable<String> devices = const []]) async {
++    if (_useOps) {
++      if (owner != account || !canWrite) return;
++      return _opsEdit(
++          title: '新建我的分组',
++          method: 'POST',
++          route: 'me/groups',
++          personal: true,
++          fields: {'name': '', 'device_ids': devices.join(', ')});
++    }
+     final name = await _prompt('New group');
+     if (name != null)
+       await changeGroup(
+@@ -58,6 +67,17 @@ extension _GroupTree on _DirectoryState {
+   }
+ 
+   Future<void> _renameGroup(PersonalGroup group, String owner) async {
++    if (_useOps) {
++      if (owner != account || !canWrite) return;
++      return _opsEdit(
++          title: '修改我的分组',
++          personal: true,
++          method: 'PATCH',
++          route: 'me/groups/${group.id}',
++          group: serverGroup(group.id),
++          version: group.version,
++          fields: {'name': group.name});
++    }
+     final name = await _prompt('Rename', initial: group.name);
+     if (name != null)
+       await changeGroup(
+@@ -65,6 +85,10 @@ extension _GroupTree on _DirectoryState {
+   }
+ 
+   Future<void> _addDevice(PersonalGroup group, String owner) async {
++    if (_useOps) {
++      if (owner == account) await privateMembers(group, []);
++      return;
++    }
+     final id = await _prompt('Add device…', device: true);
+     if (id != null)
+       await changeGroup(
+@@ -162,14 +186,25 @@ extension _GroupTree on _DirectoryState {
+ 
+   Future<void> _personalMenu(
+       PersonalGroup group, Offset point, String owner) async {
++    final store = ops;
+     final choice = await _groupMenu(point, [
+-      _item('add', 'Add device…'),
+-      _item('rename', 'Rename'),
++      PopupMenuItem(
++          value: 'add',
++          enabled: !_useOps || canWrite,
++          child: Text(translate('Add device…'))),
++      PopupMenuItem(
++          value: 'rename',
++          enabled: !_useOps || canWrite,
++          child: Text(translate('Rename'))),
+       _item('details', 'Details'),
+       const PopupMenuDivider(),
+-      _item('delete', 'Delete group (keep devices)')
++      PopupMenuItem(
++          value: 'delete',
++          enabled: !_useOps || canWrite,
++          child: Text(translate('Delete group (keep devices)')))
+     ]);
+-    if (!mounted || owner != account) return;
++    if (!mounted || owner != account || (_useOps && !identical(ops, store)))
++      return;
+     switch (choice) {
+       case 'add':
+         await _addDevice(group, owner);
+@@ -181,6 +216,17 @@ extension _GroupTree on _DirectoryState {
+         await _detailsGroup(group.name, group.devices);
+         break;
+       case 'delete':
++        if (_useOps) {
++          await _opsEdit(
++              title: '删除我的分组',
++              personal: true,
++              method: 'DELETE',
++              route: 'me/groups/${group.id}',
++              group: serverGroup(group.id),
++              version: group.version,
++              fields: {});
++          break;
++        }
+         await changeGroup(
+             () => _PersonalGroups.store.delete(owner, group.id), owner);
+         break;
+@@ -191,10 +237,13 @@ extension _GroupTree on _DirectoryState {
+     final key = 'mine/${group.id}';
+     return DragTarget<_DraggedDevice>(
+         onWillAcceptWithDetails: (d) =>
+-            d.data.owner == owner && account == owner,
+-        onAcceptWithDetails: (d) => changeGroup(
+-            () => _PersonalGroups.store.members(owner, group.id, [d.data.id]),
+-            owner),
++            d.data.owner == owner && account == owner && (!_useOps || canWrite),
++        onAcceptWithDetails: (d) => _useOps
++            ? privateMembers(group, [d.data.id])
++            : changeGroup(
++                () =>
++                    _PersonalGroups.store.members(owner, group.id, [d.data.id]),
++                owner),
+         builder: (context, candidates, _) => CallbackShortcuts(
+                 bindings: {
+                   const SingleActivator(LogicalKeyboardKey.f2): () =>
+diff --git a/flutter/lib/steaddesk/support_home.dart b/flutter/lib/steaddesk/support_home.dart
+index 4399c49..f43c09f 100644
+--- a/flutter/lib/steaddesk/support_home.dart
++++ b/flutter/lib/steaddesk/support_home.dart
+@@ -19,7 +19,10 @@ import '../models/peer_model.dart';
+ import '../models/peer_tab_model.dart';
+ import '../models/ab_model.dart';
+ import 'case_inbox_api.dart' show PendingCasesBar;
+-import 'merchant_build.dart' show casesEnabled;
++import 'merchant_build.dart'
++    show casesEnabled, opsGroupsEnabled, merchantEdition;
++import 'ops_groups.dart';
++import 'ops_group_tile.dart';
+ import 'support_device.dart';
+ import 'incoming_switch.dart';
+ import 'metrics_api.dart';
+@@ -31,6 +34,7 @@ import 'device_sessions.dart';
+ import 'personal_groups.dart';
+ 
+ part 'support_directory.dart';
++part 'ops_group_controls.dart';
+ part 'device_card.dart';
+ part 'support_search.dart';
+ part 'support_device_menu.dart';
+@@ -116,6 +120,88 @@ class _SupportHomeState extends State<SupportHome> {
+   bool _loadingBooks = false;
+   bool _rescanBooks = false;
+ 
++  OpsGroupStore? _ops;
++  String _opsToken = '';
++  Uri? _opsOrigin;
++  Future<void> _opsTransition = Future.value();
++  Timer? _opsIdentityTimer;
++
++  void _checkIdentity() {
++    if (!_useOps) return;
++    _opsTransition =
++        _opsTransition.then((_) => _bindIdentity()).catchError((_) {
++      if (mounted) showToast('无法读取分组，请检查连接。');
++    });
++  }
++
++  Future<void> _bindIdentity() async {
++    if (!mounted) return;
++    final account = gFFI.userModel.userName.value;
++    final token = bind.mainGetLocalOption(key: 'access_token');
++    final origin = Uri.tryParse(await bind.mainGetApiServer());
++    if (!mounted ||
++        account != gFFI.userModel.userName.value ||
++        token != bind.mainGetLocalOption(key: 'access_token')) return;
++    final old = _ops;
++    if (old != null &&
++        old.account == account &&
++        _opsToken == token &&
++        _opsOrigin == origin) return;
++    if (old != null) {
++      old.removeListener(_opsChanged);
++      setState(() => _ops = null);
++      await old.logout();
++      old.dispose();
++      await gFFI.abModel.reset();
++      _indexedBooks.clear();
++    }
++    if (!mounted ||
++        account.isEmpty ||
++        token.isEmpty ||
++        origin == null ||
++        origin.host.isEmpty ||
++        account != gFFI.userModel.userName.value ||
++        token != bind.mainGetLocalOption(key: 'access_token')) return;
++    final dir = await getApplicationSupportDirectory();
++    if (!mounted ||
++        account != gFFI.userModel.userName.value ||
++        token != bind.mainGetLocalOption(key: 'access_token')) return;
++    late final OpsGroupStore store;
++    store = OpsGroupStore(
++        origin: origin,
++        token: token,
++        account: account,
++        cache: File(
++            '${dir.path}/ops-groups-${Uri.encodeComponent(origin.origin)}-${Uri.encodeComponent(account)}.json'),
++        local: _PersonalGroups.store,
++        refreshBooks: () async {
++          if (!mounted ||
++              !identical(store, _ops) ||
++              store.signedOut ||
++              account != gFFI.userModel.userName.value ||
++              token != bind.mainGetLocalOption(key: 'access_token') ||
++              origin != Uri.tryParse(await bind.mainGetApiServer())) return;
++          await gFFI.abModel
++              .pullAb(force: ForcePullAb.listAndCurrent, quiet: true);
++        });
++    _opsToken = token;
++    _opsOrigin = origin;
++    setState(() => _ops = store);
++    store.addListener(_opsChanged);
++    unawaited(store.start().catchError((_) {
++      if (mounted && identical(store, _ops)) _opsChanged();
++    }));
++  }
++
++  void _opsChanged() {
++    if (!mounted) return;
++    if (_ops?.signedOut == true) {
++      _indexedBooks.clear();
++      unawaited(gFFI.abModel.reset());
++    }
++    setState(() {});
++  }
++
+   Future<void> _startIndex() async {
+     if (!mounted || !gFFI.userModel.isLogin) return;
+     // Profiles may arrive after initState (cache, sign-in, or another pull).
+@@ -171,6 +257,9 @@ class _SupportHomeState extends State<SupportHome> {
+   void dispose() {
+     WidgetsBinding.instance.removeTimingsCallback(_measureGlass);
+     _loginListener.dispose();
++    _opsIdentityTimer?.cancel();
++    _ops?.removeListener(_opsChanged);
++    _ops?.dispose();
+     gFFI.abModel.removePeerUpdateListener(_indexListener);
+     search.dispose();
+     searchFocus.dispose();
+@@ -184,8 +273,14 @@ class _SupportHomeState extends State<SupportHome> {
+     gFFI.abModel.addPeerUpdateListener(_indexListener, _indexSharedBooks);
+     _loginListener = ever<String>(gFFI.userModel.userName, (_) {
+       _indexedBooks.clear();
++      _checkIdentity();
+       _startIndex();
+     });
++    if (_useOps) {
++      _checkIdentity();
++      _opsIdentityTimer =
++          Timer.periodic(const Duration(seconds: 2), (_) => _checkIdentity());
++    }
+     WidgetsBinding.instance.addPostFrameCallback((_) => _startIndex());
+     bind.mainLoadRecentPeers();
+     bind.mainLoadFavPeers();
+@@ -229,9 +324,7 @@ class _SupportHomeState extends State<SupportHome> {
+           PopupMenuItem(
+               value: 'hide', child: Text(translate('Hide navigation'))),
+           if (SupportMetrics.enabled)
+-            PopupMenuItem(
+-                value: 'export-metrics',
+-                child: Text(_exportLabel)),
++            PopupMenuItem(value: 'export-metrics', child: Text(_exportLabel)),
+           CheckedPopupMenuItem(
+               value: 'auto',
+               checked: automatic,
+@@ -246,11 +339,11 @@ class _SupportHomeState extends State<SupportHome> {
+ 
+   bool get _chinese {
+     final configured = bind.mainGetLocalOption(key: kCommConfKeyLang);
+-    final language = configured.isEmpty || configured == 'default'
+-        ? localeName
+-        : configured;
++    final language =
++        configured.isEmpty || configured == 'default' ? localeName : configured;
+     return language.toLowerCase().startsWith('zh');
+   }
++
+   String get _exportLabel =>
+       _chinese ? '导出连接统计' : 'Export connection statistics';
+ 
+@@ -262,15 +355,22 @@ class _SupportHomeState extends State<SupportHome> {
+           fileName: 'support-metrics.csv',
+           type: FileType.custom,
+           allowedExtensions: ['csv']);
+-      if (!mounted || path == null || account != gFFI.userModel.userName.value) return;
++      if (!mounted ||
++          path == null ||
++          account != gFFI.userModel.userName.value) {
++        return;
++      }
+       await SupportMetrics.exportCsv(account, path);
+       if (!mounted) return;
+       ScaffoldMessenger.maybeOf(context)?.showSnackBar(SnackBar(
+-          content: Text(_chinese ? '连接统计已导出' : 'Connection statistics exported')));
++          content:
++              Text(_chinese ? '连接统计已导出' : 'Connection statistics exported')));
+     } catch (_) {
+       if (!mounted) return;
+       ScaffoldMessenger.maybeOf(context)?.showSnackBar(SnackBar(
+-          content: Text(_chinese ? '导出失败，请检查保存位置后重试。' : 'Export failed. Check the save location and try again.')));
++          content: Text(_chinese
++              ? '导出失败，请检查保存位置后重试。'
++              : 'Export failed. Check the save location and try again.')));
+     }
+   }
+ 
+@@ -284,9 +384,10 @@ class _SupportHomeState extends State<SupportHome> {
+         if (await launchUrl(Uri.parse(url),
+             mode: LaunchMode.externalApplication)) continue;
+       } catch (_) {}
+-      if (mounted)
++      if (mounted) {
+         ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+             SnackBar(content: Text('${translate("Unable to open")} $url')));
++      }
+     }
+   }
+ 
+@@ -295,7 +396,7 @@ class _SupportHomeState extends State<SupportHome> {
+       case SupportPage.devices:
+       case SupportPage.recent:
+       case SupportPage.favorites:
+-        return _Directory(page, search.text, key: directoryKeys[page]);
++        return _Directory(page, search.text, _ops, key: directoryKeys[page]);
+       default:
+         return Center(child: Text(translate('Coming soon')));
+     }
+@@ -367,8 +468,10 @@ class _SupportHomeState extends State<SupportHome> {
+                               Obx(() => PendingCasesBar(
+                                   account: gFFI.userModel.userName.value,
+                                   colleagues: () => gFFI.groupModel.users
+-                                      .where((user) => user.status == UserStatus.kNormal)
+-                                      .map((user) => user.name).toList(),
++                                      .where((user) =>
++                                          user.status == UserStatus.kNormal)
++                                      .map((user) => user.name)
++                                      .toList(),
+                                   showMainWindow: () => windowOnTop(null))),
+                             Expanded(child: _body()),
+                             const _ServerStatus(),
+diff --git a/flutter/lib/steaddesk/support_search.dart b/flutter/lib/steaddesk/support_search.dart
+index 2e70e87..7be06a5 100644
+--- a/flutter/lib/steaddesk/support_search.dart
++++ b/flutter/lib/steaddesk/support_search.dart
+@@ -63,22 +63,33 @@ class _SupportSearchFieldState extends State<_SupportSearchField> {
+     final q = widget.search.text.trim();
+     final term = q.toLowerCase();
+     final groups = <String, String>{};
+-    for (final e in entries) {
+-      final d = e.device;
+-      // Group navigation targets the address-book tree, not history-only peers.
+-      if (d.merchant == null ||
+-          (e.source.tab != PeerTabIndex.ab &&
+-              e.source.tab != PeerTabIndex.group)) continue;
+-      final merchant = d.merchant!;
+-      final label =
+-          [if (d.groupName.isNotEmpty) d.groupName, merchant].join(' · ');
+-      final store = '$merchant/${d.store}';
+-      if (label.toLowerCase().contains(term)) groups[merchant] = label;
+-      if ('$label ${d.store}'.toLowerCase().contains(term) ||
+-          store.toLowerCase().contains(term)) {
+-        groups[store] = '$label › ${d.store}';
++    if (_useOps) {
++      final dir = widget.directory();
++      for (final g in dir?.ops?.shared ?? <OpsGroup>[]) {
++        if (g.name.toLowerCase().contains(term))
++          groups['shared/${g.id}'] = g.name;
++      }
++      for (final g in dir?.groups ?? <PersonalGroup>[]) {
++        if (g.name.toLowerCase().contains(term))
++          groups['mine/${g.id}'] = g.name;
++      }
++    } else
++      for (final e in entries) {
++        final d = e.device;
++        // Group navigation targets the address-book tree, not history-only peers.
++        if (d.merchant == null ||
++            (e.source.tab != PeerTabIndex.ab &&
++                e.source.tab != PeerTabIndex.group)) continue;
++        final merchant = d.merchant!;
++        final label =
++            [if (d.groupName.isNotEmpty) d.groupName, merchant].join(' · ');
++        final store = '$merchant/${d.store}';
++        if (label.toLowerCase().contains(term)) groups[merchant] = label;
++        if ('$label ${d.store}'.toLowerCase().contains(term) ||
++            store.toLowerCase().contains(term)) {
++          groups[store] = '$label › ${d.store}';
++        }
+       }
+-    }
+     return [
+       if (RegExp(r'^[0-9 ]+$').hasMatch(q))
+         (key: 'direct', label: q, row: null, scope: null),
+@@ -100,7 +111,12 @@ class _SupportSearchFieldState extends State<_SupportSearchField> {
+   }
+ 
+   bool _enabled(_Choice c) =>
+-      c.key != 'direct' || directSupportId(widget.search.text) != null;
++      (c.key != 'direct' || directSupportId(widget.search.text) != null) &&
++      (!_useOps ||
++          widget.directory()?._restricted(c.row?.device.id ??
++                  directSupportId(widget.search.text) ??
++                  '') !=
++              true);
+ 
+   void _activate(_Choice? item) {
+     final dir = widget.directory();
+diff --git a/flutter/test/steaddesk/ops_group_tile_test.dart b/flutter/test/steaddesk/ops_group_tile_test.dart
+new file mode 100644
+index 0000000..73a55e5
+--- /dev/null
++++ b/flutter/test/steaddesk/ops_group_tile_test.dart
+@@ -0,0 +1,42 @@
++import 'package:flutter/material.dart';
++import 'package:flutter_test/flutter_test.dart';
++import 'package:flutter_hbb/steaddesk/ops_group_tile.dart';
++
++void main() {
++  for (final admin in [false, true]) {
++    for (final online in [false, true]) {
++      testWidgets('group menu admin=$admin online=$online', (tester) async {
++        final actions = <String>[];
++        await tester.pumpWidget(MaterialApp(
++            home: Scaffold(
++                body: OpsGroupTile(
++                    name: '测试门店',
++                    selected: false,
++                    childGroup: true,
++                    pending: true,
++                    admin: admin,
++                    online: online,
++                    onSelect: () {},
++                    onAction: actions.add))));
++        expect(find.text('同步中'), findsOneWidget);
++        await tester.tap(find.byTooltip('分组选项'));
++        await tester.pumpAndSettle();
++        expect(find.text('查看详情'), findsOneWidget);
++        for (final label in ['修改分组', '谁能看到', '增减设备', '移动设备', '删除分组']) {
++          final item = find.widgetWithText(PopupMenuItem<String>, label);
++          expect(item, admin ? findsOneWidget : findsNothing);
++          if (admin) {
++            expect(tester.widget<PopupMenuItem<String>>(item).enabled, online);
++          }
++        }
++        if (admin && !online) {
++          await tester.tap(find.text('修改分组'), warnIfMissed: false);
++          expect(actions, isEmpty);
++        }
++        await tester.tap(find.text(admin && online ? '修改分组' : '查看详情'));
++        await tester.pumpAndSettle();
++        expect(actions, [admin && online ? 'edit' : 'details']);
++      });
++    }
++  }
++}
+diff --git a/flutter/test/steaddesk/ops_groups_test.dart b/flutter/test/steaddesk/ops_groups_test.dart
+new file mode 100644
+index 0000000..65641fb
+--- /dev/null
++++ b/flutter/test/steaddesk/ops_groups_test.dart
+@@ -0,0 +1,291 @@
++import 'dart:async';
++import 'dart:convert';
++import 'dart:io';
++
++import 'package:flutter_test/flutter_test.dart';
++
++import 'package:flutter_hbb/steaddesk/ops_groups.dart';
++import 'package:flutter_hbb/steaddesk/personal_groups.dart';
++
++class Fixture {
++  late final HttpServer server;
++  late final Directory dir;
++  late final PersonalGroups local;
++  late OpsGroupStore store;
++  late final File cache;
++  Uri get origin => Uri.parse('http://127.0.0.1:${server.port}');
++  int status = 200, importStatus = 200, version = 1;
++  bool badMapping = false, visible = true;
++  String name = '共享组';
++  HttpResponse? events;
++  final cursors = <String?>[], imports = <List>[];
++  final writes = <(String?, String?, dynamic)>[];
++  int books = 0, reads = 0;
++  Completer<void>? holdGroups;
++  Map<String, dynamic> group(String id) => {
++        'id': id,
++        'name': name,
++        'device_ids': ['123456789'],
++        'owner': 'fixture',
++        'viewers': null,
++        'updated_at': '2026-01-01T12:34:00Z',
++        'version': version,
++        'projection': 'pending',
++        'extra': 'never-cache-unexpected-fields',
++      };
++  Future<void> setup() async {
++    dir = await Directory.systemTemp.createTemp('ops-store-test-');
++    cache = File('${dir.path}/groups.json');
++    local = PersonalGroups(() async => File('${dir.path}/personal.json'),
++        onReset: () {}, onChanged: () {});
++    server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
++    server.listen((req) async {
++      try {
++        expect(req.headers.value('authorization'), 'Bearer test-access');
++        final route = req.uri.path.replaceFirst('/ops/v1/', '');
++        final response = req.response;
++        if (req.method != 'GET') {
++          expect(req.contentLength, greaterThanOrEqualTo(0));
++          expect(req.headers.value('transfer-encoding'), isNull);
++        }
++        dynamic data;
++        if (status != 200) {
++          response.statusCode = status;
++          data = {};
++        } else if (route == 'events') {
++          events = response;
++          cursors.add(req.headers.value('Last-Event-ID'));
++          response.headers.contentType = ContentType('text', 'event-stream');
++          response.bufferOutput = false;
++          response.write(': connected\n\n');
++          await response.flush();
++          return;
++        } else if (route == 'groups') {
++          reads++;
++          if (holdGroups != null) await holdGroups!.future;
++          data = {
++            'groups': [if (visible) group('g_fixture')],
++            'server_time': '2026-01-01T12:34:00Z'
++          };
++        } else if (route == 'groups/g_fixture' && req.method == 'GET') {
++          data = group('g_fixture');
++        } else if (route == 'me/groups') {
++          data = {
++            'groups': [group('m_fixture')]
++          };
++        } else if (route == 'me/groups/import') {
++          final payload = jsonDecode(await utf8.decoder.bind(req).join());
++          imports.add(payload['groups']);
++          response.statusCode = importStatus;
++          data = {
++            'mapping': [
++              if (!badMapping)
++                for (final row in payload['groups'])
++                  {
++                    'local_id': row['local_id'],
++                    'id': 'm_fixture',
++                    'result': 'already_imported'
++                  }
++            ]
++          };
++        } else if (route == 'me/groups/m_fixture' && req.method == 'PATCH') {
++          final body = jsonDecode(await utf8.decoder.bind(req).join());
++          writes.add((
++            req.headers.value('If-Match'),
++            req.headers.value('Idempotency-Key'),
++            body
++          ));
++          if (req.headers.value('If-Match') != '"$version"') {
++            response.statusCode = 409;
++          } else {
++            version++;
++            name = body['name'];
++          }
++          data = group('m_fixture');
++        } else {
++          response.statusCode = 404;
++          data = {};
++        }
++        response.headers.contentType = ContentType.json;
++        response.write(jsonEncode(data));
++        await response.close();
++      } on SocketException {
++        /* disposing store closes in-flight connections */
++      } on HttpException {/* disposing store closes in-flight connections */}
++    });
++    store = create();
++  }
++
++  OpsGroupStore create({String account = 'fixture', Duration? poll}) =>
++      OpsGroupStore(
++        origin: origin,
++        token: 'test-access',
++        account: account,
++        cache: cache,
++        local: local,
++        pollInterval: poll ?? const Duration(minutes: 5),
++        reconnectDelay: const Duration(milliseconds: 35),
++        refreshBooks: () async {
++          books++;
++        },
++      );
++  Future<void> wait(bool Function() check) async {
++    final end = DateTime.now().add(const Duration(seconds: 4));
++    while (!check() && DateTime.now().isBefore(end)) {
++      await Future<void>.delayed(const Duration(milliseconds: 10));
++    }
++    expect(check(), isTrue);
++  }
++
++  Future<void> settled() => wait(() => cursors.isNotEmpty && books >= 2);
++  Future<void> close() async {
++    store.dispose();
++    if (holdGroups != null && !holdGroups!.isCompleted) holdGroups!.complete();
++    await server.close(force: true);
++    await dir.delete(recursive: true);
++  }
++}
++
++void main() {
++  late Fixture f;
++  setUp(() async {
++    f = Fixture();
++    await f.setup();
++  });
++  tearDown(() => f.close());
++
++  test(
++      'migration archives only acknowledged account after complete receipt; retries same local ID',
++      () async {
++    await f.local.create('fixture', '我的分组', ['123456789']);
++    await f.local.create('another', '其他账号', ['100000000']);
++    final original = (await f.local.list('fixture')).single.id;
++    f.importStatus = 422;
++    await f.store.start();
++    await f.settled();
++    expect(f.store.problem, contains('已保留'));
++    expect((await f.local.list('fixture')).single.id, original);
++    f.importStatus = 200;
++    f.badMapping = true;
++    await f.store.refresh();
++    expect((await f.local.list('fixture')).single.id, original);
++    f.badMapping = false;
++    await f.store.refresh();
++    expect(await f.local.list('fixture'), isEmpty);
++    expect((await f.local.list('another')).single.name, '其他账号');
++    final backup = f.dir
++        .listSync()
++        .whereType<File>()
++        .singleWhere((item) => item.path.contains('my-groups.imported-'));
++    final accounts = jsonDecode(await backup.readAsString())['accounts'];
++    expect(accounts.keys, ['fixture']);
++    expect(accounts['fixture'][0]['id'], original);
++    expect(
++        f.imports.every((rows) => rows.single['local_id'] == original), isTrue);
++  });
++
++  test(
++      '409 reloads server version; keeps single attempted write and no automatic replay',
++      () async {
++    await f.store.start();
++    await f.settled();
++    expect(f.store.shared.single.pending, isTrue);
++    expect((await f.store.detail('g_fixture')).deviceIds, {'123456789'});
++    f.version = 2;
++    f.name = '另一人改过';
++    await expectLater(
++        f.store.write('PATCH', 'me/groups/m_fixture',
++            version: 1, body: {'name': '我的输入'}),
++        throwsA(isA<OpsError>().having((e) => e.status, 'status', 409)));
++    expect(f.writes.length, 1);
++    expect(f.writes.single.$1, '"1"');
++    expect(f.writes.single.$2, isNotEmpty);
++    expect(f.writes.single.$3['name'], '我的输入');
++    expect(f.store.mine.single.name, '另一人改过');
++    expect(f.store.mine.single.version, 2);
++    await f.store.write('PATCH', 'me/groups/m_fixture',
++        version: 2, body: {'name': '确认后保存'});
++    expect(f.store.mine.single.name, '确认后保存');
++    expect(f.writes.first.$2, isNot(f.writes.last.$2));
++  });
++
++  test(
++      'on reconnect sends previous ID and revocations disappear without an event',
++      () async {
++    await f.store.start();
++    await f.settled();
++    final before = f.books;
++    final replay = StringBuffer();
++    for (int id = 7; id <= 1006; id++) {
++      replay.write('id: $id\nevent: group.changed\ndata: {}\n\n');
++    }
++    f.events!.write(replay);
++    await f.events!.flush();
++    await f.wait(() => f.books > before);
++    expect(f.books - before, 1);
++    f.visible = false;
++    await f.events!.close();
++    await f.wait(() => f.cursors.length >= 2 && f.store.shared.isEmpty);
++    expect(f.cursors[1], '1006');
++    expect(f.store.online, isTrue);
++    expect(jsonDecode(await f.cache.readAsString())['shared'], isEmpty);
++  });
++
++  test(
++      'polling catches a revoked group while the same stream remains connected',
++      () async {
++    f.store.dispose();
++    f.store = f.create(poll: const Duration(milliseconds: 120));
++    await f.store.start();
++    await f.settled();
++    f.visible = false;
++    await f.wait(() => f.store.shared.isEmpty);
++    expect(f.cursors.length, 1);
++  });
++
++  test('cache is account-bound; restart offline is read-only; 401 erases cache',
++      () async {
++    await f.store.start();
++    await f.settled();
++    expect(await f.cache.readAsString(), isNot(contains('test-access')));
++    expect(await f.cache.readAsString(),
++        isNot(contains('never-cache-unexpected-fields')));
++    f.store.dispose();
++    f.status = 503;
++    f.store = f.create();
++    await f.store.start();
++    expect(f.store.online, isFalse);
++    expect(f.store.shared.single.id, 'g_fixture');
++    expect(f.store.serverTime, DateTime.utc(2026, 1, 1, 12, 34));
++    await expectLater(f.store.write('DELETE', 'groups/g_fixture', version: 1),
++        throwsA(isA<OpsError>()));
++    f.store.dispose();
++    f.store = f.create(account: 'another');
++    await f.store.start();
++    expect(f.store.shared, isEmpty);
++    expect(f.store.mine, isEmpty);
++    f.store.dispose();
++    f.status = 401;
++    f.store = f.create();
++    await f.store.start();
++    expect(f.store.signedOut, isTrue);
++    expect(f.store.shared, isEmpty);
++    expect(await f.cache.exists(), isFalse);
++  });
++
++  test('in-flight snapshot cannot restore data or cache after logout',
++      () async {
++    await f.store.start();
++    await f.settled();
++    final initial = f.reads;
++    f.holdGroups = Completer<void>();
++    final read = expectLater(f.store.refresh(), throwsA(isA<OpsError>()));
++    await f.wait(() => f.reads > initial);
++    await f.store.logout();
++    f.holdGroups!.complete();
++    await read;
++    expect(f.store.shared, isEmpty);
++    expect(f.store.online, isFalse);
++    expect(await f.cache.exists(), isFalse);
++  });
++}
+diff --git a/flutter/test/steaddesk/shared_profiles_test.dart b/flutter/test/steaddesk/shared_profiles_test.dart
+new file mode 100644
+index 0000000..58e5264
+--- /dev/null
++++ b/flutter/test/steaddesk/shared_profiles_test.dart
+@@ -0,0 +1,63 @@
++import 'package:flutter_test/flutter_test.dart';
++import 'package:flutter_hbb/steaddesk/shared_profiles.dart';
++
++void main() {
++  test('v2.7 total=0 can still contain books with duplicate display names', () {
++    final pages = SharedProfilePages();
++    expect(
++        pages.add({
++          'total': 0,
++          'data': [
++            {'guid': '1-2-1', 'name': 'One'},
++            {'guid': '1-2-2', 'name': 'One'},
++            {'guid': '1-2-3', 'name': 'My address book'}
++          ]
++        }),
++        isTrue);
++    expect(pages.named('My address book').map((r) => r['name']),
++        ['One', 'One [1-2-2]', 'My address book [1-2-3]']);
++    expect(SharedProfilePages().add({'total': 0, 'data': null}), isTrue);
++  });
++
++  test('missing pages, changing totals and repeats cannot confirm removal', () {
++    final page = {'guid': '1-2-1', 'name': 'One'};
++    final pages = SharedProfilePages();
++    expect(
++        pages.add({
++          'total': 2,
++          'data': [page]
++        }),
++        isFalse);
++    for (final partial in [
++      {'total': 2, 'data': []},
++      {
++        'total': 0,
++        'data': [page]
++      },
++      {
++        'total': 2,
++        'data': [page]
++      },
++      {'total': 0}
++    ]) {
++      expect(() => pages.add(partial), throwsFormatException);
++    }
++  });
++
++  test(
++      'revoked and replaced book are cleared while the authorized book survives',
++      () {
++    final old = {'guid': 'old', 'cached': 'synthetic'},
++        revoked = {'guid': 'revoked', 'cached': 'synthetic'};
++    final kept = {'guid': 'kept', 'cached': 'synthetic'};
++    final cache = {'same-name': old, 'removed': revoked, 'other': kept};
++    expect(
++        pruneSharedBooks(cache, {'same-name': 'new', 'other': 'kept'},
++            (r) => r['guid'], (r) => r.clear()),
++        isTrue);
++    expect(cache, {'other': kept});
++    expect(old, isEmpty);
++    expect(revoked, isEmpty);
++    expect(kept.containsKey('cached'), isTrue);
++  });
++}
+diff --git a/flutter/tool/ops_groups_drill.dart b/flutter/tool/ops_groups_drill.dart
+new file mode 100644
+index 0000000..7172cae
+--- /dev/null
++++ b/flutter/tool/ops_groups_drill.dart
+@@ -0,0 +1,262 @@
++// Run with flutter test --no-pub --no-test-assets tool/ops_groups_drill.dart.
++// OPS_GROUPS_DRILL points to an owner-only JSON file from a disposable local
++// OPS stack (origin, tokens by synthetic username, and temporary directory).
++// Its fixture controller acknowledges expire.request by writing expire.done
++// after advancing the server's actual 1000-event retention window.
++import 'dart:convert';
++import 'dart:io';
++
++import 'package:flutter_test/flutter_test.dart';
++import 'package:flutter_hbb/steaddesk/ops_groups.dart';
++import 'package:flutter_hbb/steaddesk/personal_groups.dart';
++
++Future<void> until(bool Function() condition, String reason) async {
++  final end = DateTime.now().add(const Duration(seconds: 50));
++  while (!condition()) {
++    if (DateTime.now().isAfter(end)) throw StateError(reason);
++    await Future<void>.delayed(const Duration(milliseconds: 100));
++  }
++}
++
++// Only the connection into the second client is interrupted. All HTTP/SSE
++// data and status codes come from the real disposable server.
++class Link {
++  final Uri upstream;
++  final HttpServer server;
++  final connections = <Socket>{};
++  final upstreamClients = <HttpClient>{};
++  final cursors = <String?>[];
++  int writes = 0, fullLists = 0, privateLists = 0;
++  bool available = true;
++  Link(this.upstream, this.server);
++  Uri get origin => Uri.parse('http://127.0.0.1:${server.port}');
++  static Future<Link> open(Uri upstream) async {
++    final link =
++        Link(upstream, await HttpServer.bind(InternetAddress.loopbackIPv4, 0));
++    link.server.listen(link.forward);
++    return link;
++  }
++
++  Future<void> forward(HttpRequest request) async {
++    HttpClient? client;
++    Socket? socket;
++    try {
++      if (request.method != 'GET') writes++;
++      if (!available) {
++        request.response.statusCode = 503;
++        await request.response.close();
++        return;
++      }
++      final path = request.uri.path;
++      if (path.endsWith('/events')) {
++        cursors.add(request.headers.value('last-event-id'));
++      }
++      if (path == '/ops/v1/groups' &&
++          !request.uri.queryParameters.containsKey('since')) fullLists++;
++      if (path == '/ops/v1/me/groups') privateLists++;
++      client = HttpClient()..findProxy = (_) => 'DIRECT';
++      upstreamClients.add(client);
++      final target = await client.openUrl(
++          request.method, upstream.resolveUri(request.uri));
++      for (final name in [
++        'authorization',
++        'content-type',
++        'idempotency-key',
++        'if-match',
++        'last-event-id'
++      ]) {
++        final value = request.headers.value(name);
++        if (value != null) target.headers.set(name, value);
++      }
++      if (request.contentLength >= 0) {
++        target.contentLength = request.contentLength;
++      }
++      await target.addStream(request);
++      final response = await target.close();
++      request.response.statusCode = response.statusCode;
++      final type = response.headers.value('content-type');
++      if (type != null) request.response.headers.set('content-type', type);
++      if (path.endsWith('/events') && response.statusCode == 200) {
++        // Frame SSE as a close-delimited HTTP body. The cut must close the
++        // downstream connection even if the upstream is waiting for a heartbeat.
++        request.response.persistentConnection = false;
++        request.response.headers.chunkedTransferEncoding = false;
++        socket = await request.response.detachSocket(writeHeaders: true);
++        connections.add(socket);
++        await for (final bytes in response) {
++          socket.add(bytes);
++          await socket.flush();
++        }
++      } else {
++        await request.response.addStream(response);
++        await request.response.close();
++      }
++    } catch (_) {
++      try {
++        await request.response.close();
++      } catch (_) {}
++    } finally {
++      socket?.destroy();
++      connections.remove(socket);
++      client?.close(force: true);
++      upstreamClients.remove(client);
++    }
++  }
++
++  void cut() {
++    available = false;
++    for (final socket in connections.toList()) {
++      socket.destroy();
++    }
++    for (final client in upstreamClients.toList()) {
++      client.close(force: true);
++    }
++  }
++
++  Future<void> close() async {
++    cut();
++    await server.close(force: true);
++  }
++}
++
++void main() {
++  test('local issued sessions, versions, migration, SSE and offline cache',
++      () async {
++    final input = File(Platform.environment['OPS_GROUPS_DRILL']!);
++    expect((await input.stat()).mode & 0x3f, 0,
++        reason: 'Private session file required');
++    final cfg = jsonDecode(await input.readAsString());
++    final origin = Uri.parse(cfg['origin']);
++    expect(origin.scheme, 'http');
++    expect(origin.host, '127.0.0.1');
++    final temp = Directory(cfg['temp']);
++    final link = await Link.open(origin);
++    addTearDown(link.close);
++    PersonalGroups local(String name) =>
++        PersonalGroups(() async => File('${temp.path}/$name.local.json'),
++            onReset: () {}, onChanged: () {});
++    OpsGroupStore session(String user, String slot,
++        {Uri? via, PersonalGroups? groups}) {
++      final store = OpsGroupStore(
++          origin: via ?? origin,
++          token: cfg['tokens'][user],
++          account: user,
++          cache: File('${temp.path}/$slot.cache.json'),
++          local: groups ?? local(slot),
++          refreshBooks: () async {});
++      addTearDown(store.dispose);
++      return store;
++    }
++
++    final a = session('t-admin', 'a'),
++        b = session('t-admin2', 'b', via: link.origin);
++    final migrated = local('support');
++    await migrated.create('t-support', 'Migrated local', ['791013223']);
++    final support = session('t-support', 'support', groups: migrated);
++    await a.start();
++    await b.start();
++    await support.start();
++    expect(support.online, isTrue, reason: support.problem);
++    expect(support.problem, isNull);
++    expect(
++        support.mine.where((e) => e.name == 'Migrated local').single.deviceIds,
++        {'791013223'});
++    expect(await migrated.list('t-support'), isEmpty);
++    await a.write('POST', 'groups',
++        body: {'name': 'Visible fixture', 'owner': 't-support'});
++    await a.write('POST', 'groups',
++        body: {'name': 'Hidden fixture', 'owner': 't-support2'});
++    await a.refresh();
++    await support.refresh();
++    await b.refresh();
++    final group = a.shared.singleWhere((e) => e.name == 'Visible fixture');
++    final hidden = a.shared.singleWhere((e) => e.name == 'Hidden fixture');
++    expect(support.shared.map((e) => e.id), contains(group.id));
++    expect(support.shared.map((e) => e.id), isNot(contains(hidden.id)));
++    expect((await support.detail(group.id)).viewers, isNull);
++    await expectLater(support.detail(hidden.id),
++        throwsA(isA<OpsError>().having((e) => e.status, 'status', 404)));
++    await expectLater(
++        support.write('POST', 'groups',
++            body: {'name': 'Denied', 'owner': 't-support'}),
++        throwsA(isA<OpsError>().having((e) => e.status, 'status', 403)));
++    final first = await a.detail(group.id), stale = await b.detail(group.id);
++    expect(first.version, stale.version);
++    await a.write('PATCH', 'groups/${group.id}',
++        version: first.version, body: {'name': 'First writer'});
++    await expectLater(
++        b.write('PATCH', 'groups/${group.id}',
++            version: stale.version, body: {'name': 'Stale writer'}),
++        throwsA(isA<OpsError>().having((e) => e.status, 'status', 409)));
++    expect(b.shared.singleWhere((e) => e.id == group.id).name, 'First writer');
++    expect((await a.detail(group.id)).name, 'First writer');
++    print(
++        'PASS real role visibility, support HTTP 403/404, two-session 409, local migration committed');
++
++    final invalid = local('failed');
++    await invalid.create('t-support2', 'A valid', ['791013223']);
++    await invalid.create('t-support2', 'B oversized',
++        List.generate(501, (i) => (790000000 + i).toString()));
++    final failed = session('t-support2', 'failed', groups: invalid);
++    try {
++      await failed.start();
++    } on OpsError catch (_) {}
++    expect(failed.problem, isNotNull);
++    expect((await invalid.list('t-support2')).length, 2);
++    final checkClient = HttpClient()..findProxy = (_) => 'DIRECT';
++    addTearDown(() => checkClient.close(force: true));
++    final req = await checkClient.getUrl(origin.resolve('/ops/v1/me/groups'));
++    req.headers.set('authorization', 'Bearer ${cfg['tokens']['t-support2']}');
++    final response = await req.close();
++    expect(response.statusCode, 200);
++    expect(jsonDecode(await utf8.decoder.bind(response).join())['groups'],
++        isEmpty);
++    print(
++        'PASS failed import retained both local groups; independent server read confirmed rollback');
++
++    await until(() => link.connections.isNotEmpty, 'no initial SSE channel');
++    final current = await a.detail(group.id);
++    await a.write('PATCH', 'groups/${group.id}',
++        version: current.version, body: {'name': 'SSE observed'});
++    await until(() => b.shared.any((e) => e.name == 'SSE observed'),
++        'SSE did not refresh second client');
++    final full = link.fullLists, private = link.privateLists;
++    link.cut();
++    try {
++      await b.refresh();
++    } catch (_) {}
++    await until(() => !b.online, 'second client did not enter offline state');
++    expect(b.serverTime, isNotNull);
++    expect(b.shared.any((e) => e.name == 'SSE observed'), isTrue);
++    final writes = link.writes;
++    await expectLater(
++        b.write('POST', 'groups',
++            body: {'name': 'Offline write', 'owner': 't-support'}),
++        throwsA(isA<OpsError>()));
++    expect(link.writes, writes);
++    final reopened = session('t-admin2', 'b', via: link.origin);
++    await reopened.start();
++    expect(reopened.online, isFalse);
++    expect(reopened.serverTime, isNotNull);
++    expect(reopened.shared.any((e) => e.name == 'SSE observed'), isTrue);
++    print('PASS offline cached snapshot survives client reopen; edit rejected');
++    await a.write('PATCH', 'groups/${group.id}',
++        version: (await a.detail(group.id)).version,
++        body: {'name': 'Missed change'});
++    await File('${temp.path}/expire.request')
++        .writeAsString(support.mine.single.id);
++    await until(() => File('${temp.path}/expire.done').existsSync(),
++        'fixture did not expire event retention window');
++    link.available = true;
++    await until(
++        () => link.cursors.any((cursor) => cursor != null && cursor.isNotEmpty),
++        'reconnect did not supply Last-Event-ID');
++    await until(
++        () => b.online && b.shared.any((e) => e.name == 'Missed change'),
++        'reconnect missed a server-side change');
++    expect(link.fullLists, greaterThan(full));
++    expect(link.privateLists, greaterThan(private));
++    print(
++        'PASS live SSE refresh, resumed Last-Event-ID and full-list recovery across expired window');
++  }, timeout: const Timeout(Duration(minutes: 4)));
++}
