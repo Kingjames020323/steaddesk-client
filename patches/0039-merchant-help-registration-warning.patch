@@ -1,0 +1,32 @@
+diff --git a/flutter/lib/steaddesk/help/merchant_help_widget.dart b/flutter/lib/steaddesk/help/merchant_help_widget.dart
+index 541e834..fdf01cd 100644
+--- a/flutter/lib/steaddesk/help/merchant_help_widget.dart
++++ b/flutter/lib/steaddesk/help/merchant_help_widget.dart
+@@ -307,6 +307,8 @@ class HelpWaiting extends StatelessWidget {
+     return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+       if (view['lane'] == 'unverified')
+         Text(t('Awaiting manual device verification')),
++      if (view['re_register_required'] == true)
++        Text(t('Contact support to register this device again.')),
+       if (queued) ...[
+         if (view['ahead'] is int)
+           Text(format('%s ahead of you', view['ahead']),
+diff --git a/flutter/test/steaddesk/merchant_help_test.dart b/flutter/test/steaddesk/merchant_help_test.dart
+index 2caafe9..fec227a 100644
+--- a/flutter/test/steaddesk/merchant_help_test.dart
++++ b/flutter/test/steaddesk/merchant_help_test.dart
+@@ -339,6 +339,14 @@ void main() {
+                     busy: false,
+                     act: (name, body) => actions.add(name)))));
+     await show(request);
++    const warning = 'Contact support to register this device again.';
++    expect(find.text(warning), findsNothing);
++    await show({...request, 'lane': 'unverified', 're_register_required': true});
++    expect(find.text(warning), findsOneWidget);
++    expect(find.text('Awaiting manual device verification'), findsOneWidget);
++    expect(find.text('2 ahead of you'), findsOneWidget);
++    await show({...request, 're_register_required': false});
++    expect(find.text(warning), findsNothing);
+     expect(find.text('2 ahead of you'), findsOneWidget);
+     expect(find.text('This solved my problem'), findsNothing);
+     expect(find.textContaining('Estimated wait'), findsNothing);
