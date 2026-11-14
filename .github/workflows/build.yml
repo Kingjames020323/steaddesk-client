@@ -13,6 +13,7 @@ name: Build SteadDesk
 permissions:
   contents: read
 env:
+  STEADDESK_HELP: ${{ vars.STEADDESK_HELP }}
   STEADDESK_QUALITY: ${{ vars.STEADDESK_QUALITY }}
   STEADDESK_OPS_HEALTH: ${{ vars.STEADDESK_OPS_HEALTH }}
   STEADDESK_OPS_GROUPS: ${{ vars.STEADDESK_OPS_GROUPS }}
