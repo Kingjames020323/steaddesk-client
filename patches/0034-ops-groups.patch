@@ -655,10 +655,10 @@ index 0000000..e142f6b
 +}
 diff --git a/flutter/lib/steaddesk/ops_groups.dart b/flutter/lib/steaddesk/ops_groups.dart
 new file mode 100644
-index 0000000..fdf316c
+index 0000000..2256e14
 --- /dev/null
 +++ b/flutter/lib/steaddesk/ops_groups.dart
-@@ -0,0 +1,522 @@
+@@ -0,0 +1,548 @@
 +import 'dart:async';
 +import 'dart:convert';
 +import 'dart:io';
@@ -776,7 +776,8 @@ index 0000000..fdf316c
 +  String? _cursor, _pendingCursor;
 +  Timer? _eventTimer;
 +  HttpClient? _feed;
-+  bool _readingEvents = false;
++  Future<void>? _eventBatch;
++  bool _closingFeed = false;
 +  int _connection = 0;
 +  bool _migrated = false;
 +
@@ -1073,25 +1074,34 @@ index 0000000..fdf316c
 +  void _scheduleEvents(int connection) {
 +    if (!_active ||
 +        _connection != connection ||
++        _closingFeed ||
 +        _eventTimer != null ||
-+        _readingEvents ||
-+        _pendingCursor == null) return;
-+    _eventTimer = Timer(const Duration(seconds: 2), () async {
++        _eventBatch != null ||
++        _pendingCursor == null) {
++      return;
++    }
++    _eventTimer = Timer(const Duration(seconds: 2), () {
 +      _eventTimer = null;
-+      if (!_active || _connection != connection) return;
-+      final cursor = _pendingCursor;
-+      _pendingCursor = null;
-+      _readingEvents = true;
-+      try {
-+        await _queue(_snapshot);
-+        if (_active && _connection == connection) _cursor = cursor;
-+      } on OpsError {
-+        if (_active && _connection == connection) _pendingCursor ??= cursor;
-+      } finally {
-+        _readingEvents = false;
-+        _scheduleEvents(_connection);
-+      }
++      unawaited(_commitEvents(connection));
 +    });
++  }
++
++  Future<void> _commitEvents(int connection) async {
++    final cursor = _pendingCursor;
++    if (!_active || _connection != connection || cursor == null) return;
++    _pendingCursor = null;
++    final batch = _queue(_snapshot);
++    _eventBatch = batch.then<void>((_) {
++      if (_active && _connection == connection) _cursor = cursor;
++    }, onError: (Object _) {
++      if (_active && _connection == connection) _pendingCursor ??= cursor;
++    });
++    try {
++      await _eventBatch;
++    } finally {
++      _eventBatch = null;
++      _scheduleEvents(connection);
++    }
 +  }
 +
 +  Future<void> _events() async {
@@ -1135,10 +1145,17 @@ index 0000000..fdf316c
 +    } finally {
 +      feed.close(force: true);
 +      _feed = null;
-+      _connection++;
-+      _pendingCursor = null;
++      _closingFeed = true;
 +      _eventTimer?.cancel();
 +      _eventTimer = null;
++      // A disconnect may race either the debounce or the snapshot's cache write.
++      // Acknowledge complete frames only after that snapshot has succeeded.
++      final batch = _eventBatch;
++      if (batch != null) await batch;
++      await _commitEvents(connection);
++      _pendingCursor = null;
++      _connection++;
++      _closingFeed = false;
 +      if (_active) {
 +        const delays = [1, 2, 5, 10, 30];
 +        final delay = delays[_retries];
@@ -1172,6 +1189,15 @@ index 0000000..fdf316c
 +    _poll?.cancel();
 +    _feed?.close(force: true);
 +    _http.close(force: true);
++  }
++
++  // Dispose synchronously for Flutter, then allow owners to wait for queued I/O
++  // before releasing a cache directory or moving it to a different account.
++  Future<void> get settledAfterDispose async {
++    assert(_disposed);
++    await _work;
++    final files = _fileWork[cache.absolute.path];
++    if (files != null) await files;
 +  }
 +
 +  @override
@@ -2219,10 +2245,10 @@ index 0000000..73a55e5
 +}
 diff --git a/flutter/test/steaddesk/ops_groups_test.dart b/flutter/test/steaddesk/ops_groups_test.dart
 new file mode 100644
-index 0000000..65641fb
+index 0000000..7f99996
 --- /dev/null
 +++ b/flutter/test/steaddesk/ops_groups_test.dart
-@@ -0,0 +1,291 @@
+@@ -0,0 +1,328 @@
 +import 'dart:async';
 +import 'dart:convert';
 +import 'dart:io';
@@ -2240,13 +2266,14 @@ index 0000000..65641fb
 +  late final File cache;
 +  Uri get origin => Uri.parse('http://127.0.0.1:${server.port}');
 +  int status = 200, importStatus = 200, version = 1;
-+  bool badMapping = false, visible = true;
++  bool badMapping = false, visible = true, failGroupReads = false;
 +  String name = '共享组';
 +  HttpResponse? events;
 +  final cursors = <String?>[], imports = <List>[];
 +  final writes = <(String?, String?, dynamic)>[];
 +  int books = 0, reads = 0;
 +  Completer<void>? holdGroups;
++  Completer<void>? holdBooks, enteredBooks;
 +  Map<String, dynamic> group(String id) => {
 +        'id': id,
 +        'name': name,
@@ -2287,6 +2314,7 @@ index 0000000..65641fb
 +          return;
 +        } else if (route == 'groups') {
 +          reads++;
++          if (failGroupReads) response.statusCode = 503;
 +          if (holdGroups != null) await holdGroups!.future;
 +          data = {
 +            'groups': [if (visible) group('g_fixture')],
@@ -2352,6 +2380,9 @@ index 0000000..65641fb
 +        reconnectDelay: const Duration(milliseconds: 35),
 +        refreshBooks: () async {
 +          books++;
++          final entered = enteredBooks;
++          if (entered != null && !entered.isCompleted) entered.complete();
++          if (holdBooks != null) await holdBooks!.future;
 +        },
 +      );
 +  Future<void> wait(bool Function() check) async {
@@ -2366,7 +2397,9 @@ index 0000000..65641fb
 +  Future<void> close() async {
 +    store.dispose();
 +    if (holdGroups != null && !holdGroups!.isCompleted) holdGroups!.complete();
++    if (holdBooks != null && !holdBooks!.isCompleted) holdBooks!.complete();
 +    await server.close(force: true);
++    await store.settledAfterDispose;
 +    await dir.delete(recursive: true);
 +  }
 +}
@@ -2440,26 +2473,53 @@ index 0000000..65641fb
 +    await f.store.start();
 +    await f.settled();
 +    final before = f.books;
++    f.enteredBooks = Completer<void>();
++    f.holdBooks = Completer<void>();
 +    final replay = StringBuffer();
 +    for (int id = 7; id <= 1006; id++) {
 +      replay.write('id: $id\nevent: group.changed\ndata: {}\n\n');
 +    }
 +    f.events!.write(replay);
 +    await f.events!.flush();
-+    await f.wait(() => f.books > before);
++    await f.enteredBooks!.future.timeout(const Duration(seconds: 8));
 +    expect(f.books - before, 1);
 +    f.visible = false;
 +    await f.events!.close();
++    f.holdBooks!.complete();
 +    await f.wait(() => f.cursors.length >= 2 && f.store.shared.isEmpty);
 +    expect(f.cursors[1], '1006');
 +    expect(f.store.online, isTrue);
 +    expect(jsonDecode(await f.cache.readAsString())['shared'], isEmpty);
 +  });
 +
++  test('EOF drains the last received batch before reopening the stream',
++      () async {
++    await f.store.start();
++    await f.settled();
++    final stream = f.events!;
++    stream.write('id: 19\nevent: group.changed\ndata: {}\n\n');
++    await stream.close();
++    await f.wait(() => f.cursors.length >= 2);
++    expect(f.cursors[1], '19');
++  });
++
++  test('failed disconnect snapshot leaves the cursor unacknowledged', () async {
++    await f.store.start();
++    await f.settled();
++    f.failGroupReads = true;
++    final stream = f.events!;
++    stream.write('id: 20\nevent: group.changed\ndata: {}\n\n');
++    await stream.close();
++    await f.wait(() => f.cursors.length >= 2);
++    expect(f.cursors[1], isNull);
++    expect(f.store.online, isFalse);
++  });
++
 +  test(
 +      'polling catches a revoked group while the same stream remains connected',
 +      () async {
 +    f.store.dispose();
++    await f.store.settledAfterDispose;
 +    f.store = f.create(poll: const Duration(milliseconds: 120));
 +    await f.store.start();
 +    await f.settled();
@@ -2476,6 +2536,7 @@ index 0000000..65641fb
 +    expect(await f.cache.readAsString(),
 +        isNot(contains('never-cache-unexpected-fields')));
 +    f.store.dispose();
++    await f.store.settledAfterDispose;
 +    f.status = 503;
 +    f.store = f.create();
 +    await f.store.start();
@@ -2485,11 +2546,13 @@ index 0000000..65641fb
 +    await expectLater(f.store.write('DELETE', 'groups/g_fixture', version: 1),
 +        throwsA(isA<OpsError>()));
 +    f.store.dispose();
++    await f.store.settledAfterDispose;
 +    f.store = f.create(account: 'another');
 +    await f.store.start();
 +    expect(f.store.shared, isEmpty);
 +    expect(f.store.mine, isEmpty);
 +    f.store.dispose();
++    await f.store.settledAfterDispose;
 +    f.status = 401;
 +    f.store = f.create();
 +    await f.store.start();
