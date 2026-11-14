@@ -1,9 +1,9 @@
 diff --git a/flutter/lib/steaddesk/help/merchant_help_client.dart b/flutter/lib/steaddesk/help/merchant_help_client.dart
 new file mode 100644
-index 0000000..a9dd945
+index 0000000..efae68b
 --- /dev/null
 +++ b/flutter/lib/steaddesk/help/merchant_help_client.dart
-@@ -0,0 +1,341 @@
+@@ -0,0 +1,363 @@
 +import 'dart:async';
 +import 'dart:convert';
 +import 'dart:io';
@@ -285,12 +285,28 @@ index 0000000..a9dd945
 +          .take(3)
 +          .toList();
 +    }
++    if (record?['diagnostic'] != null || attachmentPending) {
++      // An accepted upload advances the ticket version even if its reply is lost.
++      record!['attachmentVersionPending'] = true;
++      await save();
++    }
 +    if (record?['diagnostic'] != null) {
 +      await call('PUT', 'me/diagnostic', body: record!['diagnostic']);
 +      record!.remove('diagnostic');
 +      await save();
 +    }
 +    if (attachmentPending) await upload();
++    await syncAttachmentVersion();
++  }
++
++  Future<void> syncAttachmentVersion() async {
++    if (record?['attachmentVersionPending'] != true) return;
++    final snapshot = await call('GET', 'me');
++    await accept(snapshot);
++    if (record != null) {
++      record!.remove('attachmentVersionPending');
++      await save();
++    }
 +  }
 +
 +  Future<void> upload() async {
@@ -316,6 +332,12 @@ index 0000000..a9dd945
 +  Future<void> act(String action, HelpJson body) async {
 +    if (record!['action'] != null) {
 +      await refresh();
++      return;
++    }
++    final previousState = view!['state'];
++    await syncAttachmentVersion();
++    if (view?['state'] != previousState) {
++      notice = 'The request changed. Its latest status is shown.';
 +      return;
 +    }
 +    record!['action'] = {
@@ -908,10 +930,10 @@ index b99d08b..2a44c6a 100644
    provider: ^6.0.5
 diff --git a/flutter/test/steaddesk/merchant_help_test.dart b/flutter/test/steaddesk/merchant_help_test.dart
 new file mode 100644
-index 0000000..fc645c8
+index 0000000..2caafe9
 --- /dev/null
 +++ b/flutter/test/steaddesk/merchant_help_test.dart
-@@ -0,0 +1,313 @@
+@@ -0,0 +1,371 @@
 +import 'dart:convert';
 +import 'dart:io';
 +import 'dart:typed_data';
@@ -1030,7 +1052,10 @@ index 0000000..fc645c8
 +    final posts = <String?>[];
 +    final timestamps = <int>[];
 +    final c = client((origin, method, path, secret, body, key, version) async {
-+      if (path == 'me') throw HelpFailure(404);
++      if (path == 'me') {
++        if (posts.length < 3) throw HelpFailure(404);
++        return request;
++      }
 +      if (path == 'me/step-cards') return {'cards': []};
 +      if (path == 'me/diagnostic') return {};
 +      posts.add(key);
@@ -1076,6 +1101,61 @@ index 0000000..fc645c8
 +    expect(keys.first, keys.last);
 +    expect(restarted.view!['state'], 'callback_requested');
 +  });
++
++  for (final interrupted in [false, true]) {
++    test('first callback after attachment writes (lost response: $interrupted)',
++        () async {
++      var serverVersion = 1,
++          posts = 0,
++          diagnosticWrites = 0,
++          screenshotWrites = 0;
++      var state = 'queued';
++      HelpJson snapshot() =>
++          {...request, 'version': serverVersion, 'state': state};
++      Future<HelpJson> api(Uri origin, String method, String path,
++          String? secret, HelpJson? body, String? key, int? version) async {
++        if (path == 'capabilities') return {'screenshots': true};
++        if (path == 'me/step-cards') return {'cards': []};
++        if (path == 'me/diagnostic') {
++          if (diagnosticWrites++ == 0) serverVersion++;
++          return {'accepted': true};
++        }
++        if (path == 'me/screenshot/chunks/0') {
++          if (screenshotWrites++ == 0) {
++            serverVersion++;
++            if (interrupted) {
++              throw const SocketException('response lost after commit');
++            }
++          }
++          return {'accepted': true};
++        }
++        if (path == 'me/callback') {
++          posts++;
++          if (version != serverVersion) throw HelpFailure(409);
++          state = 'callback_requested';
++          serverVersion++;
++        }
++        return snapshot();
++      }
++
++      var c = client(api);
++      await c.capabilities();
++      await c.create('frozen', '', Uint8List.fromList([1]));
++      if (interrupted) {
++        await expectLater(c.refresh(), throwsA(isA<SocketException>()));
++        c = client(api);
++        await c.initialize();
++        // The first tap after restart also recovers a committed attachment.
++      } else {
++        await c.refresh();
++      }
++      await c.act('callback', {});
++      expect(c.view!['state'], 'callback_requested');
++      expect([serverVersion, posts], [4, 1]);
++      await c.refresh();
++      expect([serverVersion, posts], [4, 1]);
++    });
++  }
 +
 +  test('screenshot opt-in, digest, bounded chunks and terminal cleanup',
 +      () async {
