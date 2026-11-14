@@ -2245,10 +2245,10 @@ index 0000000..73a55e5
 +}
 diff --git a/flutter/test/steaddesk/ops_groups_test.dart b/flutter/test/steaddesk/ops_groups_test.dart
 new file mode 100644
-index 0000000..7f99996
+index 0000000..347aef6
 --- /dev/null
 +++ b/flutter/test/steaddesk/ops_groups_test.dart
-@@ -0,0 +1,328 @@
+@@ -0,0 +1,351 @@
 +import 'dart:async';
 +import 'dart:convert';
 +import 'dart:io';
@@ -2263,6 +2263,7 @@ index 0000000..7f99996
 +  late final Directory dir;
 +  late final PersonalGroups local;
 +  late OpsGroupStore store;
++  OpsGroupStore? stopped;
 +  late final File cache;
 +  Uri get origin => Uri.parse('http://127.0.0.1:${server.port}');
 +  int status = 200, importStatus = 200, version = 1;
@@ -2394,12 +2395,32 @@ index 0000000..7f99996
 +  }
 +
 +  Future<void> settled() => wait(() => cursors.isNotEmpty && books >= 2);
++  // _snapshot notifies after its awaited cache save (including any save error).
++  // Subscribe before releasing the fixture so that the exact notification cannot be missed.
++  Future<void> nextSnapshot(bool Function() matches) {
++    final done = Completer<void>();
++    void listener() {
++      if (matches() && !done.isCompleted) done.complete();
++    }
++    store.addListener(listener);
++    return done.future.timeout(const Duration(seconds: 8)).whenComplete(
++        () => store.removeListener(listener));
++  }
++
++  Future<void> stopStore() {
++    if (!identical(stopped, store)) {
++      stopped = store;
++      store.dispose();
++    }
++    return store.settledAfterDispose;
++  }
++
 +  Future<void> close() async {
-+    store.dispose();
++    final drained = stopStore();
 +    if (holdGroups != null && !holdGroups!.isCompleted) holdGroups!.complete();
 +    if (holdBooks != null && !holdBooks!.isCompleted) holdBooks!.complete();
 +    await server.close(force: true);
-+    await store.settledAfterDispose;
++    await drained;
 +    await dir.delete(recursive: true);
 +  }
 +}
@@ -2483,12 +2504,18 @@ index 0000000..7f99996
 +    await f.events!.flush();
 +    await f.enteredBooks!.future.timeout(const Duration(seconds: 8));
 +    expect(f.books - before, 1);
++    final revoked = f.nextSnapshot(
++        () => f.cursors.length >= 2 && f.store.shared.isEmpty && f.store.online);
 +    f.visible = false;
 +    await f.events!.close();
 +    f.holdBooks!.complete();
-+    await f.wait(() => f.cursors.length >= 2 && f.store.shared.isEmpty);
++    await revoked;
++    expect(f.store.shared, isEmpty);
++    expect(f.store.problem, isNull);
 +    expect(f.cursors[1], '1006');
 +    expect(f.store.online, isTrue);
++    // Stop poll/SSE and drain queued renames before opening the file on Windows.
++    await f.stopStore();
 +    expect(jsonDecode(await f.cache.readAsString())['shared'], isEmpty);
 +  });
 +
@@ -2518,8 +2545,7 @@ index 0000000..7f99996
 +  test(
 +      'polling catches a revoked group while the same stream remains connected',
 +      () async {
-+    f.store.dispose();
-+    await f.store.settledAfterDispose;
++    await f.stopStore();
 +    f.store = f.create(poll: const Duration(milliseconds: 120));
 +    await f.store.start();
 +    await f.settled();
@@ -2532,11 +2558,10 @@ index 0000000..7f99996
 +      () async {
 +    await f.store.start();
 +    await f.settled();
-+    expect(await f.cache.readAsString(), isNot(contains('test-access')));
-+    expect(await f.cache.readAsString(),
-+        isNot(contains('never-cache-unexpected-fields')));
-+    f.store.dispose();
-+    await f.store.settledAfterDispose;
++    await f.stopStore();
++    final saved = await f.cache.readAsString();
++    expect(saved, isNot(contains('test-access')));
++    expect(saved, isNot(contains('never-cache-unexpected-fields')));
 +    f.status = 503;
 +    f.store = f.create();
 +    await f.store.start();
@@ -2545,14 +2570,12 @@ index 0000000..7f99996
 +    expect(f.store.serverTime, DateTime.utc(2026, 1, 1, 12, 34));
 +    await expectLater(f.store.write('DELETE', 'groups/g_fixture', version: 1),
 +        throwsA(isA<OpsError>()));
-+    f.store.dispose();
-+    await f.store.settledAfterDispose;
++    await f.stopStore();
 +    f.store = f.create(account: 'another');
 +    await f.store.start();
 +    expect(f.store.shared, isEmpty);
 +    expect(f.store.mine, isEmpty);
-+    f.store.dispose();
-+    await f.store.settledAfterDispose;
++    await f.stopStore();
 +    f.status = 401;
 +    f.store = f.create();
 +    await f.store.start();
