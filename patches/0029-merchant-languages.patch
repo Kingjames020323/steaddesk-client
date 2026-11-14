@@ -1,0 +1,1498 @@
+diff --git a/flutter/android/app/build.gradle b/flutter/android/app/build.gradle
+index df4ab3e..00fbc1b 100644
+--- a/flutter/android/app/build.gradle
++++ b/flutter/android/app/build.gradle
+@@ -94,6 +94,7 @@ android {
+     defaultConfig {
+         // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
+         applicationId "com.steaddesk.remote"
++        buildConfigField "boolean", "MERCHANT_EDITION", merchantEdition.toString()
+         buildConfigField "boolean", "SHOW_BOOT_TOAST", (!merchantEdition || showMerchantBootToast).toString()
+         minSdkVersion 22
+         targetSdkVersion 36
+diff --git a/flutter/android/app/src/main/AndroidManifest.xml b/flutter/android/app/src/main/AndroidManifest.xml
+index e1715e1..5a5186f 100644
+--- a/flutter/android/app/src/main/AndroidManifest.xml
++++ b/flutter/android/app/src/main/AndroidManifest.xml
+@@ -49,7 +49,7 @@
+             android:name=".InputService"
+             android:enabled="true"
+             android:exported="false"
+-            android:label="SteadDesk Input"
++            android:label="@string/steaddesk_input"
+             android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+             <intent-filter>
+                 <action android:name="android.accessibilityservice.AccessibilityService" />
+diff --git a/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/AudioRecordHandle.kt b/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/AudioRecordHandle.kt
+index 5df5474..7926638 100644
+--- a/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/AudioRecordHandle.kt
++++ b/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/AudioRecordHandle.kt
+@@ -199,9 +199,9 @@ class AudioRecordHandle(private var context: Context, private var isVideoStart:
+             context,
+             Manifest.permission.RECORD_AUDIO
+         ) != PackageManager.PERMISSION_GRANTED) {
+-            "To start a voice call, enable \"Audio capture\" on the \"Screen share\" page."
++            context.merchantText(R.string.merchant_voice_permission) { "To start a voice call, enable \"Audio capture\" on the \"Screen share\" page." }
+         } else {
+-            "Failed to start voice call."
++            context.merchantText(R.string.merchant_voice_start_failed) { "Failed to start voice call." }
+         }
+     }
+ 
+diff --git a/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/BootReceiver.kt b/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/BootReceiver.kt
+index ca353bf..9f8ded7 100644
+--- a/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/BootReceiver.kt
++++ b/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/BootReceiver.kt
+@@ -16,12 +16,13 @@ class BootReceiver : BroadcastReceiver() {
+     private val logTag = "tagBootReceiver"
+ 
+     override fun onReceive(context: Context, intent: Intent) {
+-        Log.d(logTag, "onReceive ${intent.action}")
++        val event = context.merchantText(R.string.recovery_broadcast) { "onReceive" }
++        Log.d(logTag, "$event ${intent.action}")
+ 
+         val fromUpdate = intent.action == Intent.ACTION_MY_PACKAGE_REPLACED
+         if (fromUpdate || Intent.ACTION_BOOT_COMPLETED == intent.action || DEBUG_BOOT_COMPLETED == intent.action) {
+             if (resumeService(context) && !fromUpdate && BuildConfig.SHOW_BOOT_TOAST) {
+-                Toast.makeText(context, R.string.steaddesk_service_started, Toast.LENGTH_LONG).show()
++                Toast.makeText(context, MerchantLanguage.text(context, R.string.steaddesk_service_started), Toast.LENGTH_LONG).show()
+             }
+         }
+     }
+@@ -29,7 +30,7 @@ class BootReceiver : BroadcastReceiver() {
+     companion object {
+         @JvmStatic fun resumeService(context: Context): Boolean {
+             if (!XXPermissions.isGranted(context, REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, SYSTEM_ALERT_WINDOW)) {
+-                Log.d("tagBootReceiver", "Recovery permissions missing")
++                Log.d("tagBootReceiver", context.merchantText(R.string.recovery_permissions) { "Recovery permissions missing" })
+                 return false
+             }
+             val it = Intent(context, MainService::class.java).apply {
+diff --git a/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/FloatingWindowService.kt b/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/FloatingWindowService.kt
+index 6dd4a2f..1900d87 100644
+--- a/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/FloatingWindowService.kt
++++ b/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/FloatingWindowService.kt
+@@ -303,17 +303,17 @@ class FloatingWindowService : Service(), View.OnTouchListener {
+      private fun showPopupMenu() {
+          val popupMenu = PopupMenu(this, floatingView)
+          val idShowRustDesk = 0
+-         popupMenu.menu.add(0, idShowRustDesk, 0, translate("Show RustDesk"))
++         popupMenu.menu.add(0, idShowRustDesk, 0, merchantText(R.string.merchant_show) { translate("Show RustDesk") })
+          // For host side, clipboard sync
+          val idSyncClipboard = 1
+          val isServiceSyncEnabled = (MainActivity.rdClipboardManager?.isCaptureStarted ?: false) && FFI.isServiceClipboardEnabled()
+          if (isServiceSyncEnabled) {
+-             popupMenu.menu.add(0, idSyncClipboard, 0, translate("Update client clipboard"))
++             popupMenu.menu.add(0, idSyncClipboard, 0, merchantText(R.string.merchant_clipboard) { translate("Update client clipboard") })
+          }
+          val idStopService = 2
+          val hideStopService = FFI.getBuildinOption("hide-stop-service") == "Y"
+          if (!hideStopService) {
+-             popupMenu.menu.add(0, idStopService, 0, translate("Stop service"))
++             popupMenu.menu.add(0, idStopService, 0, merchantText(R.string.merchant_stop) { translate("Stop service") })
+          }
+          popupMenu.setOnMenuItemClickListener { menuItem ->
+              when (menuItem.itemId) {
+diff --git a/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MainActivity.kt b/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MainActivity.kt
+index 53ed062..9ce5eb7 100644
+--- a/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MainActivity.kt
++++ b/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MainActivity.kt
+@@ -266,6 +266,7 @@ class MainActivity : FlutterActivity() {
+         flutterMethodChannel.setMethodCallHandler { call, result ->
+             // make sure result will be invoked, otherwise flutter will await forever
+             when (call.method) {
++                "merchant_set_language" -> result.success(MerchantLanguage.save(this, call.arguments as? String))
+                 "init_service" -> {
+                     Intent(activity, MainService::class.java).also {
+                         bindService(it, serviceConnection, Context.BIND_AUTO_CREATE)
+@@ -494,7 +495,7 @@ class MainActivity : FlutterActivity() {
+                         try {
+                             startActivityForResult(
+                                 Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).apply {
+-                                    putExtra(Intent.EXTRA_TITLE, "Select the folder to import")
++                                    putExtra(Intent.EXTRA_TITLE, merchantText(R.string.merchant_import_folder) { "Select the folder to import" })
+                                 },
+                                 REQ_IMPORT_DIRECTORY
+                             )
+@@ -606,7 +607,7 @@ class MainActivity : FlutterActivity() {
+                             try {
+                                 startActivityForResult(
+                                     Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).apply {
+-                                        putExtra(Intent.EXTRA_TITLE, "Select the destination folder")
++                                        putExtra(Intent.EXTRA_TITLE, merchantText(R.string.merchant_export_folder) { "Select the destination folder" })
+                                     },
+                                     REQ_EXPORT_FILES
+                                 )
+@@ -955,7 +956,7 @@ class MainActivity : FlutterActivity() {
+             Log.e(logTag, "onVoiceCallStarted fail")
+             flutterMethodChannel?.invokeMethod("msgbox", mapOf(
+                 "type" to "custom-nook-nocancel-hasclose-error",
+-                "title" to "Voice call",
++                "title" to merchantText(R.string.merchant_voice) { "Voice call" },
+                 "text" to audioRecordHandle.getVoiceCallStartError()))
+         } else {
+             Log.d(logTag, "onVoiceCallStarted success")
+@@ -975,8 +976,8 @@ class MainActivity : FlutterActivity() {
+             Log.e(logTag, "onVoiceCallClosed fail")
+             flutterMethodChannel?.invokeMethod("msgbox", mapOf(
+                 "type" to "custom-nook-nocancel-hasclose-error",
+-                "title" to "Voice call",
+-                "text" to "Failed to stop voice call."))
++                "title" to merchantText(R.string.merchant_voice) { "Voice call" },
++                "text" to merchantText(R.string.merchant_voice_stop_failed) { "Failed to stop voice call." }))
+         } else {
+             Log.d(logTag, "onVoiceCallClosed success")
+         }
+diff --git a/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MainService.kt b/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MainService.kt
+index 8606de1..450e9fe 100644
+--- a/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MainService.kt
++++ b/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MainService.kt
+@@ -16,6 +16,7 @@ import android.app.PendingIntent.FLAG_IMMUTABLE
+ import android.app.PendingIntent.FLAG_UPDATE_CURRENT
+ import android.content.Context
+ import android.content.Intent
++import android.content.SharedPreferences
+ import android.content.pm.PackageManager
+ import android.content.pm.ServiceInfo
+ import android.content.res.Configuration
+@@ -128,15 +129,18 @@ class MainService : Service() {
+                     val authorized = jsonObject["authorized"] as Boolean
+                     val isFileTransfer = jsonObject["is_file_transfer"] as Boolean
+                     val type = if (isFileTransfer) {
+-                        translate("Transfer file")
++                        merchantText(R.string.merchant_transfer) { translate("Transfer file") }
+                     } else {
+-                        translate("Share screen")
++                        merchantText(R.string.merchant_screen) { translate("Share screen") }
+                     }
+                     if (authorized) {
+                         if (!isFileTransfer && !isStart) {
+                             startCapture()
+                         }
+-                        onClientAuthorizedNotification(id, type, username, peerId)
++                        val title = merchantText(
++                            if (isFileTransfer) R.string.merchant_transfer_established else R.string.merchant_screen_established
++                        ) { "$type ${translate("Established")}" }
++                        onClientAuthorizedNotification(id, title, username, peerId)
+                     } else {
+                         loginRequestNotification(id, type, username, peerId)
+                     }
+@@ -154,11 +158,12 @@ class MainService : Service() {
+                     val incomingVoiceCall = jsonObject["incoming_voice_call"] as Boolean
+                     if (!inVoiceCall) {
+                         if (incomingVoiceCall) {
+-                            voiceCallRequestNotification(id, "Voice Call Request", username, peerId)
++                            val type = merchantText(R.string.merchant_voice_request) { "Voice Call Request" }
++                            voiceCallRequestNotification(id, type, username, peerId)
+                         } else {
+                             if (!switchOutVoiceCall()) {
+                                 Log.e(logTag, "switchOutVoiceCall fail")
+-                                showVoiceCallError("Failed to switch out voice call.")
++                                showVoiceCallError(merchantText(R.string.merchant_voice_switch_failed) { "Failed to switch out voice call." })
+                             }
+                         }
+                     } else {
+@@ -241,6 +246,18 @@ class MainService : Service() {
+     private lateinit var notificationChannel: String
+     private lateinit var notificationBuilder: NotificationCompat.Builder
+ 
++    private var notificationLanguage = ""
++    private val languageListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
++        if (key == MerchantLanguage.OPTION) refreshNotificationLanguage()
++    }
++
++    private fun refreshNotificationLanguage() {
++        if (BuildConfig.MERCHANT_EDITION && MerchantLanguage.language(this) != notificationLanguage) {
++            initNotification()
++            createForegroundNotification(refreshOnly = true)
++        }
++    }
++
+     override fun onCreate() {
+         super.onCreate()
+         Log.d(logTag,"MainService onCreate, sdk int:${Build.VERSION.SDK_INT} reuseVirtualDisplay:$reuseVirtualDisplay")
+@@ -260,10 +277,16 @@ class MainService : Service() {
+         FFI.startServer(configPath, homePath, "")
+ 
+         createForegroundNotification()
++        if (BuildConfig.MERCHANT_EDITION) {
++            MerchantLanguage.preferences(this).registerOnSharedPreferenceChangeListener(languageListener)
++        }
+         MerchantRecovery.start(this)
+     }
+ 
+     override fun onDestroy() {
++        if (BuildConfig.MERCHANT_EDITION) {
++            MerchantLanguage.preferences(this).unregisterOnSharedPreferenceChangeListener(languageListener)
++        }
+         MerchantRecovery.stop(this)
+         checkMediaPermission()
+         stopService(Intent(this, FloatingWindowService::class.java))
+@@ -372,6 +395,7 @@ class MainService : Service() {
+ 
+     override fun onConfigurationChanged(newConfig: Configuration) {
+         super.onConfigurationChanged(newConfig)
++        refreshNotificationLanguage()
+         updateScreenInfo(newConfig.orientation)
+     }
+ 
+@@ -511,7 +535,7 @@ class MainService : Service() {
+         Handler(Looper.getMainLooper()).post {
+             MainActivity.flutterMethodChannel?.invokeMethod("msgbox", mapOf(
+                 "type" to "custom-nook-nocancel-hasclose-error",
+-                "title" to "Voice call",
++                "title" to merchantText(R.string.merchant_voice) { "Voice call" },
+                 "text" to message))
+         }
+     }
+@@ -820,15 +844,16 @@ class MainService : Service() {
+     }
+ 
+     private fun initNotification() {
++        if (BuildConfig.MERCHANT_EDITION) notificationLanguage = MerchantLanguage.language(this)
+         notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+         notificationChannel = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+             val channelId = "RustDesk"
+-            val channelName = "RustDesk Service"
++            val channelName = merchantText(R.string.merchant_channel) { "RustDesk Service" }
+             val channel = NotificationChannel(
+                 channelId,
+                 channelName, NotificationManager.IMPORTANCE_HIGH
+             ).apply {
+-                description = "RustDesk Service Channel"
++                description = merchantText(R.string.merchant_channel_description) { "RustDesk Service Channel" }
+             }
+             channel.lightColor = Color.BLUE
+             channel.lockscreenVisibility = Notification.VISIBILITY_PRIVATE
+@@ -841,7 +866,7 @@ class MainService : Service() {
+     }
+ 
+     @SuppressLint("UnspecifiedImmutableFlag")
+-    private fun createForegroundNotification() {
++    private fun createForegroundNotification(refreshOnly: Boolean = false) {
+         val intent = Intent(this, MainActivity::class.java).apply {
+             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED
+             action = Intent.ACTION_MAIN
+@@ -859,14 +884,16 @@ class MainService : Service() {
+             .setDefaults(Notification.DEFAULT_ALL)
+             .setAutoCancel(true)
+             .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+-            .setContentTitle(DEFAULT_NOTIFY_TITLE)
+-            .setContentText(translate(DEFAULT_NOTIFY_TEXT))
++            .setContentTitle(merchantText(R.string.app_name) { DEFAULT_NOTIFY_TITLE })
++            .setContentText(merchantText(R.string.merchant_service_running) { translate(DEFAULT_NOTIFY_TEXT) })
+             .setOnlyAlertOnce(true)
+             .setContentIntent(pendingIntent)
+             .setColor(ContextCompat.getColor(this, R.color.primary))
+             .setWhen(System.currentTimeMillis())
+             .build()
+-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
++        if (refreshOnly) {
++            notificationManager.notify(DEFAULT_NOTIFY_ID, notification)
++        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+             startForeground(DEFAULT_NOTIFY_ID, notification, foregroundServiceType())
+         } else {
+             startForeground(DEFAULT_NOTIFY_ID, notification)
+@@ -934,7 +961,7 @@ class MainService : Service() {
+         val notification = notificationBuilder
+             .setOngoing(false)
+             .setPriority(NotificationCompat.PRIORITY_MAX)
+-            .setContentTitle(translate("Do you accept?"))
++            .setContentTitle(merchantText(R.string.merchant_accept) { translate("Do you accept?") })
+             .setContentText("$type:$username-$peerId")
+             // .setStyle(MediaStyle().setShowActionsInCompactView(0, 1))
+             // .addAction(R.drawable.check_blue, "check", genLoginRequestPendingIntent(true))
+@@ -945,7 +972,7 @@ class MainService : Service() {
+ 
+     private fun onClientAuthorizedNotification(
+         clientID: Int,
+-        type: String,
++        title: String,
+         username: String,
+         peerId: String
+     ) {
+@@ -953,7 +980,7 @@ class MainService : Service() {
+         val notification = notificationBuilder
+             .setOngoing(false)
+             .setPriority(NotificationCompat.PRIORITY_MAX)
+-            .setContentTitle("$type ${translate("Established")}")
++            .setContentTitle(title)
+             .setContentText("$username - $peerId")
+             .build()
+         notificationManager.notify(getClientNotifyID(clientID), notification)
+@@ -968,7 +995,7 @@ class MainService : Service() {
+         val notification = notificationBuilder
+             .setOngoing(false)
+             .setPriority(NotificationCompat.PRIORITY_MAX)
+-            .setContentTitle(translate("Do you accept?"))
++            .setContentTitle(merchantText(R.string.merchant_accept) { translate("Do you accept?") })
+             .setContentText("$type:$username-$peerId")
+             .build()
+         notificationManager.notify(getClientNotifyID(clientID), notification)
+@@ -996,8 +1023,8 @@ class MainService : Service() {
+     }
+ 
+     private fun setTextNotification(_title: String?, _text: String?) {
+-        val title = _title ?: DEFAULT_NOTIFY_TITLE
+-        val text = _text ?: translate(DEFAULT_NOTIFY_TEXT)
++        val title = _title ?: merchantText(R.string.app_name) { DEFAULT_NOTIFY_TITLE }
++        val text = _text ?: merchantText(R.string.merchant_service_running) { translate(DEFAULT_NOTIFY_TEXT) }
+         val notification = notificationBuilder
+             .clearActions()
+             .setStyle(null)
+diff --git a/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MerchantLanguage.java b/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MerchantLanguage.java
+new file mode 100644
+index 0000000..08a36b6
+--- /dev/null
++++ b/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MerchantLanguage.java
+@@ -0,0 +1,45 @@
++package com.carriez.flutter_hbb;
++
++import android.content.Context;
++import android.content.SharedPreferences;
++import android.content.res.Configuration;
++import android.os.Build;
++
++import java.util.Locale;
++
++/** Boot receivers and services can run before Flutter or its Rust configuration is available. */
++public final class MerchantLanguage {
++    static final String OPTION = "language";
++
++    static SharedPreferences preferences(Context context) {
++        return context.getSharedPreferences("steaddesk_language", Context.MODE_PRIVATE);
++    }
++
++    static boolean save(Context context, String option) {
++        if (!BuildConfig.MERCHANT_EDITION || option == null) return false;
++        if (!option.isEmpty() && !option.equals("en") && !option.equals("zh-cn") && !option.equals("es"))
++            return false;
++        return preferences(context).edit().putString(OPTION, option).commit();
++    }
++
++    static String language(Context context) {
++        String option = preferences(context).getString(OPTION, "");
++        if (!option.isEmpty()) return option;
++        Configuration config = context.getResources().getConfiguration();
++        Locale system = Build.VERSION.SDK_INT >= 24 ? config.getLocales().get(0) : config.locale;
++        switch (system.getLanguage()) {
++            case "zh": return "zh-cn";
++            case "es": return "es";
++            default: return "en";
++        }
++    }
++
++    public static String text(Context context, int resource) {
++        if (!BuildConfig.MERCHANT_EDITION) return context.getString(resource);
++        Configuration config = new Configuration(context.getResources().getConfiguration());
++        config.setLocale(Locale.forLanguageTag(language(context)));
++        return context.createConfigurationContext(config).getString(resource);
++    }
++
++    private MerchantLanguage() {}
++}
+diff --git a/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/common.kt b/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/common.kt
+index b59dca9..b056293 100644
+--- a/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/common.kt
++++ b/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/common.kt
+@@ -166,3 +166,7 @@ fun getScreenSize(windowManager: WindowManager) : Pair<Int, Int>{
+     Log.d("common", "translate:$LOCAL_NAME")
+     return FFI.translateLocale(LOCAL_NAME, input)
+ }
++
++/** Keep the support edition's upstream strings and translation behavior. */
++inline fun Context.merchantText(resource: Int, supportText: () -> String): String =
++    if (BuildConfig.MERCHANT_EDITION) MerchantLanguage.text(this, resource) else supportText()
+diff --git a/flutter/android/app/src/main/res/values/merchant_language.xml b/flutter/android/app/src/main/res/values/merchant_language.xml
+new file mode 100644
+index 0000000..1ad833a
+--- /dev/null
++++ b/flutter/android/app/src/main/res/values/merchant_language.xml
+@@ -0,0 +1,57 @@
++<resources>
++    <string name="steaddesk_input">SteadDesk Input</string>
++    <string name="merchant_channel">SteadDesk service</string>
++    <string name="merchant_channel_description">Notifications about the SteadDesk remote access service</string>
++    <string name="merchant_service_running">Service is running</string>
++    <string name="merchant_transfer">Transfer file</string>
++    <string name="merchant_screen">Share screen</string>
++    <string name="merchant_accept">Do you accept?</string>
++    <string name="merchant_transfer_established">File transfer connected</string>
++    <string name="merchant_screen_established">Screen sharing connected</string>
++    <string name="merchant_voice_request">Voice call request</string>
++    <string name="merchant_show">Show SteadDesk</string>
++    <string name="merchant_clipboard">Update client clipboard</string>
++    <string name="merchant_stop">Stop service</string>
++    <string name="merchant_voice">Voice call</string>
++    <string name="merchant_voice_permission">To start a voice call, enable \"Audio capture\" on the \"Screen share\" page.</string>
++    <string name="merchant_voice_start_failed">Failed to start voice call.</string>
++    <string name="merchant_voice_stop_failed">Failed to stop voice call.</string>
++    <string name="merchant_voice_switch_failed">Failed to switch out voice call.</string>
++    <string name="merchant_import_folder">Select the folder to import</string>
++    <string name="merchant_export_folder">Select the destination folder</string>
++    <string name="recovery_broadcast">Recovery broadcast received</string>
++    <string name="recovery_permissions">Recovery permissions missing</string>
++    <string name="recovery_log_denied">Access to the local status service was denied.</string>
++    <string name="recovery_log_unavailable">The local recovery log is unavailable.</string>
++    <string name="recovery_signature">Agent signature required</string>
++    <string name="recovery_uid">Agent UID required</string>
++    <string name="recovery_unavailable">Recovery unavailable</string>
++    <string name="recovery_unsupported">Unsupported recovery request</string>
++    <string name="recovery_check">Agent health check</string>
++    <string name="recovery_wake">Agent wake attempt</string>
++    <string name="recovery_result">Agent recovery result</string>
++    <string name="recovery_peer_permission">Agent permissions</string>
++    <string name="recovery_peer_endpoint">Agent service endpoint</string>
++    <string name="recovery_timeout">Response timeout</string>
++    <string name="recovery_not_bound">Service not bound</string>
++    <string name="recovery_bind">Service binding</string>
++    <string name="recovery_disconnected">Service disconnected</string>
++    <string name="recovery_binding_died">Service binding lost</string>
++    <string name="recovery_null_binding">Empty service binding</string>
++    <string name="recovery_peer_status">Agent status</string>
++    <string name="recovery_service_stopped">Service stopped</string>
++    <string name="recovery_switch">Automatic recovery setting</string>
++    <string name="recovery_wake_request">Request to wake Agent</string>
++    <string name="recovery_transaction">Service communication</string>
++    <string name="recovery_disabled">Automatic recovery disabled</string>
++    <string name="recovery_rate_limited">Hourly wake limit reached</string>
++    <string name="recovery_budget_unavailable">Wake attempt history unavailable</string>
++    <string name="recovery_reserved">Wake attempt reserved</string>
++    <string name="recovery_denied">Permission denied</string>
++    <string name="recovery_endpoint_unavailable">Service unavailable</string>
++    <string name="recovery_failed">Request failed</string>
++    <string name="recovery_in_session">Session in progress</string>
++    <string name="recovery_healthy">Agent is running</string>
++    <string name="recovery_unknown">Unknown service state</string>
++    <string name="recovery_acknowledged">Wake request acknowledged</string>
++</resources>
+diff --git a/flutter/android/app/src/steaddeskMerchant/java/com/carriez/flutter_hbb/AgentWakeService.java b/flutter/android/app/src/steaddeskMerchant/java/com/carriez/flutter_hbb/AgentWakeService.java
+index e754321..3cd2736 100644
+--- a/flutter/android/app/src/steaddeskMerchant/java/com/carriez/flutter_hbb/AgentWakeService.java
++++ b/flutter/android/app/src/steaddeskMerchant/java/com/carriez/flutter_hbb/AgentWakeService.java
+@@ -14,15 +14,15 @@ public final class AgentWakeService extends Service {
+             if (code != FIRST_CALL_TRANSACTION && code != FIRST_CALL_TRANSACTION + 1)
+                 return super.onTransact(code, data, reply, flags);
+             data.enforceInterface("com.steaddesk.remote.IWakeService");
+-            enforceCallingPermission("com.steaddesk.remote.permission.WAKE_SERVICE", "Agent signature required");
++            enforceCallingPermission("com.steaddesk.remote.permission.WAKE_SERVICE", MerchantLanguage.text(AgentWakeService.this, R.string.recovery_signature));
+             String[] packages = getPackageManager().getPackagesForUid(Binder.getCallingUid());
+             if (packages == null || packages.length != 1 || !"com.steaddesk.agent".equals(packages[0]))
+-                throw new SecurityException("Agent UID required");
++                throw new SecurityException(MerchantLanguage.text(AgentWakeService.this, R.string.recovery_uid));
+             long identity = Binder.clearCallingIdentity();
+             try {
+                 int state = MerchantRecovery.status();
+                 if (code == FIRST_CALL_TRANSACTION && state == 0 && !MerchantRecovery.restore(AgentWakeService.this))
+-                    throw new IllegalStateException("Recovery unavailable");
++                    throw new IllegalStateException(MerchantLanguage.text(AgentWakeService.this, R.string.recovery_unavailable));
+                 if (reply != null) {
+                     reply.writeNoException();
+                     if (code == FIRST_CALL_TRANSACTION + 1) reply.writeInt(state);
+diff --git a/flutter/android/app/src/steaddeskMerchant/java/com/steaddesk/recovery/PeerWatchdog.java b/flutter/android/app/src/steaddeskMerchant/java/com/steaddesk/recovery/PeerWatchdog.java
+index 8618dd9..c57feba 100644
+--- a/flutter/android/app/src/steaddeskMerchant/java/com/steaddesk/recovery/PeerWatchdog.java
++++ b/flutter/android/app/src/steaddeskMerchant/java/com/steaddesk/recovery/PeerWatchdog.java
+@@ -17,6 +17,8 @@ import android.os.RemoteException;
+ import android.preference.PreferenceManager;
+ import android.util.AtomicFile;
+ import android.util.Log;
++import com.carriez.flutter_hbb.MerchantLanguage;
++import com.carriez.flutter_hbb.R;
+ import org.json.JSONObject;
+ import java.io.BufferedReader;
+ import java.io.File;
+@@ -63,7 +65,7 @@ public final class PeerWatchdog {
+         try {
+             if (context.bindService(new Intent(context, endpoint), hold, Context.BIND_AUTO_CREATE)) return hold;
+         } catch (SecurityException denied) {
+-            Log.w("PeerWatchdog", "Local status endpoint denied");
++            Log.w("PeerWatchdog", MerchantLanguage.text(context, R.string.recovery_log_denied));
+         }
+         unpublish(context, hold);
+         return null;
+@@ -253,7 +255,7 @@ public final class PeerWatchdog {
+             Parcel request = Parcel.obtain(), reply = Parcel.obtain();
+             try {
+                 request.writeInterfaceToken(descriptor);
+-                if (!binder.transact(code, request, reply, 0)) throw new RemoteException("unsupported");
++                if (!binder.transact(code, request, reply, 0)) throw new RemoteException(MerchantLanguage.text(app, R.string.recovery_unsupported));
+                 reply.readException();
+                 if (code == STATUS && reply.dataAvail() < 4) return 3;
+                 return code == STATUS ? reply.readInt() : 0;
+@@ -271,6 +273,40 @@ public final class PeerWatchdog {
+         return lines;
+     }
+ 
++    // These identifiers remain stable for JSONL readers. Only the additional description is localized.
++    private static int label(String code) {
++        switch (code) {
++            case "check": return R.string.recovery_check;
++            case "wake": return R.string.recovery_wake;
++            case "result": return R.string.recovery_result;
++            case "peer_permission": return R.string.recovery_peer_permission;
++            case "peer_endpoint": return R.string.recovery_peer_endpoint;
++            case "timeout": return R.string.recovery_timeout;
++            case "not_bound": return R.string.recovery_not_bound;
++            case "bind": return R.string.recovery_bind;
++            case "disconnected": return R.string.recovery_disconnected;
++            case "binding_died": return R.string.recovery_binding_died;
++            case "null_binding": return R.string.recovery_null_binding;
++            case "peer_status": return R.string.recovery_peer_status;
++            case "service_stopped": return R.string.recovery_service_stopped;
++            case "switch": return R.string.recovery_switch;
++            case "wake_request": return R.string.recovery_wake_request;
++            case "transaction": return R.string.recovery_transaction;
++            case "disabled": return R.string.recovery_disabled;
++            case "rate_limited": return R.string.recovery_rate_limited;
++            case "budget_unavailable": return R.string.recovery_budget_unavailable;
++            case "reserved": return R.string.recovery_reserved;
++            case "denied": return R.string.recovery_denied;
++            case "unavailable": return R.string.recovery_endpoint_unavailable;
++            case "failed": return R.string.recovery_failed;
++            case "in_session": return R.string.recovery_in_session;
++            case "healthy": return R.string.recovery_healthy;
++            case "unknown": return R.string.recovery_unknown;
++            case "acknowledged": return R.string.recovery_acknowledged;
++            default: return R.string.recovery_unknown;
++        }
++    }
++
+     /** Atomic replacement leaves a complete 500-line JSONL file after process death. */
+     private void log(String action, String reason, String result) {
+         synchronized (PeerWatchdog.class) {
+@@ -285,14 +321,17 @@ public final class PeerWatchdog {
+                 }
+                 SimpleDateFormat utc = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.ROOT);
+                 utc.setTimeZone(TimeZone.getTimeZone("UTC"));
++                String description = MerchantLanguage.text(app, label(action)) + " · "
++                        + MerchantLanguage.text(app, label(reason)) + " · "
++                        + MerchantLanguage.text(app, label(result));
+                 lines.add(new JSONObject().put("time", utc.format(new Date())).put("action", action)
+-                        .put("reason", reason).put("result", result).toString());
++                        .put("reason", reason).put("result", result).put("description", description).toString());
+                 output = file.startWrite();
+                 for (String entry : lines) output.write((entry + "\n").getBytes(StandardCharsets.UTF_8));
+                 file.finishWrite(output);
+             } catch (Exception failure) {
+                 if (output != null) file.failWrite(output);
+-                Log.w("PeerWatchdog", "Local recovery log unavailable");
++                Log.w("PeerWatchdog", MerchantLanguage.text(app, R.string.recovery_log_unavailable));
+             }
+         }
+     }
+diff --git a/flutter/android/app/src/steaddeskMerchant/res/values-es/merchant_language.xml b/flutter/android/app/src/steaddeskMerchant/res/values-es/merchant_language.xml
+new file mode 100644
+index 0000000..ed187ad
+--- /dev/null
++++ b/flutter/android/app/src/steaddeskMerchant/res/values-es/merchant_language.xml
+@@ -0,0 +1,61 @@
++<resources>
++    <string name="app_name">SteadDesk</string>
++    <string name="merchant_self_heal">Permitir que SteadDesk reactive la aplicación Agent asociada</string>
++    <string name="steaddesk_input">Servicio de entrada de SteadDesk</string>
++    <string name="accessibility_service_description">Permite que otros dispositivos controlen este teléfono mediante gestos táctiles simulados cuando se comparte la pantalla con SteadDesk</string>
++    <string name="foreground_service_special_use_subtype">Mantiene SteadDesk disponible para conexiones desatendidas autorizadas y notificaciones en primer plano. La captura de pantalla comienza solo con la aprobación del usuario.</string>
++    <string name="merchant_channel">Servicio de SteadDesk</string>
++    <string name="merchant_channel_description">Notificaciones del servicio de acceso remoto de SteadDesk</string>
++    <string name="merchant_service_running">El servicio se está ejecutando</string>
++    <string name="merchant_transfer">Transferir archivo</string>
++    <string name="merchant_screen">Compartir pantalla</string>
++    <string name="merchant_accept">¿Aceptas?</string>
++    <string name="merchant_transfer_established">Transferencia de archivos conectada</string>
++    <string name="merchant_screen_established">Pantalla compartida conectada</string>
++    <string name="merchant_voice_request">Solicitud de llamada de voz</string>
++    <string name="merchant_show">Mostrar SteadDesk</string>
++    <string name="merchant_clipboard">Actualizar portapapeles del cliente</string>
++    <string name="merchant_stop">Detener servicio</string>
++    <string name="merchant_voice">Llamada de voz</string>
++    <string name="merchant_voice_permission">Para comenzar una llamada de voz activar \"Captura de audio\" en la página \"Compartir pantalla\".</string>
++    <string name="merchant_voice_start_failed">No se pudo iniciar la llamada de voz.</string>
++    <string name="merchant_voice_stop_failed">No se pudo finalizar la llamada de voz.</string>
++    <string name="merchant_voice_switch_failed">No se pudo salir del modo de llamada de voz.</string>
++    <string name="merchant_import_folder">Selecciona la carpeta que deseas importar</string>
++    <string name="merchant_export_folder">Selecciona la carpeta de destino</string>
++    <string name="recovery_broadcast">Se recibió una difusión de recuperación</string>
++    <string name="recovery_permissions">Faltan permisos para la recuperación del servicio</string>
++    <string name="recovery_log_denied">Se denegó el acceso al servicio de estado local.</string>
++    <string name="recovery_log_unavailable">El registro de recuperación local no está disponible.</string>
++    <string name="recovery_signature">Se requiere la firma de Agent</string>
++    <string name="recovery_uid">Se requiere el identificador de usuario de Agent</string>
++    <string name="recovery_unavailable">El servicio de recuperación no está disponible</string>
++    <string name="recovery_unsupported">Solicitud de recuperación no compatible</string>
++    <string name="recovery_check">Comprobación del estado de Agent</string>
++    <string name="recovery_wake">Intento de reactivar Agent</string>
++    <string name="recovery_result">Resultado de la recuperación de Agent</string>
++    <string name="recovery_peer_permission">Permisos de Agent</string>
++    <string name="recovery_peer_endpoint">Interfaz del servicio de Agent</string>
++    <string name="recovery_timeout">Tiempo de respuesta agotado</string>
++    <string name="recovery_not_bound">Servicio sin vincular</string>
++    <string name="recovery_bind">Vinculación del servicio</string>
++    <string name="recovery_disconnected">Servicio desconectado</string>
++    <string name="recovery_binding_died">Se perdió la vinculación del servicio</string>
++    <string name="recovery_null_binding">Vinculación del servicio vacía</string>
++    <string name="recovery_peer_status">Estado de Agent</string>
++    <string name="recovery_service_stopped">Servicio detenido</string>
++    <string name="recovery_switch">Ajuste de recuperación automática</string>
++    <string name="recovery_wake_request">Solicitud para reactivar Agent</string>
++    <string name="recovery_transaction">Comunicación con el servicio</string>
++    <string name="recovery_disabled">Recuperación automática desactivada</string>
++    <string name="recovery_rate_limited">Se alcanzó el límite de reactivaciones por hora</string>
++    <string name="recovery_budget_unavailable">No se pudo leer o guardar el historial de reactivaciones</string>
++    <string name="recovery_reserved">Intento de reactivación reservado</string>
++    <string name="recovery_denied">Permiso denegado</string>
++    <string name="recovery_endpoint_unavailable">Servicio no disponible</string>
++    <string name="recovery_failed">La solicitud falló</string>
++    <string name="recovery_in_session">Sesión en curso</string>
++    <string name="recovery_healthy">Agent en ejecución</string>
++    <string name="recovery_unknown">Estado del servicio desconocido</string>
++    <string name="recovery_acknowledged">Solicitud de reactivación confirmada</string>
++</resources>
+diff --git a/flutter/android/app/src/steaddeskMerchant/res/values-zh/merchant_language.xml b/flutter/android/app/src/steaddeskMerchant/res/values-zh/merchant_language.xml
+new file mode 100644
+index 0000000..d60b966
+--- /dev/null
++++ b/flutter/android/app/src/steaddeskMerchant/res/values-zh/merchant_language.xml
+@@ -0,0 +1,61 @@
++<resources>
++    <string name="app_name">SteadDesk</string>
++    <string name="merchant_self_heal">允许 SteadDesk 唤醒配套的 Agent 应用</string>
++    <string name="steaddesk_input">SteadDesk 输入服务</string>
++    <string name="accessibility_service_description">通过 SteadDesk 共享屏幕后，允许其他设备使用模拟触控操作此设备</string>
++    <string name="foreground_service_special_use_subtype">让 SteadDesk 远程桌面保持可用，以便接收已授权的无人值守连接并显示前台通知。屏幕捕获会在用户批准后开始。</string>
++    <string name="merchant_channel">SteadDesk 服务</string>
++    <string name="merchant_channel_description">SteadDesk 远程访问服务的通知</string>
++    <string name="merchant_service_running">服务正在运行</string>
++    <string name="merchant_transfer">传输文件</string>
++    <string name="merchant_screen">共享屏幕</string>
++    <string name="merchant_accept">是否接受？</string>
++    <string name="merchant_transfer_established">文件传输已连接</string>
++    <string name="merchant_screen_established">屏幕共享已连接</string>
++    <string name="merchant_voice_request">语音通话请求</string>
++    <string name="merchant_show">显示 SteadDesk</string>
++    <string name="merchant_clipboard">更新客户端的剪贴板</string>
++    <string name="merchant_stop">停止服务</string>
++    <string name="merchant_voice">语音通话</string>
++    <string name="merchant_voice_permission">开始语音通话前请在\"仅共享屏幕\"页面启用\"音频录制\"。</string>
++    <string name="merchant_voice_start_failed">无法开始语音通话。</string>
++    <string name="merchant_voice_stop_failed">无法结束语音通话。</string>
++    <string name="merchant_voice_switch_failed">无法退出语音通话模式。</string>
++    <string name="merchant_import_folder">选择要导入的文件夹</string>
++    <string name="merchant_export_folder">选择目标文件夹</string>
++    <string name="recovery_broadcast">已收到恢复服务广播</string>
++    <string name="recovery_permissions">缺少恢复服务所需的权限</string>
++    <string name="recovery_log_denied">本机状态服务的访问请求被拒绝。</string>
++    <string name="recovery_log_unavailable">本机恢复日志不可用。</string>
++    <string name="recovery_signature">需要 Agent 签名</string>
++    <string name="recovery_uid">需要 Agent 的用户 ID</string>
++    <string name="recovery_unavailable">恢复服务不可用</string>
++    <string name="recovery_unsupported">不支持此恢复请求</string>
++    <string name="recovery_check">Agent 状态检查</string>
++    <string name="recovery_wake">尝试唤醒 Agent</string>
++    <string name="recovery_result">Agent 恢复结果</string>
++    <string name="recovery_peer_permission">Agent 权限</string>
++    <string name="recovery_peer_endpoint">Agent 服务接口</string>
++    <string name="recovery_timeout">响应超时</string>
++    <string name="recovery_not_bound">未绑定服务</string>
++    <string name="recovery_bind">服务绑定</string>
++    <string name="recovery_disconnected">服务已断开连接</string>
++    <string name="recovery_binding_died">服务绑定已失效</string>
++    <string name="recovery_null_binding">服务返回空绑定</string>
++    <string name="recovery_peer_status">Agent 状态</string>
++    <string name="recovery_service_stopped">服务已停止</string>
++    <string name="recovery_switch">自动恢复设置</string>
++    <string name="recovery_wake_request">唤醒 Agent 的请求</string>
++    <string name="recovery_transaction">服务通信</string>
++    <string name="recovery_disabled">自动恢复已关闭</string>
++    <string name="recovery_rate_limited">已达每小时唤醒次数上限</string>
++    <string name="recovery_budget_unavailable">无法读取或保存唤醒记录</string>
++    <string name="recovery_reserved">已预留本次唤醒次数</string>
++    <string name="recovery_denied">权限被拒绝</string>
++    <string name="recovery_endpoint_unavailable">服务不可用</string>
++    <string name="recovery_failed">请求失败</string>
++    <string name="recovery_in_session">会话进行中</string>
++    <string name="recovery_healthy">Agent 正在运行</string>
++    <string name="recovery_unknown">服务状态未知</string>
++    <string name="recovery_acknowledged">唤醒请求已确认</string>
++</resources>
+diff --git a/flutter/lib/common.dart b/flutter/lib/common.dart
+index bcf2837..efb8d52 100644
+--- a/flutter/lib/common.dart
++++ b/flutter/lib/common.dart
+@@ -31,6 +31,7 @@ import 'package:window_size/window_size.dart' as window_size;
+ import '../consts.dart';
+ import 'common/widgets/overlay.dart';
+ import 'steaddesk/theme.dart';
++import 'steaddesk/merchant_build.dart' show merchantEdition;
+ import 'steaddesk/metrics_api.dart';
+ import 'mobile/pages/file_manager_page.dart';
+ import 'mobile/pages/remote_page.dart';
+@@ -1524,7 +1525,11 @@ String translate(String name) {
+   if (name.startsWith('Failed to') && name.contains(': ')) {
+     return name.split(': ').map((x) => translate(x)).join(': ');
+   }
+-  return platformFFI.translate(name, localeName);
++  return platformFFI.translate(
++      name,
++      merchantEdition && (isAndroid || isWindows)
++          ? WidgetsBinding.instance.platformDispatcher.locale.toLanguageTag()
++          : localeName);
+ }
+ 
+ // This function must be kept the same as the one in rust and sciter code.
+diff --git a/flutter/lib/desktop/pages/install_page.dart b/flutter/lib/desktop/pages/install_page.dart
+index fe94b38..7b0c72c 100644
+--- a/flutter/lib/desktop/pages/install_page.dart
++++ b/flutter/lib/desktop/pages/install_page.dart
+@@ -1,4 +1,5 @@
+ import 'dart:convert';
++import '../../steaddesk/merchant_build.dart' show merchantEdition;
+ 
+ import 'package:file_picker/file_picker.dart';
+ import 'package:flutter/material.dart';
+@@ -26,7 +27,7 @@ class _InstallPageState extends State<InstallPage> {
+     const label = "install";
+     tabController.add(TabInfo(
+         key: label,
+-        label: label,
++        label: merchantEdition ? "Install" : label,
+         closable: false,
+         page: _InstallPageBody(
+           key: const ValueKey(label),
+diff --git a/flutter/lib/models/server_model.dart b/flutter/lib/models/server_model.dart
+index 031a625..aa28133 100644
+--- a/flutter/lib/models/server_model.dart
++++ b/flutter/lib/models/server_model.dart
+@@ -1,4 +1,5 @@
+ import 'dart:async';
++import '../steaddesk/merchant_build.dart' show merchantEdition;
+ import 'dart:convert';
+ 
+ import 'package:flutter/material.dart';
+@@ -908,7 +909,9 @@ showInputWarnAlert(FFI ffi) {
+         children: [
+           Text(translate("android_input_permission_tip1")),
+           const SizedBox(height: 10),
+-          Text(translate("android_input_permission_tip2")),
++          Text(translate(merchantEdition
++              ? 'In Android accessibility settings, turn on the SteadDesk service to allow remote input.'
++              : 'android_input_permission_tip2')),
+         ],
+       ),
+       actions: [
+diff --git a/flutter/lib/steaddesk/merchant_panel.dart b/flutter/lib/steaddesk/merchant_panel.dart
+index 35e1d87..51f4a85 100644
+--- a/flutter/lib/steaddesk/merchant_panel.dart
++++ b/flutter/lib/steaddesk/merchant_panel.dart
+@@ -38,13 +38,51 @@ class _MerchantPanelState extends State<MerchantPanel>
+   bool? configured, notifications, battery;
+   bool busy = false;
+   String device = '', id = '';
+-  bool? activeCaption;
++  String? caption;
++  String language = '';
++  String? nativeLanguage;
++  bool savingLanguage = false;
++
++  String readLanguage() => merchantWindows
++      ? bind.mainGetCommonSync(key: 'merchant-language')
++      : bind.mainGetLocalOption(key: kCommConfKeyLang);
++
++  Future<void> syncNativeLanguage() async {
++    final requested = language;
++    if (merchantAndroid &&
++        nativeLanguage != requested &&
++        await gFFI.invokeMethod('merchant_set_language', requested)) {
++      nativeLanguage = requested;
++    }
++  }
++
++  Future<void> selectLanguage(String value) async {
++    if (savingLanguage) return;
++    setState(() => savingLanguage = true);
++    try {
++      if (merchantWindows) {
++        await bind.mainSetCommon(key: 'merchant-language', value: value);
++      } else {
++        await bind.mainSetLocalOption(key: kCommConfKeyLang, value: value);
++      }
++      if (!mounted) return;
++      language = readLanguage();
++      changed();
++      if (language != value) {
++        showToast(translate('Could not save the language.'));
++      }
++      await syncNativeLanguage();
++    } finally {
++      if (mounted) setState(() => savingLanguage = false);
++    }
++  }
+ 
+   @override
+   void initState() {
+     super.initState();
+     WidgetsBinding.instance.addObserver(this);
+     if (merchantWindows) windowManager.addListener(this);
++    language = readLanguage();
+     model.addListener(changed);
+     if (widget.connectionManager) changed();
+     loadDevice();
+@@ -76,10 +114,12 @@ class _MerchantPanelState extends State<MerchantPanel>
+     if (!mounted) return;
+     if (widget.connectionManager) {
+       final active = sessions.isNotEmpty;
+-      if (activeCaption != active) {
+-        activeCaption = active;
+-        windowManager.setTitle(
+-            active ? merchantActiveTitle : 'SteadDesk · Connection manager');
++      final title =
++          'SteadDesk · ${active ? translate('Remote assistance') : translate('Connection manager')}';
++      if (caption != title) {
++        caption = title;
++        markMerchantSession(active);
++        windowManager.setTitle(title);
+       }
+     }
+     setState(() {});
+@@ -89,6 +129,15 @@ class _MerchantPanelState extends State<MerchantPanel>
+     if (busy || !mounted) return;
+     busy = true;
+     try {
++      if (merchantWindows && !savingLanguage) {
++        final saved = readLanguage();
++        if (saved != language) {
++          language = saved;
++          changed();
++        }
++      } else if (merchantAndroid) {
++        await syncNativeLanguage();
++      }
+       final raw = await bind.mainGetMyId();
+       if (!mounted) return;
+       setState(() => id = raw);
+@@ -137,6 +186,9 @@ class _MerchantPanelState extends State<MerchantPanel>
+     if (merchantWindows && !widget.connectionManager) windowManager.hide();
+   }
+ 
++  @override
++  void didChangeLocales(List<Locale>? locales) => changed();
++
+   @override
+   void didChangeAppLifecycleState(AppLifecycleState state) {
+     if (state == AppLifecycleState.resumed) {
+@@ -147,6 +199,7 @@ class _MerchantPanelState extends State<MerchantPanel>
+   @override
+   void dispose() {
+     refresh?.cancel();
++    if (widget.connectionManager) markMerchantSession(false);
+     if (merchantWindows) windowManager.removeListener(this);
+     WidgetsBinding.instance.removeObserver(this);
+     model.removeListener(changed);
+@@ -185,20 +238,51 @@ class _MerchantPanelState extends State<MerchantPanel>
+         onPressed: () => setPasswordDialog(notEmptyCallback: () {
+           if (mounted) setState(() => configured = true);
+         }),
+-        child: Text(translate('Set permanent password')),
++        child: Text(translate('Set a permanent password')),
+       ),
+     ]);
+   }
+ 
++  Widget languageMenu() {
++    String label(String key, String autonym) {
++      final translated = translate(key);
++      return translated == autonym ? autonym : '$translated · $autonym';
++    }
++
++    final options = {
++      '': translate('Use device language'),
++      'en': label('English', 'English'),
++      'zh-cn': label('Chinese', '中文'),
++      'es': label('Spanish', 'Español'),
++    };
++    return PopupMenuButton<String>(
++      key: const ValueKey('merchant-language'),
++      icon: const Icon(Icons.language),
++      tooltip: translate('Language'),
++      initialValue: options.containsKey(language) ? language : '',
++      enabled: !savingLanguage,
++      onSelected: selectLanguage,
++      itemBuilder: (_) => [
++        for (final entry in options.entries)
++          CheckedPopupMenuItem(
++              value: entry.key,
++              checked:
++                  entry.key == (options.containsKey(language) ? language : ''),
++              child: Text(entry.value)),
++      ],
++    );
++  }
++
+   Widget brand() => Row(children: [
+         Image.asset('assets/icon.png',
+             width: merchantAndroid ? 48 : 30,
+             height: merchantAndroid ? 48 : 30),
+         const SizedBox(width: 10),
+-        const Flexible(
++        const Expanded(
+             child: Text('SteadDesk',
+                 style: TextStyle(
+                     fontWeight: FontWeight.w700, fontSize: 20, color: _ink))),
++        languageMenu(),
+       ]);
+ 
+   Widget identity() =>
+@@ -277,7 +361,8 @@ class _MerchantPanelState extends State<MerchantPanel>
+         Semantics(
+             container: true,
+             child: Text(translate('Need help?'),
+-                style: const TextStyle(fontWeight: FontWeight.w600, color: _ink))),
++                style:
++                    const TextStyle(fontWeight: FontWeight.w600, color: _ink))),
+         const SizedBox(height: 8),
+         Text(translate('Give your device ID to support.')),
+         if (merchantPhone.trim().isNotEmpty) ...[
+@@ -317,13 +402,13 @@ class _MerchantPanelState extends State<MerchantPanel>
+                       onPressed: () => windowManager.minimize())
+                 ]))),
+         Expanded(
+-            child: ListView(
+-                padding: const EdgeInsets.all(20),
+-                children: [identity(), const SizedBox(height: 22), status()])),
+-        const Divider(height: 1),
+-        Padding(
+-            padding: const EdgeInsets.all(16),
+-            child: Align(alignment: Alignment.centerLeft, child: help())),
++            child: ListView(padding: const EdgeInsets.all(20), children: [
++          identity(),
++          const SizedBox(height: 22),
++          status(),
++          const Divider(height: 32),
++          help(),
++        ])),
+       ]);
+     final details = Column(
+         crossAxisAlignment: CrossAxisAlignment.start,
+@@ -361,17 +446,16 @@ class _MerchantPanelState extends State<MerchantPanel>
+   }
+ 
+   @override
+-  Widget build(BuildContext context) =>
+-      Scaffold(
++  Widget build(BuildContext context) => Scaffold(
+         backgroundColor: Colors.white,
+         body: SafeArea(child: content()),
+-        bottomNavigationBar: const SafeArea(
++        bottomNavigationBar: SafeArea(
+           top: false,
+           child: Padding(
+-            padding: EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+-            child: Text('SteadDesk $merchantVersion',
++            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
++            child: Text(translate('SteadDesk {$merchantVersion}'),
+                 textAlign: TextAlign.center,
+-                style: TextStyle(color: _ink, fontSize: 12)),
++                style: const TextStyle(color: _ink, fontSize: 12)),
+           ),
+         ),
+       );
+diff --git a/flutter/lib/steaddesk/merchant_window_io.dart b/flutter/lib/steaddesk/merchant_window_io.dart
+index c6a4541..a8bf8aa 100644
+--- a/flutter/lib/steaddesk/merchant_window_io.dart
++++ b/flutter/lib/steaddesk/merchant_window_io.dart
+@@ -2,17 +2,44 @@ import 'dart:ffi';
+ import 'dart:io';
+ import 'package:ffi/ffi.dart';
+ import 'package:win32/win32.dart';
+-export 'merchant_window_stub.dart' show merchantActiveTitle;
+-import 'merchant_window_stub.dart' show merchantActiveTitle;
++
++// A Win32 window property survives caption translations. The CM owns its
++// property and clears it as soon as its last interactive session ends.
++const _windowClass = 'FLUTTER_RUNNER_WIN32_WINDOW';
++const _sessionProperty = 'SteadDesk.ActiveMerchantSession';
++
++void markMerchantSession(bool active) {
++  if (!Platform.isWindows) return;
++  using((arena) {
++    final cls = _windowClass.toNativeUtf16(allocator: arena);
++    final property = _sessionProperty.toNativeUtf16(allocator: arena);
++    final pid = arena<Uint32>();
++    int handle = 0;
++    while ((handle = FindWindowEx(0, handle, cls, nullptr)) != 0) {
++      GetWindowThreadProcessId(handle, pid);
++      if (pid.value == GetCurrentProcessId()) {
++        if (active) {
++          SetProp(handle, property, 1);
++        } else {
++          RemoveProp(handle, property);
++        }
++        return;
++      }
++    }
++  });
++}
+ 
+ // The upstream connection manager owns incoming connections in a separate
+ // process. Activate its live panel instead of caching client IDs in the main UI.
+ bool focusMerchantSession() {
+   if (!Platform.isWindows) return false;
+   return using((arena) {
+-    final handle = FindWindow(
+-        'FLUTTER_RUNNER_WIN32_WINDOW'.toNativeUtf16(allocator: arena),
+-        merchantActiveTitle.toNativeUtf16(allocator: arena));
++    final cls = _windowClass.toNativeUtf16(allocator: arena);
++    final property = _sessionProperty.toNativeUtf16(allocator: arena);
++    int handle = 0;
++    while ((handle = FindWindowEx(0, handle, cls, nullptr)) != 0) {
++      if (GetProp(handle, property) == 1) break;
++    }
+     if (handle == 0) return false;
+     final pid = arena<Uint32>();
+     GetWindowThreadProcessId(handle, pid);
+diff --git a/flutter/lib/steaddesk/merchant_window_stub.dart b/flutter/lib/steaddesk/merchant_window_stub.dart
+index 41bacfe..68e3d55 100644
+--- a/flutter/lib/steaddesk/merchant_window_stub.dart
++++ b/flutter/lib/steaddesk/merchant_window_stub.dart
+@@ -1,2 +1,2 @@
+-const merchantActiveTitle = 'SteadDesk · Remote assistance';
++void markMerchantSession(bool active) {}
+ bool focusMerchantSession() => false;
+diff --git a/src/flutter.rs b/src/flutter.rs
+index 35fa8cc..2159195 100644
+--- a/src/flutter.rs
++++ b/src/flutter.rs
+@@ -214,6 +214,22 @@ pub unsafe extern "C" fn get_rustdesk_app_name(buffer: *mut u16, length: i32) ->
+     -1
+ }
+ 
++#[cfg(windows)]
++#[no_mangle]
++pub unsafe extern "C" fn steaddesk_merchant_caption(cm: i32, buffer: *mut u16, capacity: i32) -> i32 {
++    if hbb_common::config::SUPPORT_EDITION || buffer.is_null() {
++        return -1;
++    }
++    let key = if cm != 0 { "Connection manager" } else { "Install" };
++    let caption = format!("{} · {}", crate::get_app_name(), crate::lang::translate(key.to_owned()));
++    let wide = crate::platform::wide_string(&caption);
++    if capacity < wide.len() as i32 {
++        return -1;
++    }
++    std::ptr::copy_nonoverlapping(wide.as_ptr(), buffer, wide.len());
++    0
++}
++
+ #[derive(Default)]
+ struct SessionHandler {
+     event_stream: Option<StreamSink<EventToUI>>,
+diff --git a/src/flutter_ffi.rs b/src/flutter_ffi.rs
+index a08011c..8e87fd5 100644
+--- a/src/flutter_ffi.rs
++++ b/src/flutter_ffi.rs
+@@ -2689,6 +2689,10 @@ pub fn main_get_printer_names() -> SyncReturn<String> {
+ }
+ 
+ pub fn main_get_common(key: String) -> String {
++    #[cfg(windows)]
++    if !hbb_common::config::SUPPORT_EDITION && key == "merchant-language" {
++        return crate::lang::refresh_merchant_language();
++    }
+     if key == "is-printer-installed" {
+         #[cfg(target_os = "windows")]
+         {
+@@ -2786,6 +2790,13 @@ pub fn main_get_common_sync(key: String) -> SyncReturn<String> {
+ }
+ 
+ pub fn main_set_common(_key: String, _value: String) {
++    #[cfg(windows)]
++    if !hbb_common::config::SUPPORT_EDITION && _key == "merchant-language" {
++        if !crate::lang::set_merchant_language(&_value) {
++            hbb_common::log::warn!("Could not save merchant language");
++        }
++        return;
++    }
+     if crate::is_custom_client() && matches!(_key.as_str(), "download-new-version" | "update-me") {
+         return;
+     }
+diff --git a/src/lang.rs b/src/lang.rs
+index c0021fa..140d7e2 100644
+--- a/src/lang.rs
++++ b/src/lang.rs
+@@ -175,6 +175,45 @@ fn resolve_lang(saved_lang: &str, locale: &str, cjk_fallback: bool) -> String {
+     }
+ }
+ 
++// The merchant panel offers the same three languages on Windows and Android.
++fn merchant_language(saved: &str, system: &str) -> &'static str {
++    let locale = if saved.is_empty() { system } else { saved };
++    let primary = locale.split(|c| c == '-' || c == '_').next().unwrap_or("");
++    if primary.eq_ignore_ascii_case("zh") {
++        "zh-cn"
++    } else if primary.eq_ignore_ascii_case("es") {
++        "es"
++    } else {
++        "en"
++    }
++}
++
++// The main window, CM and tray run in separate Windows processes. A single
++// HKCU value changes atomically without rewriting their cached LocalConfig.
++#[cfg(windows)]
++const MERCHANT_LANG_KEY: &str = r"Software\SteadDesk\Merchant";
++
++#[cfg(windows)]
++pub(crate) fn refresh_merchant_language() -> String {
++    use winreg::{enums::HKEY_CURRENT_USER, RegKey};
++
++    RegKey::predef(HKEY_CURRENT_USER)
++        .open_subkey(MERCHANT_LANG_KEY)
++        .and_then(|key| key.get_value::<String, _>("Language"))
++        .unwrap_or_else(|_| hbb_common::config::LocalConfig::get_option("lang"))
++}
++
++#[cfg(windows)]
++pub(crate) fn set_merchant_language(value: &str) -> bool {
++    use winreg::{enums::HKEY_CURRENT_USER, RegKey};
++
++    matches!(value, "" | "en" | "zh-cn" | "es")
++        && RegKey::predef(HKEY_CURRENT_USER)
++            .create_subkey(MERCHANT_LANG_KEY)
++            .and_then(|(key, _)| key.set_value("Language", &value))
++            .is_ok()
++}
++
+ #[cfg(not(any(target_os = "android", target_os = "ios")))]
+ pub fn translate(name: String) -> String {
+     let locale = sys_locale::get_locale().unwrap_or_default();
+@@ -182,12 +221,24 @@ pub fn translate(name: String) -> String {
+ }
+ 
+ pub fn translate_locale(name: String, locale: &str) -> String {
+-    let lang = resolve_lang(
+-        &hbb_common::config::LocalConfig::get_option("lang"),
+-        locale,
+-        cjk_ui_unavailable(),
+-    );
+-    let m = match lang.as_str() {
++    #[cfg(windows)]
++    if !hbb_common::config::SUPPORT_EDITION {
++        return translate_merchant(name, &refresh_merchant_language(), locale);
++    }
++    let saved = hbb_common::config::LocalConfig::get_option("lang");
++    #[cfg(target_os = "android")]
++    if !hbb_common::config::SUPPORT_EDITION {
++        return translate_merchant(name, &saved, locale);
++    }
++    translate_in_language(name, &resolve_lang(&saved, locale, cjk_ui_unavailable()))
++}
++
++pub(crate) fn translate_merchant(name: String, saved: &str, locale: &str) -> String {
++    translate_in_language(name, merchant_language(saved, locale))
++}
++
++fn translate_in_language(name: String, lang: &str) -> String {
++    let m = match lang {
+         "fr" => fr::T.deref(),
+         "zh-cn" => cn::T.deref(),
+         "it" => it::T.deref(),
+@@ -279,6 +330,16 @@ pub fn translate_locale(name: String, locale: &str) -> String {
+         }
+         s
+     };
++    if cfg!(any(windows, target_os = "android")) && !hbb_common::config::SUPPORT_EDITION {
++        let extra = match lang {
++            "zh-cn" => cn::MERCHANT.get(name.as_str()),
++            "es" => es::MERCHANT.get(name.as_str()),
++            _ => None,
++        };
++        if let Some(value) = extra {
++            return replace(value);
++        }
++    }
+     if let Some(v) = m.get(&name as &str) {
+         if !v.is_empty() {
+             return replace(v);
+diff --git a/src/lang/cn.rs b/src/lang/cn.rs
+index 1bbe0bd..10667a6 100644
+--- a/src/lang/cn.rs
++++ b/src/lang/cn.rs
+@@ -895,3 +895,72 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
+         ("To start a voice call, enable \"Audio capture\" on the \"Screen share\" page.", "开始语音通话前请在\"仅共享屏幕\"页面启用\"音频录制\"。")
+     ].iter().cloned().collect();
+ }
++
++// Merchant-edition additions; support keeps the upstream fallback for these keys.
++lazy_static::lazy_static! {
++    pub(super) static ref MERCHANT: std::collections::HashMap<&'static str, &'static str> = [
++        ("SteadDesk {}", "SteadDesk {}"),
++        ("Use device language", "跟随系统语言"),
++        ("English", "英语"),
++        ("Chinese", "中文"),
++        ("Spanish", "西班牙语"),
++        ("Set a permanent password", "设置固定密码"),
++        ("token is required!", "请输入令牌。"),
++        ("In Android accessibility settings, turn on the SteadDesk service to allow remote input.", "在安卓无障碍设置中开启 SteadDesk 服务，以允许远程输入。"),
++        ("Remote assistance", "远程协助"),
++        ("Connection manager", "连接管理器"),
++        ("Could not save the language.", "未能保存语言设置。"),
++        ("SteadDesk", "SteadDesk"),
++        ("SteadDesk service started", "SteadDesk 服务已开启"),
++        ("Allow SteadDesk to wake the companion Agent", "允许 SteadDesk 唤醒配套的 Agent 应用"),
++        ("SteadDesk Input", "SteadDesk 输入服务"),
++        ("Allow other devices to control your phone using virtual touch, when SteadDesk screen sharing is established", "通过 SteadDesk 共享屏幕后，允许其他设备使用模拟触控操作此设备"),
++        ("Keeps the SteadDesk remote desktop host available for authorized unattended connections and foreground notifications without starting screen capture before user approval.", "让 SteadDesk 远程桌面保持可用，以便接收已授权的无人值守连接并显示前台通知。屏幕捕获会在用户批准后开始。"),
++        ("SteadDesk service", "SteadDesk 服务"),
++        ("Notifications about the SteadDesk remote access service", "SteadDesk 远程访问服务的通知"),
++        ("File transfer connected", "文件传输已连接"),
++        ("Screen sharing connected", "屏幕共享已连接"),
++        ("Voice call request", "语音通话请求"),
++        ("Show SteadDesk", "显示 SteadDesk"),
++        ("Failed to start voice call.", "无法开始语音通话。"),
++        ("Failed to stop voice call.", "无法结束语音通话。"),
++        ("Failed to switch out voice call.", "无法退出语音通话模式。"),
++        ("Select the folder to import", "选择要导入的文件夹"),
++        ("Select the destination folder", "选择目标文件夹"),
++        ("Recovery broadcast received", "已收到恢复服务广播"),
++        ("Recovery permissions missing", "缺少恢复服务所需的权限"),
++        ("Access to the local status service was denied.", "本机状态服务的访问请求被拒绝。"),
++        ("The local recovery log is unavailable.", "本机恢复日志不可用。"),
++        ("Agent signature required", "需要 Agent 签名"),
++        ("Agent UID required", "需要 Agent 的用户 ID"),
++        ("Recovery unavailable", "恢复服务不可用"),
++        ("Unsupported recovery request", "不支持此恢复请求"),
++        ("Agent health check", "Agent 状态检查"),
++        ("Agent wake attempt", "尝试唤醒 Agent"),
++        ("Agent recovery result", "Agent 恢复结果"),
++        ("Agent permissions", "Agent 权限"),
++        ("Agent service endpoint", "Agent 服务接口"),
++        ("Response timeout", "响应超时"),
++        ("Service not bound", "未绑定服务"),
++        ("Service binding", "服务绑定"),
++        ("Service disconnected", "服务已断开连接"),
++        ("Service binding lost", "服务绑定已失效"),
++        ("Empty service binding", "服务返回空绑定"),
++        ("Agent status", "Agent 状态"),
++        ("Service stopped", "服务已停止"),
++        ("Automatic recovery setting", "自动恢复设置"),
++        ("Request to wake Agent", "唤醒 Agent 的请求"),
++        ("Service communication", "服务通信"),
++        ("Automatic recovery disabled", "自动恢复已关闭"),
++        ("Hourly wake limit reached", "已达每小时唤醒次数上限"),
++        ("Wake attempt history unavailable", "无法读取或保存唤醒记录"),
++        ("Wake attempt reserved", "已预留本次唤醒次数"),
++        ("Permission denied", "权限被拒绝"),
++        ("Service unavailable", "服务不可用"),
++        ("Request failed", "请求失败"),
++        ("Session in progress", "会话进行中"),
++        ("Agent is running", "Agent 正在运行"),
++        ("Unknown service state", "服务状态未知"),
++        ("Wake request acknowledged", "唤醒请求已确认"),
++    ].iter().cloned().collect();
++}
+diff --git a/src/lang/es.rs b/src/lang/es.rs
+index 73520fc..c1d5083 100644
+--- a/src/lang/es.rs
++++ b/src/lang/es.rs
+@@ -783,3 +783,88 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
+         ("To start a voice call, enable \"Audio capture\" on the \"Screen share\" page.", "Para comenzar una llamada de voz activar \"Captura de audio\" en la página \"Compartir pantalla\".")
+     ].iter().cloned().collect();
+ }
++
++// Merchant-edition additions; support keeps the upstream fallback for these keys.
++lazy_static::lazy_static! {
++    pub(super) static ref MERCHANT: std::collections::HashMap<&'static str, &'static str> = [
++        ("This device ID", "ID de este dispositivo"),
++        ("Copy ID", "Copiar ID"),
++        ("Ready · No active assistance", "Listo · Sin asistencia activa"),
++        ("Not ready", "Aún no está listo"),
++        ("Remote assistance in progress", "Asistencia remota en curso"),
++        ("End remote assistance", "Finalizar asistencia remota"),
++        ("Need help?", "¿Necesita ayuda?"),
++        ("Give your device ID to support.", "Indique al equipo de soporte el ID de este dispositivo."),
++        ("Support phone", "Teléfono de soporte"),
++        ("SteadDesk {}", "SteadDesk {}"),
++        ("Use device language", "Usar el idioma del dispositivo"),
++        ("English", "Inglés"),
++        ("Chinese", "Chino"),
++        ("Spanish", "Español"),
++        ("First-time setup", "Configuración inicial"),
++        ("Checking", "Comprobando"),
++        ("Granted", "Concedido"),
++        ("Not granted", "Sin conceder"),
++        ("Notifications", "Notificaciones"),
++        ("Battery optimization exemption", "Exención de optimización de batería"),
++        ("Set a permanent password", "Establecer una contraseña permanente"),
++        ("token is required!", "Introduzca el token."),
++        ("In Android accessibility settings, turn on the SteadDesk service to allow remote input.", "En los ajustes de accesibilidad de Android, active el servicio de SteadDesk para permitir el control remoto."),
++        ("Remote assistance", "Asistencia remota"),
++        ("Connection manager", "Administrador de conexiones"),
++        ("Show panel", "Mostrar panel"),
++        ("Could not save the language.", "No se pudo guardar el idioma."),
++        ("SteadDesk", "SteadDesk"),
++        ("SteadDesk service started", "Se ha iniciado el servicio de SteadDesk"),
++        ("Allow SteadDesk to wake the companion Agent", "Permitir que SteadDesk reactive la aplicación Agent asociada"),
++        ("SteadDesk Input", "Servicio de entrada de SteadDesk"),
++        ("Allow other devices to control your phone using virtual touch, when SteadDesk screen sharing is established", "Permite que otros dispositivos controlen este teléfono mediante gestos táctiles simulados cuando se comparte la pantalla con SteadDesk"),
++        ("Keeps the SteadDesk remote desktop host available for authorized unattended connections and foreground notifications without starting screen capture before user approval.", "Mantiene SteadDesk disponible para conexiones desatendidas autorizadas y notificaciones en primer plano. La captura de pantalla comienza solo con la aprobación del usuario."),
++        ("SteadDesk service", "Servicio de SteadDesk"),
++        ("Notifications about the SteadDesk remote access service", "Notificaciones del servicio de acceso remoto de SteadDesk"),
++        ("File transfer connected", "Transferencia de archivos conectada"),
++        ("Screen sharing connected", "Pantalla compartida conectada"),
++        ("Voice call request", "Solicitud de llamada de voz"),
++        ("Show SteadDesk", "Mostrar SteadDesk"),
++        ("Failed to start voice call.", "No se pudo iniciar la llamada de voz."),
++        ("Failed to stop voice call.", "No se pudo finalizar la llamada de voz."),
++        ("Failed to switch out voice call.", "No se pudo salir del modo de llamada de voz."),
++        ("Select the folder to import", "Selecciona la carpeta que deseas importar"),
++        ("Select the destination folder", "Selecciona la carpeta de destino"),
++        ("Recovery broadcast received", "Se recibió una difusión de recuperación"),
++        ("Recovery permissions missing", "Faltan permisos para la recuperación del servicio"),
++        ("Access to the local status service was denied.", "Se denegó el acceso al servicio de estado local."),
++        ("The local recovery log is unavailable.", "El registro de recuperación local no está disponible."),
++        ("Agent signature required", "Se requiere la firma de Agent"),
++        ("Agent UID required", "Se requiere el identificador de usuario de Agent"),
++        ("Recovery unavailable", "El servicio de recuperación no está disponible"),
++        ("Unsupported recovery request", "Solicitud de recuperación no compatible"),
++        ("Agent health check", "Comprobación del estado de Agent"),
++        ("Agent wake attempt", "Intento de reactivar Agent"),
++        ("Agent recovery result", "Resultado de la recuperación de Agent"),
++        ("Agent permissions", "Permisos de Agent"),
++        ("Agent service endpoint", "Interfaz del servicio de Agent"),
++        ("Response timeout", "Tiempo de respuesta agotado"),
++        ("Service not bound", "Servicio sin vincular"),
++        ("Service binding", "Vinculación del servicio"),
++        ("Service disconnected", "Servicio desconectado"),
++        ("Service binding lost", "Se perdió la vinculación del servicio"),
++        ("Empty service binding", "Vinculación del servicio vacía"),
++        ("Agent status", "Estado de Agent"),
++        ("Service stopped", "Servicio detenido"),
++        ("Automatic recovery setting", "Ajuste de recuperación automática"),
++        ("Request to wake Agent", "Solicitud para reactivar Agent"),
++        ("Service communication", "Comunicación con el servicio"),
++        ("Automatic recovery disabled", "Recuperación automática desactivada"),
++        ("Hourly wake limit reached", "Se alcanzó el límite de reactivaciones por hora"),
++        ("Wake attempt history unavailable", "No se pudo leer o guardar el historial de reactivaciones"),
++        ("Wake attempt reserved", "Intento de reactivación reservado"),
++        ("Permission denied", "Permiso denegado"),
++        ("Service unavailable", "Servicio no disponible"),
++        ("Request failed", "La solicitud falló"),
++        ("Session in progress", "Sesión en curso"),
++        ("Agent is running", "Agent en ejecución"),
++        ("Unknown service state", "Estado del servicio desconocido"),
++        ("Wake request acknowledged", "Solicitud de reactivación confirmada"),
++    ].iter().cloned().collect();
++}
+diff --git a/src/tray.rs b/src/tray.rs
+index 8b01c52..e83af14 100644
+--- a/src/tray.rs
++++ b/src/tray.rs
+@@ -77,18 +77,9 @@ fn make_tray() -> hbb_common::ResultType<()> {
+     };
+     let open_label = if merchant_panel { "Show panel" } else { "Open" };
+     let open_i = MenuItem::new(translate(open_label.to_owned()), true, None);
++    let about_i = MenuItem::new(translate("About".to_owned()), true, None);
+     if merchant_panel {
+-        use tray_icon::menu::{AboutMetadata, PredefinedMenuItem};
+-
+-        let about = PredefinedMenuItem::about(
+-            Some(&translate("About".to_owned())),
+-            Some(AboutMetadata {
+-                name: Some(crate::get_app_name()),
+-                version: Some(include_str!("../RELEASE_VERSION").trim().to_owned()),
+-                ..Default::default()
+-            }),
+-        );
+-        tray_menu.append_items(&[&open_i, &about])?;
++        tray_menu.append_items(&[&open_i, &about_i])?;
+     } else if let Some(quit_i) = &quit_i {
+         tray_menu.append_items(&[&open_i, quit_i]).ok();
+     } else {
+@@ -148,6 +139,12 @@ fn make_tray() -> hbb_common::ResultType<()> {
+         start_query_session_count(ipc_sender.clone());
+     });
+     #[cfg(windows)]
++    let mut last_lang_check = std::time::Instant::now();
++    #[cfg(windows)]
++    let mut previous_labels = (open_i.text(), about_i.text());
++    #[cfg(windows)]
++    let mut session_count = 0;
++    #[cfg(windows)]
+     let mut last_click = std::time::Instant::now();
+     #[cfg(target_os = "macos")]
+     {
+@@ -201,7 +198,24 @@ fn make_tray() -> hbb_common::ResultType<()> {
+             }
+         }
+ 
++        #[cfg(windows)]
++        if merchant_panel && last_lang_check.elapsed() >= Duration::from_secs(2) {
++            last_lang_check = std::time::Instant::now();
++            let labels = (translate("Show panel".into()), translate("About".into()));
++            if labels != previous_labels {
++                open_i.set_text(&labels.0);
++                about_i.set_text(&labels.1);
++                if let Some(tray) = _tray_icon.lock().unwrap().as_ref() {
++                    let _ = tray.set_tooltip(Some(tooltip(session_count)));
++                }
++                previous_labels = labels;
++            }
++        }
+         if let Ok(event) = menu_channel.try_recv() {
++            #[cfg(windows)]
++            if merchant_panel && event.id == about_i.id() {
++                show_merchant_about();
++            }
+             if let Some(quit_i) = &quit_i {
+                 if event.id == quit_i.id() {
+                     /* failed in windows, seems no permission to check system process
+@@ -264,6 +278,7 @@ fn make_tray() -> hbb_common::ResultType<()> {
+         if let Ok(data) = ipc_receiver.try_recv() {
+             match data {
+                 Data::ControlledSessionCount(count) => {
++                    session_count = count;
+                     _tray_icon
+                         .lock()
+                         .unwrap()
+@@ -276,6 +291,21 @@ fn make_tray() -> hbb_common::ResultType<()> {
+     });
+ }
+ 
++// The predefined About dialog supplies its own English caption on Windows.
++#[cfg(windows)]
++fn show_merchant_about() {
++    use winapi::um::winuser::{MessageBoxW, MB_ICONINFORMATION, MB_OK};
++    let wide = |s: String| s.encode_utf16().chain(std::iter::once(0)).collect::<Vec<_>>();
++    let title = wide(format!("{} · {}", crate::get_app_name(), translate("About".into())));
++    let text = wide(format!(
++        "{}\n{} {}",
++        crate::get_app_name(),
++        translate("Version".into()),
++        include_str!("../RELEASE_VERSION").trim()
++    ));
++    unsafe { MessageBoxW(std::ptr::null_mut(), text.as_ptr(), title.as_ptr(), MB_OK | MB_ICONINFORMATION) };
++}
++
+ #[cfg(windows)]
+ #[tokio::main(flavor = "current_thread")]
+ async fn start_query_session_count(sender: std::sync::mpsc::Sender<Data>) {
+diff --git a/flutter/windows/runner/main.cpp b/flutter/windows/runner/main.cpp
+index 8ad0fcf..dda6e82 100644
+--- a/flutter/windows/runner/main.cpp
++++ b/flutter/windows/runner/main.cpp
+@@ -175,6 +175,16 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
+   } else {
+     window_title = app_name;
+   }
++  if (is_cm_page || is_install_page) {
++    // The merchant DLL owns the locale; the support edition keeps its caption.
++    using MerchantCaption = int (*)(int, wchar_t*, int);
++    auto merchant_caption = reinterpret_cast<MerchantCaption>(
++        GetProcAddress(hInstance, "steaddesk_merchant_caption"));
++    wchar_t caption[256] = {};
++    if (merchant_caption && merchant_caption(is_cm_page, caption, 256) == 0) {
++      window_title = caption;
++    }
++  }
+   if (!window.CreateAndShow(window_title, origin, size, !is_cm_page)) {
+       return EXIT_FAILURE;
+   }
