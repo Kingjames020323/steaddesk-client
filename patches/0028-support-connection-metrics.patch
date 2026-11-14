@@ -1,0 +1,1831 @@
+Subject: Measure ordinary desktop support connections locally
+
+diff --git a/flutter/lib/common.dart b/flutter/lib/common.dart
+index 80cad07..bcf2837 100644
+--- a/flutter/lib/common.dart
++++ b/flutter/lib/common.dart
+@@ -31,6 +31,7 @@ import 'package:window_size/window_size.dart' as window_size;
+ import '../consts.dart';
+ import 'common/widgets/overlay.dart';
+ import 'steaddesk/theme.dart';
++import 'steaddesk/metrics_api.dart';
+ import 'mobile/pages/file_manager_page.dart';
+ import 'mobile/pages/remote_page.dart';
+ import 'mobile/pages/view_camera_page.dart';
+@@ -2261,6 +2262,7 @@ bool handleUriLink({List<String>? cmdArgs, Uri? uri, String? uriString}) {
+       case UriLinkType.remoteDesktop:
+         Future.delayed(Duration.zero, () {
+           rustDeskWinManager.newRemoteDesktop(id!,
++              metricSeed: SupportMetrics.begin(id, clicked: false),
+               password: password,
+               switchUuid: switchUuid,
+               forceRelay: forceRelay);
+@@ -2444,6 +2446,7 @@ connectMainDesktop(String id,
+     required bool isTerminal,
+     required bool isTcpTunneling,
+     required bool isRDP,
++    Map<String, dynamic>? metricSeed,
+     bool? forceRelay,
+     String? password,
+     String? connToken,
+@@ -2474,6 +2477,7 @@ connectMainDesktop(String id,
+         forceRelay: forceRelay);
+   } else {
+     await rustDeskWinManager.newRemoteDesktop(id,
++        metricSeed: metricSeed,
+         password: password,
+         isSharedPassword: isSharedPassword,
+         forceRelay: forceRelay);
+@@ -2492,10 +2496,15 @@ connect(BuildContext context, String id,
+     bool isTcpTunneling = false,
+     bool isRDP = false,
+     bool forceRelay = false,
++    Map<String, dynamic>? metricSeed,
+     String? password,
+     String? connToken,
+     bool? isSharedPassword}) async {
+   if (id == '') return;
++  if (isDesktop && !isFileTransfer && !isViewCamera &&
++      !isTerminal && !isTcpTunneling && !isRDP) {
++    metricSeed ??= SupportMetrics.begin(id);
++  }
+   if (!isDesktop || desktopType == DesktopType.main) {
+     try {
+       if (Get.isRegistered<IDTextEditingController>()) {
+@@ -2519,6 +2528,7 @@ connect(BuildContext context, String id,
+     if (desktopType == DesktopType.main) {
+       await connectMainDesktop(
+         id,
++        metricSeed: metricSeed,
+         isFileTransfer: isFileTransfer,
+         isViewCamera: isViewCamera,
+         isTerminal: isTerminal,
+@@ -2531,6 +2541,7 @@ connect(BuildContext context, String id,
+     } else {
+       await rustDeskWinManager.call(WindowType.Main, kWindowConnect, {
+         'id': id,
++        if (metricSeed != null) 'metric_seed': metricSeed,
+         'isFileTransfer': isFileTransfer,
+         'isViewCamera': isViewCamera,
+         'isTerminal': isTerminal,
+diff --git a/flutter/lib/common/widgets/peer_card.dart b/flutter/lib/common/widgets/peer_card.dart
+index edb723d..6cb8f67 100644
+--- a/flutter/lib/common/widgets/peer_card.dart
++++ b/flutter/lib/common/widgets/peer_card.dart
+@@ -1,6 +1,7 @@
+ import 'package:bot_toast/bot_toast.dart';
+ import 'package:flutter/material.dart';
+ import 'package:flutter_hbb/steaddesk/theme.dart';
++import 'package:flutter_hbb/steaddesk/metrics_api.dart';
+ import 'package:flutter/services.dart';
+ import 'package:flutter_hbb/common/widgets/dialog.dart';
+ import 'package:flutter_hbb/consts.dart';
+@@ -1552,6 +1553,11 @@ void connectInPeerTab(BuildContext context, Peer peer, PeerTabIndex tab,
+     bool isTcpTunneling = false,
+     bool isRDP = false,
+     bool isTerminal = false}) async {
++  // Address-book preparation below can be asynchronous.
++  final metricSeed = isDesktop && !isFileTransfer && !isViewCamera &&
++          !isTcpTunneling && !isRDP && !isTerminal
++      ? SupportMetrics.begin(peer.id)
++      : null;
+   var password = '';
+   bool isSharedPassword = false;
+   if (tab == PeerTabIndex.ab) {
+@@ -1580,6 +1586,7 @@ void connectInPeerTab(BuildContext context, Peer peer, PeerTabIndex tab,
+     }
+   }
+   connect(context, peer.id,
++      metricSeed: metricSeed,
+       password: password,
+       isSharedPassword: isSharedPassword,
+       isFileTransfer: isFileTransfer,
+diff --git a/flutter/lib/desktop/pages/desktop_home_page.dart b/flutter/lib/desktop/pages/desktop_home_page.dart
+index f6905ad..3429e88 100644
+--- a/flutter/lib/desktop/pages/desktop_home_page.dart
++++ b/flutter/lib/desktop/pages/desktop_home_page.dart
+@@ -28,6 +28,7 @@ import '../widgets/tabbar_widget.dart' show DesktopTabController;
+ 
+ import '../../steaddesk/merchant_build.dart' show casesEnabled;
+ import '../../steaddesk/case_session_api.dart';
++import '../../steaddesk/metrics_api.dart';
+ import '../../steaddesk/case_inbox_api.dart' show caseEnded, readCaseHistory;
+ import '../../steaddesk/incoming_switch.dart';
+ import '../../steaddesk/support_home.dart';
+@@ -808,7 +809,10 @@ class _DesktopHomePageState extends State<DesktopHomePage>
+           return result;
+         });
+       }
+-      if (!isChattyMethod(call.method)) {
++      if (call.method == 'steaddesk.metrics.transfer') {
++        return rustDeskWinManager.transferMetricOwner(fromWindowId, call.arguments as String);
++      }
++      if (!isChattyMethod(call.method) && call.method != kWindowConnect) {
+         debugPrint(
+           "[Main] call ${call.method} with args ${call.arguments} from window $fromWindowId");
+       }
+@@ -836,6 +840,7 @@ class _DesktopHomePageState extends State<DesktopHomePage>
+           password: call.arguments['password'],
+           forceRelay: call.arguments['forceRelay'],
+           connToken: call.arguments['connToken'],
++          metricSeed: SupportMetrics.fromChild(call.arguments['metric_seed']),
+         );
+       } else if (call.method == kWindowBumpMouse) {
+         return RdPlatformChannel.instance.bumpMouse(
+diff --git a/flutter/lib/desktop/pages/remote_page.dart b/flutter/lib/desktop/pages/remote_page.dart
+index e36f7ae..779d242 100644
+--- a/flutter/lib/desktop/pages/remote_page.dart
++++ b/flutter/lib/desktop/pages/remote_page.dart
+@@ -15,6 +15,7 @@ import '../../common.dart';
+ import '../../common/widgets/dialog.dart';
+ import '../../common/widgets/toolbar.dart';
+ import '../../models/model.dart';
++import '../../steaddesk/metrics_api.dart';
+ import '../../models/input_model.dart';
+ import '../../models/platform_model.dart';
+ import '../../common/shared_state.dart';
+@@ -38,6 +39,7 @@ class RemotePage extends StatefulWidget {
+     required this.id,
+     required this.toolbarState,
+     this.sessionId,
++    this.metricSeed,
+     this.tabWindowId,
+     this.password,
+     this.display,
+@@ -52,6 +54,7 @@ class RemotePage extends StatefulWidget {
+ 
+   final String id;
+   final SessionID? sessionId;
++  final Map<String, dynamic>? metricSeed;
+   final int? tabWindowId;
+   final int? display;
+   final List<int>? displays;
+@@ -65,6 +68,11 @@ class RemotePage extends StatefulWidget {
+ 
+   FFI get ffi => (_lastState.value! as _RemotePageState)._ffi;
+ 
++  FFI? get mountedFfi {
++    final state = _lastState.value as _RemotePageState?;
++    return state != null && state.mounted ? state._ffi : null;
++  }
++
+   void releaseMacOSInputForTabTransfer() {
+     if (!isMacOS) return;
+     // Release before removing the source tab. Its delayed disposal must not
+@@ -148,6 +156,12 @@ class _RemotePageState extends State<RemotePage>
+   void initState() {
+     super.initState();
+     _ffi = FFI(widget.sessionId);
++    // Only a newly mounted connection owns the measurement. An existing tab
++    // is selected without mounting its duplicate, and a moved tab resumes
++    // its source measurement through the cached-session handoff.
++    if (widget.tabWindowId == null && widget.display == null) {
++      _ffi.metrics = SupportMetrics.attach(widget.metricSeed);
++    }
+     if (isMacOS) {
+       // SchedulerBinding.instance.lifecycleState is null in the first connection in a new window.
+       _macOSLifecycleState = SchedulerBinding.instance.lifecycleState;
+diff --git a/flutter/lib/desktop/pages/remote_tab_page.dart b/flutter/lib/desktop/pages/remote_tab_page.dart
+index fc18887..1fb444d 100644
+--- a/flutter/lib/desktop/pages/remote_tab_page.dart
++++ b/flutter/lib/desktop/pages/remote_tab_page.dart
+@@ -24,6 +24,7 @@ import '../../common/widgets/dialog.dart';
+ import '../../models/platform_model.dart';
+ import '../../steaddesk/merchant_build.dart' show casesEnabled;
+ import '../../steaddesk/case_session_api.dart';
++import '../../steaddesk/metrics_api.dart';
+ 
+ class _MenuTheme {
+   static const Color blueColor = MyTheme.button;
+@@ -50,6 +51,7 @@ class _ConnectionTabPageState extends State<ConnectionTabPage> {
+ 
+   String? peerId;
+   bool _isScreenRectSet = false;
++  bool _drainingMetrics = false;
+   int? _display;
+ 
+   var connectionMap = RxList<Widget>.empty(growable: true);
+@@ -94,6 +96,7 @@ class _ConnectionTabPageState extends State<ConnectionTabPage> {
+         page: RemotePage(
+           key: ValueKey(peerId),
+           id: peerId!,
++          metricSeed: params['metric_seed'],
+           sessionId: sessionId == null ? null : SessionID(sessionId),
+           tabWindowId: tabWindowId,
+           display: display,
+@@ -423,13 +426,36 @@ class _ConnectionTabPageState extends State<ConnectionTabPage> {
+       RemoteCountState.find().value = tabController.length;
+ 
+   Future<dynamic> _remoteMethodHandler(call, fromWindowId) async {
++    if (SupportMetrics.enabled && call.method == 'steaddesk.metrics.shutdown') {
++      if (fromWindowId == kMainWindowId) {
++        _drainingMetrics = true;
++        await rustDeskWinManager.drainWindowMetrics();
++      }
++      return null;
++    }
++    if (SupportMetrics.enabled && call.method == 'steaddesk.metrics.accept') {
++      if (_drainingMetrics || fromWindowId != kMainWindowId) return false;
++      final args = jsonDecode(call.arguments);
++      final page = tabController.widget(args['peer']);
++      if (page is! RemotePage) return false;
++      final ffi = page.mountedFfi;
++      if (ffi == null ||
++          ffi.closed ||
++          ffi.metrics != null ||
++          bind.sessionGetConnSessionId(sessionId: ffi.sessionId) !=
++              args['connection']) {
++        return false;
++      }
++      ffi.metrics = SupportMetrics.resume(args['snapshot']);
++      return ffi.metrics != null;
++    }
+     if (casesEnabled && call.method == 'steaddesk.case.pendingNotes') {
+       return fromWindowId == kMainWindowId
+           ? CaseSession.pendingNotes(call.arguments as String?)
+           : null;
+     }
+     debugPrint(
+-        "[Remote Page] call ${call.method} with args ${call.arguments} from window $fromWindowId");
++        "[Remote Page] call ${call.method} from window $fromWindowId");
+ 
+     dynamic returnValue;
+     // for simplify, just replace connectionId
+@@ -472,6 +498,7 @@ class _ConnectionTabPageState extends State<ConnectionTabPage> {
+         page: RemotePage(
+           key: ValueKey(id),
+           id: id,
++          metricSeed: args['metric_seed'],
+           sessionId: sessionId == null ? null : SessionID(sessionId),
+           tabWindowId: tabWindowId,
+           display: display,
+@@ -525,7 +552,14 @@ class _ConnectionTabPageState extends State<ConnectionTabPage> {
+         remotePage = tabController.state.value.tabs
+             .firstWhere((tab) => tab.key == id)
+             .page as RemotePage;
+-        returnValue = remotePage.ffi.ffiModel.cachedPeerData.toString();
++        final ffi = remotePage.ffi;
++        final cached = ffi.ffiModel.cachedPeerData;
++        if (close && ffi.metrics != null) {
++          cached.metricTransfer = ffi.metrics!.detachForTransfer();
++          ffi.metrics = null;
++        }
++        returnValue = cached.toString();
++        cached.metricTransfer = null;
+       } catch (e) {
+         debugPrint('Failed to get cached session data: $e');
+       }
+diff --git a/flutter/lib/main.dart b/flutter/lib/main.dart
+index 285bbff..997283a 100644
+--- a/flutter/lib/main.dart
++++ b/flutter/lib/main.dart
+@@ -40,7 +40,7 @@ Future<void> main(List<String> args) async {
+   earlyAssert();
+   WidgetsFlutterBinding.ensureInitialized();
+ 
+-  debugPrint("launch args: $args");
++  // Connection launch arguments can contain credentials and measurement context.
+   kBootArgs = List.from(args);
+ 
+   if (!isDesktop) {
+diff --git a/flutter/lib/models/model.dart b/flutter/lib/models/model.dart
+index 6497009..5de0ecd 100644
+--- a/flutter/lib/models/model.dart
++++ b/flutter/lib/models/model.dart
+@@ -1,5 +1,6 @@
+ import 'dart:async';
+ import '../steaddesk/device_sessions.dart';
++import '../steaddesk/metrics_api.dart';
+ import '../steaddesk/merchant_build.dart' show merchantEdition, casesEnabled;
+ import '../steaddesk/case_session_api.dart';
+ import 'dart:convert';
+@@ -64,6 +65,7 @@ class CachedPeerData {
+   // No shapes: the core keeps them for the session, and the window a tab moves to asks it
+   // for the one in use.
+   Map<String, dynamic> lastCursorId = {};
++  Map<String, dynamic>? metricTransfer;
+   Map<String, bool> permissions = {};
+ 
+   bool secure = false;
+@@ -78,6 +80,7 @@ class CachedPeerData {
+       'updatePrivacyMode': updatePrivacyMode,
+       'peerInfo': peerInfo,
+       'lastCursorId': lastCursorId,
++      if (metricTransfer != null) 'metric_transfer': metricTransfer,
+       'permissions': permissions,
+       'secure': secure,
+       'direct': direct,
+@@ -91,6 +94,7 @@ class CachedPeerData {
+       final data = CachedPeerData();
+       data.updatePrivacyMode = map['updatePrivacyMode'];
+       data.peerInfo = map['peerInfo'];
++      data.metricTransfer = map['metric_transfer'] as Map<String, dynamic>?;
+       data.lastCursorId = map['lastCursorId'];
+       map['permissions'].forEach((key, value) {
+         data.permissions[key] = value;
+@@ -334,18 +338,21 @@ class FfiModel with ChangeNotifier {
+     return (evt) async {
+       var name = evt['name'];
+       if (name == 'msgbox') {
++        parent.target?.metrics?.message(evt['type'], evt['title'], evt['text']);
+         handleMsgBox(evt, sessionId, peerId);
+       } else if (name == 'toast') {
+         handleToast(evt, sessionId, peerId);
+       } else if (name == 'set_multiple_windows_session') {
+         handleMultipleWindowsSession(evt, sessionId, peerId);
+       } else if (name == 'peer_info') {
++        parent.target?.metrics?.authenticated();
+         handlePeerInfo(evt, peerId, false);
+       } else if (name == 'sync_peer_info') {
+         handleSyncPeerInfo(evt, sessionId, peerId);
+       } else if (name == 'sync_platform_additions') {
+         handlePlatformAdditions(evt, sessionId, peerId);
+       } else if (name == 'connection_ready') {
++        parent.target?.metrics?.ready(evt['direct']);
+         setConnectionType(peerId, evt['secure'] == 'true',
+             evt['direct'] == 'true', evt['stream_type'] ?? '');
+         resetRestartReconnectState();
+@@ -396,6 +403,7 @@ class FfiModel with ChangeNotifier {
+       } else if (name == 'on_client_remove') {
+         parent.target?.serverModel.onClientRemove(evt);
+       } else if (name == 'update_quality_status') {
++        parent.target?.metrics?.quality(evt, pi.currentDisplay);
+         parent.target?.qualityMonitorModel.updateQualityStatus(evt);
+       } else if (name == 'update_block_input_state') {
+         updateBlockInputState(evt, peerId);
+@@ -937,6 +945,7 @@ class FfiModel with ChangeNotifier {
+       if (_restartReconnectDelayTimer == null) {
+         parent.target?.inputModel.setRelativeMouseMode(false);
+         _cancelPendingMonitorRestore();
++        parent.target?.metrics?.reconnect();
+         bind.sessionReconnect(sessionId: sessionId, forceRelay: false);
+         clearPermissions();
+         // Retry once more after the silent window so restart reconnect attempts
+@@ -1122,6 +1131,7 @@ class FfiModel with ChangeNotifier {
+     // Disable relative mouse mode before reconnecting to ensure cursor is released.
+     parent.target?.inputModel.setRelativeMouseMode(false);
+     _cancelPendingMonitorRestore();
++    parent.target?.metrics?.reconnect();
+     bind.sessionReconnect(sessionId: sessionId, forceRelay: forceRelay);
+     clearPermissions();
+     dialogManager.dismissAll();
+@@ -4057,6 +4067,9 @@ enum ConnType {
+ 
+ /// Flutter state manager and data communication with the Rust core.
+ class FFI {
++  MetricSession? metrics;
++  bool _awaitingMetricTransfer = false;
++  DateTime? _firstFrameDuringTransfer;
+   var id = '';
+   var version = '';
+   var connType = ConnType.defaultConn;
+@@ -4178,10 +4191,11 @@ class FFI {
+     }
+ 
+     final isNewPeer = tabWindowId == null;
++    _awaitingMetricTransfer = SupportMetrics.enabled && !isNewPeer && display == null;
++
+     // If tabWindowId != null, this session is a "tab -> window" one.
+     // Else this session is a new one.
+     if (isNewPeer) {
+-      // ignore: unused_local_variable
+       final addRes = bind.sessionAddSync(
+         sessionId: sessionId,
+         id: id,
+@@ -4196,6 +4210,10 @@ class FFI {
+         isSharedPassword: isSharedPassword ?? false,
+         connToken: connToken,
+       );
++      if (addRes.isNotEmpty) {
++        unawaited(metrics?.finish(end: 'connection_failed'));
++        metrics = null;
++      }
+     } else if (display != null) {
+       if (displays == null) {
+         debugPrint(
+@@ -4274,6 +4292,7 @@ class FFI {
+           final args = jsonEncode({'id': id, 'close': display == null});
+           final cachedData = await DesktopMultiWindow.invokeMethod(
+               tabWindowId, kWindowEventGetCachedSessionData, args);
++          _awaitingMetricTransfer = false;
+           if (cachedData == null) {
+             // unreachable
+             debugPrint('Unreachable, the cached data is empty.');
+@@ -4284,6 +4303,16 @@ class FFI {
+             debugPrint('Unreachable, the cached data cannot be decoded.');
+             return;
+           }
++          if (display == null && data.metricTransfer != null) {
++            metrics = SupportMetrics.resume(data.metricTransfer!);
++            final observed = _firstFrameDuringTransfer;
++            if (observed != null) metrics?.firstFrame(observed);
++            _firstFrameDuringTransfer = null;
++            if (closed) {
++              await metrics?.finish(end: null);
++              return;
++            }
++          }
+           ffiModel.setPermissions(data.permissions);
+           await ffiModel.handleCachedPeerData(data, id);
+           await sessionRefreshVideo(sessionId, ffiModel.pi);
+@@ -4352,6 +4381,10 @@ class FFI {
+       clearWaitingForImage(dialogManager, sessionId);
+     }
+     if (ffiModel.waitForFirstImage.value == true) {
++      if (_awaitingMetricTransfer) {
++        _firstFrameDuringTransfer ??= DateTime.now().toUtc();
++      }
++      metrics?.firstFrame();
+       ffiModel.waitForFirstImage.value = false;
+       ffiModel.cancelPendingRestoreTimer();
+       ffiModel.resetRestartReconnectState();
+@@ -4400,7 +4433,24 @@ class FFI {
+ 
+   /// Close the remote session.
+   Future<void> close({bool closeSession = true}) async {
++    final end = closed ? null : 'closed_by_agent';
+     closed = true;
++    final owner = metrics;
++    metrics = null;
++    if (owner != null && closeSession) {
++      final connection = bind.sessionGetConnSessionId(sessionId: sessionId);
++      if (connection.isNotEmpty &&
++          !bind.willSessionCloseCloseSession(sessionId: sessionId)) {
++        try {
++          await rustDeskWinManager.transferMetricToMonitor(
++              id, connection, owner.detachForTransfer());
++        } catch (error) {
++          debugPrint('Support metric transfer failed (${error.runtimeType})');
++        }
++      } else {
++        await owner.finish(end: end);
++      }
++    }
+     if (isWeb) {
+       platformFFI.clearVideoFrameCallback();
+     }
+diff --git a/flutter/lib/steaddesk/metrics/metric_seed.dart b/flutter/lib/steaddesk/metrics/metric_seed.dart
+new file mode 100644
+index 0000000..dcd34d6
+--- /dev/null
++++ b/flutter/lib/steaddesk/metrics/metric_seed.dart
+@@ -0,0 +1,11 @@
++// Connection targets can contain an alternate server and its key. Persist only
++// a device ID. Direct IP endpoints and unrecognized input have no device ID.
++String? metricDeviceId(String target) {
++  var id = target.replaceAll(' ', '').split('@').first;
++  if (id.endsWith('/r') || id.endsWith(r'\r')) {
++    id = id.substring(0, id.length - 2);
++  }
++  return RegExp(r'^(?:[0-9]{1,32}|[a-zA-Z][a-zA-Z0-9_-]{5,15})$').hasMatch(id)
++      ? id
++      : null;
++}
+diff --git a/flutter/lib/steaddesk/metrics/metric_session.dart b/flutter/lib/steaddesk/metrics/metric_session.dart
+new file mode 100644
+index 0000000..8edc79b
+--- /dev/null
++++ b/flutter/lib/steaddesk/metrics/metric_session.dart
+@@ -0,0 +1,310 @@
++import 'dart:async';
++import 'dart:convert';
++
++typedef MetricData = Map<String, dynamic>;
++
++/// One ordinary remote connection, including password correction, reconnects and
++/// window moves. Only finish() constructs the allowlisted on-disk row.
++class MetricSession {
++  static final _active = <MetricSession>{};
++  static const _interval = Duration(seconds: 10);
++  final MetricData _seed;
++  final Future<void> Function(MetricData) _write;
++  final DateTime Function() _clock;
++  final int _startMs;
++  int? _readyMs, _authMs, _frameMs, _endedMs;
++  String? _path, _failure, _end;
++  int _reconnects = 0;
++  bool _live = false;
++  bool _detached = false;
++  Timer? _timer;
++  int? _nextSampleMs;
++  final _delay = _Samples();
++  final _fps = _Samples();
++  Future<void>? _finishing;
++
++  MetricSession(this._seed, this._write, {DateTime Function()? clock})
++      : _clock = clock ?? _elapsedClock(),
++        _startMs = DateTime.parse(_seed['started_at']).millisecondsSinceEpoch {
++    _active.add(this);
++  }
++
++  static DateTime Function() _elapsedClock() {
++    final anchor = DateTime.now().toUtc();
++    final elapsed = Stopwatch()..start();
++    return () => anchor.add(elapsed.elapsed);
++  }
++
++  int get _now => _clock().millisecondsSinceEpoch;
++  bool get _stopped => _detached || _finishing != null;
++
++  void ready(String? direct) {
++    if (_stopped) return;
++    if (_frameMs == null && _readyMs == null) {
++      _readyMs = _now;
++      if (direct == 'true' || direct == 'false') {
++        _path = direct == 'true' ? 'direct' : 'relay';
++      }
++    }
++  }
++
++  void authenticated() {
++    if (_stopped) return;
++    if (_frameMs == null) _authMs ??= _now;
++    _failure = null;
++    if (!_live) _startSampling();
++  }
++
++  void firstFrame([DateTime? observedAt]) {
++    if (_stopped) return;
++    // Native buffers may still deliver the previous image while the reconnect
++    // dialog is visible. Require a new live login to recover a failed round.
++    if (!_live && (_end != null || _reconnects != 0)) return;
++    _frameMs ??= observedAt?.millisecondsSinceEpoch ?? _now;
++    _failure = _end = null;
++    _endedMs = null;
++  }
++
++  void message(String type, String title, String text) {
++    if (_stopped) return;
++    if (type == 're-input-password' ||
++        (type == 'input-2fa' && title == 'Wrong 2FA Code')) {
++      _failure = 'auth_failed';
++      return;
++    }
++    final restart = type == 'restarting' || type == 'restarting-show';
++    if (title != 'Connection Error' && title != 'Login Error' && !restart) {
++      return;
++    }
++    if (_frameMs != null) {
++      _end = text == 'Closed manually by the peer'
++          ? 'closed_by_peer'
++          : 'disconnected';
++    } else {
++      if (title == 'Connection Error' && text == 'Remote desktop is offline') {
++        _failure = 'offline';
++      } else if (title == 'Connection Error' && text == 'Timeout') {
++        _failure = 'timeout';
++      } else {
++        _failure = null;
++      }
++      _end = 'connection_failed';
++    }
++    _endedMs ??= _now;
++    _stopSamples();
++  }
++
++  void reconnect() {
++    if (_stopped) return;
++    _reconnects++;
++    if (_frameMs == null) {
++      // Phase differences must use one transport. The click remains the
++      // original one even when only a later attempt produces an image.
++      _readyMs = _authMs = _endedMs = null;
++      _failure = _end = _path = null;
++    }
++    _stopSamples();
++  }
++
++  void quality(MetricData event, int display) {
++    if (!_live || _stopped) return;
++    final now = _now;
++    final delay = int.tryParse(event['delay']?.toString() ?? '');
++    if (delay != null && delay >= 0) _delay.update(delay, now);
++    final raw = event['fps'];
++    if (raw is! String || raw.isEmpty || raw == '{}') return;
++    // The core reports FPS per display. All-displays mode has no single FPS.
++    // A new FPS report replaces an earlier pending observation even when the
++    // selected display is absent. Delay-only updates carry the empty map.
++    _fps.clearPending();
++    if (display < 0) return;
++    try {
++      final map = jsonDecode(raw);
++      final value = map is Map ? map[display.toString()] : null;
++      if (value is int && value >= 0) _fps.update(value, now);
++    } on FormatException {
++      // A malformed event supplies no observation.
++    }
++  }
++
++  void _stopSamples() {
++    _live = false;
++    _timer?.cancel();
++    _timer = null;
++    _fps.clearPending();
++    _delay.clearPending();
++  }
++
++  /// Private IPC only. Never send cached peer info or original login events.
++  MetricData detachForTransfer() {
++    final data = <String, dynamic>{
++      'seed': _seed,
++      'ready': _readyMs,
++      'auth': _authMs,
++      'frame': _frameMs,
++      'ended': _endedMs,
++      'path': _path,
++      'failure': _failure,
++      'end': _end,
++      'reconnects': _reconnects,
++      'live': _live,
++      'next_sample': _nextSampleMs,
++      'delay': _delay.snapshot(),
++      'fps': _fps.snapshot(),
++    };
++    _detached = true;
++    _stopSamples();
++    _active.remove(this);
++    return data;
++  }
++
++  MetricSession.restore(
++      MetricData data, Future<void> Function(MetricData) write,
++      {DateTime Function()? clock})
++      : _seed = data['seed'],
++        _write = write,
++        _clock = clock ?? _elapsedClock(),
++        _startMs =
++            DateTime.parse(data['seed']['started_at']).millisecondsSinceEpoch {
++    _readyMs = data['ready'];
++    _authMs = data['auth'];
++    _frameMs = data['frame'];
++    _endedMs = data['ended'];
++    _path = data['path'];
++    _failure = data['failure'];
++    _end = data['end'];
++    _reconnects = data['reconnects'];
++    _delay.restore(data['delay']);
++    _fps.restore(data['fps']);
++    _active.add(this);
++    if (data['live'] == true) _startSampling(data['next_sample']);
++  }
++
++  void _startSampling([int? next]) {
++    _live = true;
++    final now = _now;
++    _nextSampleMs = next ?? now + _interval.inMilliseconds;
++    final remaining = _nextSampleMs! - now;
++    _timer = Timer(Duration(milliseconds: remaining < 0 ? 0 : remaining), () {
++      final at = _now;
++      final since = at - _interval.inMilliseconds;
++      _delay.sample(since);
++      _fps.sample(since);
++      _startSampling(at + _interval.inMilliseconds);
++    });
++  }
++
++  static int? _difference(int? end, int? start) =>
++      end == null || start == null || end < start ? null : end - start;
++
++  Future<void> finish({String? end = 'closed_by_agent'}) {
++    if (_detached) return Future.value();
++    return _finishing ??= _finish(end);
++  }
++
++  Future<void> _finish(String? end) async {
++    _stopSamples();
++    final reason = _end ?? end;
++    final duration = _difference(_endedMs ?? _now, _startMs);
++    final row = <String, dynamic>{
++      'v': 1,
++      'session': _seed['session'],
++      'device_id': _seed['device_id'],
++      'started_at': _seed['started_at'],
++      'ms': {
++        'lookup': null,
++        'route': null,
++        'auth': _difference(_authMs, _readyMs),
++        'first_frame': _difference(_frameMs, _authMs),
++        'total':
++            _seed['clicked'] == true ? _difference(_frameMs, _startMs) : null,
++      },
++      'path': _path,
++      'result': _frameMs != null
++          ? 'ok'
++          : _failure ?? (reason == 'closed_by_agent' ? 'cancelled' : null),
++      'delay_ms': _delay.summary(),
++      'fps': _fps.summary(),
++      'reconnects': _reconnects,
++      'duration_s': duration == null ? null : duration ~/ 1000,
++      'end': reason,
++    };
++    try {
++      for (var attempt = 0; attempt < 2; attempt++) {
++        try {
++          await _write(row);
++          return;
++        } catch (error) {
++          if (attempt == 1) {
++            // The exception text can contain an account-specific file path.
++            print('Support metric write failed (${error.runtimeType})');
++          } else {
++            await Future<void>.delayed(const Duration(milliseconds: 100));
++          }
++        }
++      }
++    } finally {
++      _active.remove(this);
++    }
++  }
++
++  static Future<void> shutdown() async {
++    await Future.wait(_active.toList().map((s) => s.finish(end: 'app_exit')));
++  }
++}
++
++class _Samples {
++  final _counts = <int, int>{};
++  int? _pending, _at;
++
++  void update(int value, int now) {
++    _pending = value;
++    _at = now;
++  }
++
++  void clearPending() {
++    _pending = _at = null;
++  }
++
++  void sample(int since) {
++    final value = _pending;
++    if (value != null && _at! >= since) {
++      _counts.update(value, (n) => n + 1, ifAbsent: () => 1);
++    }
++    clearPending();
++  }
++
++  MetricData snapshot() => {
++        'counts': {for (final e in _counts.entries) e.key.toString(): e.value},
++        'pending': _pending,
++        'at': _at,
++      };
++  void restore(MetricData data) {
++    _pending = data['pending'];
++    _at = data['at'];
++    final counts = data['counts'] as Map<String, dynamic>;
++    for (final e in counts.entries) {
++      _counts[int.parse(e.key)] = e.value as int;
++    }
++  }
++
++  MetricData? summary() {
++    if (_counts.isEmpty) return null;
++    final keys = _counts.keys.toList()..sort();
++    final size = _counts.values.reduce((a, b) => a + b);
++    int at(int index) {
++      for (final k in keys) {
++        index -= _counts[k]!;
++        if (index < 0) return k;
++      }
++      return keys.last;
++    }
++
++    final lower = at((size - 1) ~/ 2), upper = at(size ~/ 2);
++    return {
++      'min': keys.first,
++      'median': lower == upper ? lower : (lower + upper) / 2,
++      'max': keys.last
++    };
++  }
++}
+diff --git a/flutter/lib/steaddesk/metrics/metrics_store.dart b/flutter/lib/steaddesk/metrics/metrics_store.dart
+new file mode 100644
+index 0000000..aa040d4
+--- /dev/null
++++ b/flutter/lib/steaddesk/metrics/metrics_store.dart
+@@ -0,0 +1,243 @@
++import 'dart:convert';
++import 'dart:ffi';
++import 'dart:io';
++import 'dart:isolate';
++
++import 'package:ffi/ffi.dart';
++import 'package:path/path.dart' as p;
++import 'package:uuid/uuid.dart';
++
++import 'metric_seed.dart';
++
++const _name = 'support-metrics-v1.jsonl';
++const _limit = 5000;
++const _stats = ['min', 'median', 'max'];
++const _columns = [
++  'v',
++  'session',
++  'device_id',
++  'started_at',
++  'ms.lookup',
++  'ms.route',
++  'ms.auth',
++  'ms.first_frame',
++  'ms.total',
++  'path',
++  'result',
++  'delay_ms.min',
++  'delay_ms.median',
++  'delay_ms.max',
++  'fps.min',
++  'fps.median',
++  'fps.max',
++  'reconnects',
++  'duration_s',
++  'end',
++];
++final _uuid = RegExp(
++    r'^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$',
++    caseSensitive: false);
++
++/// Serialize a scalar as an Excel-safe, RFC 4180 CSV field.
++String metricsCsvCell(Object? value) {
++  var text = value?.toString() ?? '';
++  if (value is String && RegExp(r'^\s*[=+@-]|^[\t\r\n]').hasMatch(text)) {
++    text = "'$text";
++  }
++  if (text.contains(RegExp('[,"\r\n]'))) {
++    return '"${text.replaceAll('"', '""')}"';
++  }
++  return text;
++}
++
++Map<String, dynamic> _approved(Map<String, dynamic> row) {
++  final session = row['session'];
++  final at = row['started_at'];
++  if (row['v'] != 1 ||
++      session is! String ||
++      !_uuid.hasMatch(session) ||
++      at is! String ||
++      DateTime.tryParse(at)?.isUtc != true) {
++    throw const FormatException('Invalid metrics session');
++  }
++  num? number(dynamic n) => n is num && n.isFinite && n >= 0 ? n : null;
++  Map<String, dynamic>? group(String key, List<String> fields) {
++    final values = row[key];
++    if (values is! Map) return null;
++    return {for (final field in fields) field: number(values[field])};
++  }
++
++  dynamic member(String key, List<String> allowed) =>
++      allowed.contains(row[key]) ? row[key] : null;
++  final id = row['device_id'];
++  return {
++    'v': 1,
++    'session': session.toLowerCase(),
++    'device_id': id is String && metricDeviceId(id) == id ? id : null,
++    'started_at': at,
++    'ms': {
++      // No Flutter event exposes an isolated lookup or route duration.
++      'lookup': null,
++      'route': null,
++      for (final stage in ['auth', 'first_frame', 'total'])
++        stage: row['ms'] is Map ? number(row['ms'][stage]) : null,
++    },
++    'path': member('path', ['direct', 'relay']),
++    'result': member(
++        'result', ['ok', 'auth_failed', 'offline', 'timeout', 'cancelled']),
++    'delay_ms': group('delay_ms', _stats),
++    'fps': group('fps', _stats),
++    'reconnects': number(row['reconnects']),
++    'duration_s': number(row['duration_s']),
++    'end': member('end', [
++      'closed_by_agent',
++      'app_exit',
++      'disconnected',
++      'closed_by_peer',
++      'connection_failed'
++    ]),
++  };
++}
++
++// Dart's POSIX File.lock is per process, so two Flutter engines can acquire it.
++// flock on independently opened handles also excludes other isolates in the
++// same process. This blocking section runs only on a disposable worker isolate.
++T _posixLocked<T>(String path, T Function() work) {
++  final libc = DynamicLibrary.process();
++  final open = libc.lookupFunction<
++      Pointer<Void> Function(Pointer<Utf8>, Pointer<Utf8>),
++      Pointer<Void> Function(Pointer<Utf8>, Pointer<Utf8>)>('fopen');
++  final fd = libc.lookupFunction<Int32 Function(Pointer<Void>),
++      int Function(Pointer<Void>)>('fileno');
++  final lock =
++      libc.lookupFunction<Int32 Function(Int32, Int32), int Function(int, int)>(
++          'flock');
++  final close = libc.lookupFunction<Int32 Function(Pointer<Void>),
++      int Function(Pointer<Void>)>('fclose');
++  return using((arena) {
++    final handle = open(path.toNativeUtf8(allocator: arena),
++        'ab'.toNativeUtf8(allocator: arena));
++    if (handle == nullptr) throw FileSystemException('Open metrics lock', path);
++    try {
++      if (lock(fd(handle), 2 /* LOCK_EX */) != 0) {
++        throw FileSystemException('Acquire metrics lock', path);
++      }
++      return work();
++    } finally {
++      close(handle);
++    }
++  });
++}
++
++class MetricsStore {
++  final Directory applicationSupport;
++  MetricsStore(this.applicationSupport);
++
++  Directory get _accounts =>
++      Directory(p.join(applicationSupport.path, 'support-metrics'));
++
++  File _file(String account) {
++    // Feed UUIDv5 ASCII bytes to preserve Unicode account names. The resulting
++    // path component is bounded and case-stable on Windows.
++    final folder = account.isEmpty
++        ? 'anonymous'
++        : const Uuid().v5('ec419373-5282-4528-9127-2f225e94d2e2',
++            base64Url.encode(utf8.encode(account)));
++    return File(p.join(_accounts.path, folder, _name));
++  }
++
++  T _locked<T>(String account, T Function(File) action) {
++    final target = _file(account);
++    target.parent.createSync(recursive: true);
++    final lockPath = '${target.path}.lock';
++    if (!Platform.isWindows) {
++      return _posixLocked(lockPath, () => action(target));
++    }
++    final lock = File(lockPath).openSync(mode: FileMode.append);
++    try {
++      lock.lockSync(FileLock.blockingExclusive);
++      return action(target);
++    } finally {
++      lock.closeSync();
++    }
++  }
++
++  static List<String> _lines(File file) {
++    // The live file is authoritative. A process killed while rotating may
++    // leave its uncommitted sibling behind. Rename is the sole commit point.
++    final staging = File('${file.path}.tmp');
++    if (staging.existsSync()) staging.deleteSync();
++    if (!file.existsSync()) return [];
++    final data = file.readAsBytesSync();
++    final end = data.lastIndexOf(10) + 1;
++    if (end != data.length) {
++      // An append interrupted mid-write can end inside a UTF-8 scalar.
++      final handle = file.openSync(mode: FileMode.append);
++      try {
++        handle.truncateSync(end);
++        handle.flushSync();
++      } finally {
++        handle.closeSync();
++      }
++    }
++    return LineSplitter.split(utf8.decode(data.sublist(0, end))).toList();
++  }
++
++  Future<void> append(String account, Map<String, dynamic> row) {
++    final clean = _approved(row);
++    return Isolate.run(() => _locked(account, (file) {
++          final lines = _lines(file);
++          for (final line in lines) {
++            if (jsonDecode(line)['session'] == clean['session']) return;
++          }
++          final encoded = jsonEncode(clean);
++          if (lines.length < _limit) {
++            file.writeAsStringSync('$encoded\n',
++                mode: FileMode.append, flush: true);
++          } else {
++            final retained = lines.skip(lines.length - _limit + 1);
++            final staging = File('${file.path}.tmp');
++            staging.writeAsStringSync('${retained.join('\n')}\n$encoded\n',
++                flush: true);
++            // Same-directory rename, including MoveFileEx(REPLACE_EXISTING) on Windows.
++            // A failed replacement leaves the old log intact and retries are safe.
++            staging.renameSync(file.path);
++          }
++        }));
++  }
++
++  Future<String> csv(String account) =>
++      Isolate.run(() => _locked(account, (file) {
++            final output = StringBuffer('${_columns.join(',')}\r\n');
++            for (final line in _lines(file)) {
++              final row = _approved(jsonDecode(line) as Map<String, dynamic>);
++              final values = _columns.map((column) {
++                final parts = column.split('.');
++                final value = row[parts.first];
++                return metricsCsvCell(
++                    parts.length == 1 ? value : value?[parts.last]);
++              });
++              output.write('${values.join(',')}\r\n');
++            }
++            return output.toString();
++          }));
++
++  Future<void> exportCsv(String account, File destination) async {
++    final output = await csv(account);
++    final accounts = (await _accounts.resolveSymbolicLinks()).toLowerCase();
++    final parent = await destination.parent.resolveSymbolicLinks();
++    final location = p.normalize(parent).toLowerCase();
++    if (p.equals(accounts, location) || p.isWithin(accounts, location)) {
++      throw const FormatException('Choose a file outside metrics storage');
++    }
++    // Replace the destination entry; never truncate in place through a link.
++    final temp = await Directory(parent).createTemp('.support-export-');
++    try {
++      final file = File(p.join(temp.path, 'export.csv'));
++      await file.writeAsString(output, flush: true);
++      await file.rename(destination.path);
++    } finally {
++      await temp.delete(recursive: true);
++    }
++  }
++}
+diff --git a/flutter/lib/steaddesk/metrics/support_metrics.dart b/flutter/lib/steaddesk/metrics/support_metrics.dart
+new file mode 100644
+index 0000000..d435a08
+--- /dev/null
++++ b/flutter/lib/steaddesk/metrics/support_metrics.dart
+@@ -0,0 +1,58 @@
++import 'dart:io';
++import 'package:path_provider/path_provider.dart';
++import 'package:uuid/uuid.dart';
++
++import '../../common.dart' show DesktopType, desktopType, gFFI, isDesktop;
++import 'metric_seed.dart';
++import 'metric_session.dart';
++import 'metrics_store.dart';
++
++export 'metric_session.dart';
++
++class SupportMetrics {
++  static const enabled = true;
++
++  static Map<String, dynamic>? begin(String id, {bool clicked = true}) {
++    if (!isDesktop) return null;
++    return {
++      'session': const Uuid().v4(),
++      'started_at': DateTime.now().toUtc().toIso8601String(),
++      'clicked': clicked,
++      'device_id': metricDeviceId(id),
++      // Child engines do not own login. The main window fills this at dispatch.
++      'account': desktopType == DesktopType.main
++          ? gFFI.userModel.userName.value
++          : null,
++    };
++  }
++
++  static Map<String, dynamic>? fromChild(dynamic value) {
++    if (value is! Map) return null;
++    return {
++      ...Map<String, dynamic>.from(value),
++      'account': gFFI.userModel.userName.value
++    };
++  }
++
++  static Future<MetricsStore> _store() async =>
++      MetricsStore(await getApplicationSupportDirectory());
++
++  static Future<void> Function(Map<String, dynamic>) _writer(String account) =>
++      (row) async => (await _store()).append(account, row);
++
++  static Future<void> shutdown() => MetricSession.shutdown();
++
++  static MetricSession? attach(Map<String, dynamic>? seed) {
++    if (seed == null || seed['account'] is! String) return null;
++    return MetricSession(seed, _writer(seed['account'] as String));
++  }
++
++  static MetricSession? resume(Map<String, dynamic> snapshot) {
++    final account = snapshot['seed']?['account'];
++    if (account is! String) return null;
++    return MetricSession.restore(snapshot, _writer(account));
++  }
++
++  static Future<void> exportCsv(String account, String path) async =>
++      (await _store()).exportCsv(account, File(path));
++}
+diff --git a/flutter/lib/steaddesk/metrics/support_metrics_off.dart b/flutter/lib/steaddesk/metrics/support_metrics_off.dart
+new file mode 100644
+index 0000000..92eb5a8
+--- /dev/null
++++ b/flutter/lib/steaddesk/metrics/support_metrics_off.dart
+@@ -0,0 +1,21 @@
++// Selected at build time for merchant or metrics-disabled distributions.
++class SupportMetrics {
++  static const enabled = false;
++  static Future<void> shutdown() async {}
++  static Map<String, dynamic>? begin(String id, {bool clicked = true}) => null;
++  static Map<String, dynamic>? fromChild(dynamic value) => null;
++  static MetricSession? attach(Map<String, dynamic>? seed) => null;
++  static MetricSession? resume(Map<String, dynamic> snapshot) => null;
++  static Future<void> exportCsv(String account, String path) async {}
++}
++
++class MetricSession {
++  void ready(String? direct) {}
++  void authenticated() {}
++  void firstFrame([DateTime? observedAt]) {}
++  void message(String type, String title, String text) {}
++  void reconnect() {}
++  void quality(Map<String, dynamic> evt, int display) {}
++  Future<void> finish({String? end = 'closed_by_agent'}) async {}
++  Map<String, dynamic> detachForTransfer() => {};
++}
+diff --git a/flutter/lib/steaddesk/support_home.dart b/flutter/lib/steaddesk/support_home.dart
+index 03b3e5e..4399c49 100644
+--- a/flutter/lib/steaddesk/support_home.dart
++++ b/flutter/lib/steaddesk/support_home.dart
+@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart' show setEquals;
+ import 'dart:ui' as ui;
+ 
+ import 'package:flutter/material.dart';
++import 'package:file_picker/file_picker.dart';
+ import 'package:flutter/services.dart';
+ import 'package:get/get.dart';
+ import 'package:url_launcher/url_launcher.dart';
+@@ -21,6 +22,7 @@ import 'case_inbox_api.dart' show PendingCasesBar;
+ import 'merchant_build.dart' show casesEnabled;
+ import 'support_device.dart';
+ import 'incoming_switch.dart';
++import 'metrics_api.dart';
+ import '../consts.dart';
+ 
+ import '../models/platform_model.dart';
+@@ -226,17 +228,52 @@ class _SupportHomeState extends State<SupportHome> {
+                   : 'Expand navigation'))),
+           PopupMenuItem(
+               value: 'hide', child: Text(translate('Hide navigation'))),
++          if (SupportMetrics.enabled)
++            PopupMenuItem(
++                value: 'export-metrics',
++                child: Text(_exportLabel)),
+           CheckedPopupMenuItem(
+               value: 'auto',
+               checked: automatic,
+               child: Text(translate('Auto-collapse below 1100 px'))),
+         ]);
+     if (!mounted) return;
++    if (action == 'export-metrics') await _exportMetrics();
+     if (action == 'toggle') _toggle(visible, narrow);
+     if (action == 'hide') _setMode(_Rail.hidden);
+     if (action == 'auto') _toggleAuto();
+   }
+ 
++  bool get _chinese {
++    final configured = bind.mainGetLocalOption(key: kCommConfKeyLang);
++    final language = configured.isEmpty || configured == 'default'
++        ? localeName
++        : configured;
++    return language.toLowerCase().startsWith('zh');
++  }
++  String get _exportLabel =>
++      _chinese ? '导出连接统计' : 'Export connection statistics';
++
++  Future<void> _exportMetrics() async {
++    final account = gFFI.userModel.userName.value;
++    try {
++      final path = await FilePicker.platform.saveFile(
++          dialogTitle: _exportLabel,
++          fileName: 'support-metrics.csv',
++          type: FileType.custom,
++          allowedExtensions: ['csv']);
++      if (!mounted || path == null || account != gFFI.userModel.userName.value) return;
++      await SupportMetrics.exportCsv(account, path);
++      if (!mounted) return;
++      ScaffoldMessenger.maybeOf(context)?.showSnackBar(SnackBar(
++          content: Text(_chinese ? '连接统计已导出' : 'Connection statistics exported')));
++    } catch (_) {
++      if (!mounted) return;
++      ScaffoldMessenger.maybeOf(context)?.showSnackBar(SnackBar(
++          content: Text(_chinese ? '导出失败，请检查保存位置后重试。' : 'Export failed. Check the save location and try again.')));
++    }
++  }
++
+   Future<void> _manage() async {
+     if (!gFFI.userModel.isLogin || !gFFI.userModel.isAdmin.value) return;
+     for (final url in [
+diff --git a/flutter/lib/utils/multi_window_manager.dart b/flutter/lib/utils/multi_window_manager.dart
+index b4b48b5..3a35d9b 100644
+--- a/flutter/lib/utils/multi_window_manager.dart
++++ b/flutter/lib/utils/multi_window_manager.dart
+@@ -10,6 +10,7 @@ import 'package:flutter_hbb/main.dart';
+ import 'package:flutter_hbb/models/input_model.dart';
+ import '../steaddesk/merchant_build.dart' show casesEnabled;
+ import '../steaddesk/case_session_api.dart';
++import '../steaddesk/metrics_api.dart';
+ import '../steaddesk/case_inbox_api.dart' show caseEnded;
+ 
+ /// must keep the order
+@@ -227,6 +228,7 @@ class RustDeskMultiWindowManager {
+     String methodName,
+     String remoteId,
+     List<int> windows, {
++    Map<String, dynamic>? metricSeed,
+     String? password,
+     bool? forceRelay,
+     String? switchUuid,
+@@ -237,6 +239,7 @@ class RustDeskMultiWindowManager {
+     var params = {
+       "type": type.index,
+       "id": remoteId,
++      if (metricSeed != null) "metric_seed": metricSeed,
+       "password": password,
+       "forceRelay": forceRelay
+     };
+@@ -272,6 +275,7 @@ class RustDeskMultiWindowManager {
+ 
+   Future<MultiWindowCallResult> newRemoteDesktop(
+     String remoteId, {
++    Map<String, dynamic>? metricSeed,
+     String? password,
+     bool? isSharedPassword,
+     String? switchUuid,
+@@ -282,6 +286,7 @@ class RustDeskMultiWindowManager {
+       kWindowEventNewRemoteDesktop,
+       remoteId,
+       _remoteDesktopWindows,
++      metricSeed: metricSeed,
+       password: password,
+       forceRelay: forceRelay,
+       switchUuid: switchUuid,
+@@ -454,11 +459,84 @@ class RustDeskMultiWindowManager {
+ 
+   List<int> get remoteCaseWindowIds => List.of(_remoteDesktopWindows);
+ 
++  final _metricTransfers = <Future<void>>{};
++  bool _closingMetricWindows = false;
++
++  Future<void> transferMetricToMonitor(String peer, String connection,
++      Map<String, dynamic> snapshot) async {
++    final transfer = _transferOrFinishMetric(peer, connection, snapshot);
++    _metricTransfers.add(transfer);
++    try {
++      await transfer;
++    } finally {
++      _metricTransfers.remove(transfer);
++    }
++  }
++
++  Future<void> _transferOrFinishMetric(String peer, String connection,
++      Map<String, dynamic> snapshot) async {
++    final payload = jsonEncode({
++      'peer': peer,
++      'connection': connection,
++      'snapshot': snapshot,
++    });
++    try {
++      if (await DesktopMultiWindow.invokeMethod(
++              kMainWindowId, 'steaddesk.metrics.transfer', payload) == true) {
++        return;
++      }
++    } catch (_) {
++      // The final view may already have closed.
++    }
++    await SupportMetrics.resume(snapshot)?.finish();
++  }
++
++  Future<void> drainWindowMetrics() async {
++    // This engine may already have detached a tracker to a sibling monitor.
++    // Include its acknowledgement (or final write) before destroying engines.
++    await Future.wait(List.of(_metricTransfers));
++    await SupportMetrics.shutdown();
++  }
++
++  // Only the main engine owns the list of remote windows.
++  Future<bool> transferMetricOwner(int source, String payload) async {
++    if (_closingMetricWindows || !_remoteDesktopWindows.contains(source)) {
++      return false;
++    }
++    for (final id in List.of(_remoteDesktopWindows)) {
++      if (id == source || !_activeWindows.contains(id)) continue;
++      try {
++        if (await DesktopMultiWindow.invokeMethod(
++                id, 'steaddesk.metrics.accept', payload) == true) {
++          return true;
++        }
++      } catch (_) {
++        // A monitor can disappear while its peer's closing tab looks it up.
++      }
++    }
++    return false;
++  }
++
+   Future<void> closeAllSubWindows() async {
+-    if (casesEnabled && isWindows) {
+-      await CaseSession.shutdown(caseEnded);
++    if (SupportMetrics.enabled) {
++      _closingMetricWindows = true;
++      await Future.wait(List.of(_remoteDesktopWindows).map((id) async {
++        try {
++          await DesktopMultiWindow.invokeMethod(
++              id, 'steaddesk.metrics.shutdown', null);
++        } catch (_) {
++          // The engine can already have exited.
++        }
++      }));
++    }
++    try {
++      if (casesEnabled && isWindows) {
++        await CaseSession.shutdown(caseEnded);
++      }
++      await Future.wait(WindowType.values.map((e) => _closeWindows(e)));
++    } finally {
++      _closingMetricWindows = false;
+     }
+-    await Future.wait(WindowType.values.map((e) => _closeWindows(e)));
+   }
+ 
+   Future<void> _closeWindows(WindowType type) async {
+diff --git a/flutter/test/steaddesk/metric_device_id_test.dart b/flutter/test/steaddesk/metric_device_id_test.dart
+new file mode 100644
+index 0000000..0ed4025
+--- /dev/null
++++ b/flutter/test/steaddesk/metric_device_id_test.dart
+@@ -0,0 +1,20 @@
++import 'package:flutter_hbb/steaddesk/metrics/metric_seed.dart';
++import 'package:flutter_test/flutter_test.dart';
++
++void main() {
++  test('extracts only a device ID, including alternate-server relay syntax',
++      () {
++    expect(
++        metricDeviceId('123 456 789/r@lab.invalid?key=fixture'), '123456789');
++    expect(metricDeviceId(r'Sample-01\r'), 'Sample-01');
++    for (final value in [
++      'rd://abc',
++      '127.0.0.1:21118',
++      '123?password=fixture',
++      '=1+1',
++      ''
++    ]) {
++      expect(metricDeviceId(value), isNull);
++    }
++  });
++}
+diff --git a/flutter/test/steaddesk/metric_session_test.dart b/flutter/test/steaddesk/metric_session_test.dart
+new file mode 100644
+index 0000000..3aa2e0e
+--- /dev/null
++++ b/flutter/test/steaddesk/metric_session_test.dart
+@@ -0,0 +1,220 @@
++import 'package:flutter_test/flutter_test.dart';
++import 'package:flutter_hbb/steaddesk/metrics/metric_session.dart';
++
++void main() {
++  final start = DateTime.utc(2026, 11, 13);
++  late DateTime now;
++  late List<Map<String, dynamic>> rows;
++  late Map<String, dynamic> seed;
++  setUp(() {
++    now = start;
++    rows = [];
++    seed = {
++      'session': '0ec3b445-302e-4d79-a4ab-7e9e769fd441',
++      'device_id': '100200300',
++      'account': 'sample-agent',
++      'started_at': start.toIso8601String(),
++      'clicked': true,
++    };
++  });
++  Future<void> write(Map<String, dynamic> row) async => rows.add(row);
++  MetricSession begin() => MetricSession(seed, write, clock: () => now);
++  void after(int ms) => now = start.add(Duration(milliseconds: ms));
++  tearDown(() => MetricSession.shutdown());
++
++  test('success measures only observed phases of the first displayed round',
++      () async {
++    final s = begin();
++    after(500);
++    s.ready('true');
++    after(550);
++    s.ready('false'); // same round's duplicate callback
++    after(750);
++    s.authenticated();
++    after(800);
++    s.authenticated();
++    after(950);
++    s.firstFrame();
++    after(1000);
++    s.firstFrame();
++    after(18650);
++    await Future.wait([s.finish(), s.finish()]);
++    expect(rows.single, {
++      'v': 1,
++      'session': seed['session'],
++      'device_id': seed['device_id'],
++      'started_at': seed['started_at'],
++      'ms': {
++        'lookup': null,
++        'route': null,
++        'auth': 250,
++        'first_frame': 200,
++        'total': 950
++      },
++      'path': 'direct',
++      'result': 'ok',
++      'delay_ms': null,
++      'fps': null,
++      'reconnects': 0,
++      'duration_s': 18,
++      'end': 'closed_by_agent',
++    });
++  });
++
++  test('wrong password alone is auth_failed, corrected password can succeed',
++      () async {
++    final s = begin()
++      ..ready('false')
++      ..message('re-input-password', 'Wrong Password', '');
++    await s.finish();
++    expect(rows.single['result'], 'auth_failed');
++    expect(rows.single['ms']['auth'], isNull);
++    rows.clear();
++    final corrected = begin()
++      ..ready('false')
++      ..message('re-input-password', 'Wrong Password', '');
++    after(400);
++    corrected.authenticated();
++    after(500);
++    corrected.firstFrame();
++    await corrected.finish();
++    expect(rows.single['result'], 'ok');
++    expect(rows.single['path'], 'relay');
++    expect(rows.single['end'], 'closed_by_agent');
++  });
++
++  test('offline, timeout, unknown failures, and local cancellation', () async {
++    for (final cause in {
++      'Remote desktop is offline': 'offline',
++      'Timeout': 'timeout',
++      'ID does not exist': null
++    }.entries) {
++      rows.clear();
++      final s = begin();
++      s.message('error', 'Connection Error', cause.key);
++      await s.finish();
++      expect(rows.single['result'], cause.value);
++      expect(rows.single['end'], 'connection_failed');
++      expect(rows.single['path'], isNull);
++      expect(rows.single['ms'].values.every((dynamic v) => v == null), isTrue);
++    }
++    rows.clear();
++    final s = begin()..message('input-password', 'Password Required', '');
++    await s.finish();
++    expect(rows.single['result'], 'cancelled');
++  });
++
++  test(
++      'loss after display retains success and records disconnect until recovery',
++      () async {
++    final s = begin()
++      ..ready('false')
++      ..authenticated()
++      ..firstFrame();
++    after(2100);
++    s.message('error', 'Connection Error', 'Reset by the peer');
++    s.firstFrame(); // delayed frame while disconnected
++    after(9000);
++    await s.finish();
++    expect(rows.single['end'], 'disconnected');
++    expect(rows.single['result'], 'ok');
++    expect(rows.single['duration_s'], 2);
++
++    rows.clear();
++    after(0);
++    final r = begin()
++      ..ready('true')
++      ..authenticated()
++      ..firstFrame();
++    r.message('restarting-show', 'Connecting...', '');
++    r.reconnect();
++    after(2000);
++    r.ready('false');
++    r.authenticated();
++    r.firstFrame();
++    await r.finish();
++    expect(rows.single['end'], 'closed_by_agent');
++    expect(rows.single['reconnects'], 1);
++    expect(rows.single['ms']['total'], 0);
++    expect(rows.single['path'], 'direct');
++  });
++
++  test(
++      'later transport errors supersede a wrong password; only the recovered round supplies phases',
++      () async {
++    final s = begin()
++      ..ready('true')
++      ..message('re-input-password', 'Wrong Password', '');
++    s.message('error', 'Connection Error', 'Key mismatch');
++    await s.finish();
++    expect(rows.single['result'], isNull);
++    rows.clear();
++    final r = begin()
++      ..ready('true')
++      ..message('error', 'Connection Error', 'Timeout');
++    r.reconnect();
++    after(500);
++    r.firstFrame();
++    after(800);
++    r.ready('false');
++    after(900);
++    r.authenticated();
++    after(1200);
++    r.firstFrame();
++    await r.finish();
++    expect(rows.single['path'], 'relay');
++    expect(rows.single['ms'], {
++      'lookup': null,
++      'route': null,
++      'auth': 100,
++      'first_frame': 300,
++      'total': 1200
++    });
++  });
++
++  testWidgets(
++      'sampling consumes only fresh per-field observations every ten seconds',
++      (tester) async {
++    final s = MetricSession(seed, write, clock: tester.binding.clock.now)
++      ..ready('true')
++      ..authenticated()
++      ..firstFrame();
++    s.quality({'fps': '{"0":99}'}, 0);
++    s.quality({'fps': '{"0":4}', 'delay': '20'}, 0);
++    await tester.pump(const Duration(seconds: 10));
++    s.quality({'delay': '10', 'fps': '{}'}, 0);
++    await tester.pump(const Duration(seconds: 10));
++    await tester.pump(const Duration(seconds: 10));
++    s.quality({'fps': '{"1":0}'}, 1);
++    await tester.pump(const Duration(seconds: 10));
++    s.quality({'fps': '{"0":99,"1":1}'}, -1);
++    s.quality({'delay': '999'}, -1);
++    await tester.pump(const Duration(seconds: 2));
++    await s.finish();
++    expect(rows.single['delay_ms'], {'min': 10, 'median': 15, 'max': 20});
++    expect(rows.single['fps'], {'min': 0, 'median': 2, 'max': 4});
++  });
++
++  test(
++      'tab move transfers UUID, age and first round; shutdown flushes only owner',
++      () async {
++    seed['clicked'] = false;
++    final s = begin()
++      ..ready('false')
++      ..authenticated();
++    final data = s.detachForTransfer();
++    final observedFrame = start.add(const Duration(milliseconds: 75));
++    final next = MetricSession.restore(data, write, clock: () => now);
++    after(160); // ownership reply arrives after live image in the new window
++    next.firstFrame(observedFrame);
++    await s.finish();
++    expect(rows, isEmpty);
++    await MetricSession.shutdown();
++    expect(rows.single['session'], seed['session']);
++    expect(rows.single['ms']['total'], isNull);
++    expect(rows.single['ms']['first_frame'], 75);
++    expect(rows.single['end'], 'app_exit');
++    await next.finish();
++    expect(rows, hasLength(1));
++  });
++}
+diff --git a/flutter/test/steaddesk/metrics_journey_test.dart b/flutter/test/steaddesk/metrics_journey_test.dart
+new file mode 100644
+index 0000000..64b9333
+--- /dev/null
++++ b/flutter/test/steaddesk/metrics_journey_test.dart
+@@ -0,0 +1,72 @@
++import 'dart:convert';
++import 'dart:io';
++
++import 'package:flutter_hbb/steaddesk/metrics/metric_session.dart';
++import 'package:flutter_hbb/steaddesk/metrics/metrics_store.dart';
++import 'package:flutter_test/flutter_test.dart';
++
++void main() {
++  test('one account receives four session rows and can export its own history',
++      () async {
++    final directory = await Directory.systemTemp.createTemp('metrics-journey');
++    addTearDown(() => directory.delete(recursive: true));
++    final store = MetricsStore(directory);
++    final start = DateTime.utc(2026, 1, 1);
++    var now = start;
++    MetricSession begin(int n) => MetricSession({
++          'session': '00000000-0000-4000-8000-${n.toString().padLeft(12, '0')}',
++          'device_id': '123456789',
++          'account': 'test-operator',
++          'started_at': start.toIso8601String(),
++          'clicked': true,
++        }, (row) => store.append('test-operator', row), clock: () => now);
++
++    final ok = begin(1);
++    now = start.add(const Duration(milliseconds: 100));
++    ok.ready('true');
++    now = start.add(const Duration(milliseconds: 400));
++    ok.authenticated();
++    now = start.add(const Duration(milliseconds: 900));
++    ok.firstFrame();
++    await ok.finish();
++    await ok.finish();
++
++    final denied = begin(2);
++    denied.message('re-input-password', 'Password Error', 'Wrong Password');
++    await denied.finish();
++    final offline = begin(3);
++    offline.message('error', 'Connection Error', 'Remote desktop is offline');
++    await offline.finish();
++    final dropped = begin(4);
++    dropped.ready('false');
++    dropped.authenticated();
++    dropped.firstFrame();
++    dropped.message('error', 'Connection Error', 'Reset by the peer');
++    await dropped.finish();
++
++    final file = directory
++        .listSync(recursive: true)
++        .whereType<File>()
++        .singleWhere((f) => f.path.endsWith('support-metrics-v1.jsonl'));
++    final rows =
++        (await file.readAsLines()).map((s) => jsonDecode(s) as Map).toList();
++    expect(
++        rows.map((r) => r['result']), ['ok', 'auth_failed', 'offline', 'ok']);
++    expect(rows.map((r) => r['session']).toSet(), hasLength(4));
++    expect(rows[0]['ms'], {
++      'lookup': null,
++      'route': null,
++      'auth': 300,
++      'first_frame': 500,
++      'total': 900
++    });
++    expect(rows[0]['path'], 'direct');
++    expect(rows[3]['path'], 'relay');
++    expect(rows[3]['end'], 'disconnected');
++    final export = File('${directory.path}/selected.csv');
++    await store.exportCsv('test-operator', export);
++    expect(await export.readAsLines(), hasLength(5));
++    expect(const LineSplitter().convert(await store.csv('different-operator')),
++        hasLength(1));
++  });
++}
+diff --git a/flutter/test/steaddesk/metrics_store_test.dart b/flutter/test/steaddesk/metrics_store_test.dart
+new file mode 100644
+index 0000000..f81959c
+--- /dev/null
++++ b/flutter/test/steaddesk/metrics_store_test.dart
+@@ -0,0 +1,151 @@
++import 'dart:convert';
++import 'dart:io';
++import 'dart:isolate';
++
++import 'package:flutter_test/flutter_test.dart';
++import 'package:flutter_hbb/steaddesk/metrics/metrics_store.dart';
++
++String _id(int i) => '00000000-0000-4000-8000-${i.toString().padLeft(12, '0')}';
++
++Map<String, dynamic> _row(int i) => {
++      'v': 1,
++      'session': _id(i),
++      'device_id': '10203040',
++      'started_at': '2026-11-13T19:00:00Z',
++      'ms': <String, dynamic>{
++        'lookup': null,
++        'route': null,
++        'auth': null,
++        'first_frame': 50,
++        'total': 220
++      },
++      'path': 'direct',
++      'result': 'ok',
++      'delay_ms': {'min': 3, 'median': 5.5, 'max': 8},
++      'fps': null,
++      'reconnects': 0,
++      'duration_s': 12,
++      'end': 'closed_by_agent',
++    };
++
++void main() {
++  late Directory root;
++  late MetricsStore store;
++  setUp(() async {
++    root = await Directory.systemTemp.createTemp('sd-metrics-');
++    store = MetricsStore(root);
++  });
++  tearDown(() => root.delete(recursive: true));
++  Future<File> log() async => (await root
++          .list(recursive: true)
++          .where(
++              (f) => f is File && f.path.endsWith('support-metrics-v1.jsonl'))
++          .toList())
++      .single as File;
++
++  test('CSV quotes embedded separators and prevents spreadsheet expressions',
++      () {
++    expect(metricsCsvCell('a,"b"'), '"a,""b"""');
++    expect(metricsCsvCell('a\nb'), '"a\nb"');
++    expect(metricsCsvCell(' =1'), "' =1");
++    expect(metricsCsvCell('\t+1'), "'\t+1");
++    expect(metricsCsvCell(1.5), '1.5');
++    expect(metricsCsvCell(null), '');
++  });
++
++  test('stable account identity, isolated signed-out rows and idempotent retry',
++      () async {
++    await store.append('../A/示例', _row(1));
++    await store.append('../A/示例', _row(1)..['result'] = 'timeout');
++    await store.append('../a/示例', _row(2));
++    await store.append('', _row(3));
++    await store.append('anonymous', _row(4));
++    for (final item
++        in {'../A/示例': 1, '../a/示例': 2, '': 3, 'anonymous': 4}.entries) {
++      final export = await MetricsStore(root).csv(item.key);
++      expect(LineSplitter.split(export), hasLength(2));
++      expect(export, contains(_id(item.value)));
++      expect(export, isNot(contains('timeout')));
++    }
++  });
++
++  test('only schema fields and sanitized device IDs reach disk', () async {
++    final input = _row(1)
++      ..['password'] = 'top-secret'
++      ..['device_id'] = '=bad/path,foo'
++      ..['ms']['lookup'] = 99
++      ..['ms']['route'] = 123
++      ..['ms']['filename'] = 'top-secret';
++    await store.append('demo', input);
++    final text = await (await log()).readAsString();
++    expect(text, isNot(contains('top-secret')));
++    expect(text, isNot(contains('bad/path')));
++    final saved = jsonDecode(text) as Map;
++    expect(saved.keys, unorderedEquals(_row(1).keys));
++    expect(saved['device_id'], isNull);
++    expect(saved['ms']['lookup'], isNull);
++    expect(saved['ms']['route'], isNull);
++    expect(saved['ms'], isNot(contains('filename')));
++    expect(saved['fps'], isNull);
++  });
++
++  test('isolates concurrently append once, including concurrent retries',
++      () async {
++    final path = root.path;
++    await Future.wait([
++      for (var n = 0; n < 12; n++)
++        Isolate.run(
++            () => MetricsStore(Directory(path)).append('demo', _row(n % 8)))
++    ]);
++    final rows = (await (await log()).readAsLines())
++        .map((line) => jsonDecode(line)['session']);
++    expect(rows, unorderedEquals([for (var i = 0; i < 8; i++) _id(i)]));
++  });
++
++  test(
++      'recover interrupted UTF-8 tail and retain committed prefix byte for byte',
++      () async {
++    await store.append('demo', _row(1));
++    final file = await log();
++    final before = await file.readAsBytes();
++    final stale = File('${file.path}.tmp');
++    await stale.writeAsString('interrupted rotation');
++    await file.writeAsBytes([123, 34, 0xe4], mode: FileMode.append);
++    expect(LineSplitter.split(await store.csv('demo')), hasLength(2));
++    await store.append('demo', _row(2));
++    final after = await file.readAsBytes();
++    expect(await stale.exists(), isFalse);
++    expect(after.take(before.length), orderedEquals(before));
++    expect((await file.readAsLines()).map((l) => jsonDecode(l)['session']),
++        [_id(1), _id(2)]);
++  });
++
++  test('5001st session rotates the oldest only and leaves no staging copy',
++      () async {
++    await store.append('demo', _row(0));
++    final file = await log();
++    final seeded = [for (var i = 1; i < 5000; i++) jsonEncode(_row(i))];
++    await file.writeAsString('${seeded.join('\n')}\n', mode: FileMode.append);
++    await store.append('demo', _row(5000));
++    await store.append('demo', _row(5000));
++    final ids = (await file.readAsLines()).map((l) => jsonDecode(l)['session']);
++    expect(ids, orderedEquals([for (var i = 1; i <= 5000; i++) _id(i)]));
++    expect(await file.parent.list().length, 2); // active log and stable lock
++  });
++
++  test(
++      'CSV exported to selected file includes header even for an empty account',
++      () async {
++    const header =
++        'v,session,device_id,started_at,ms.lookup,ms.route,ms.auth,ms.first_frame,ms.total,path,result,delay_ms.min,delay_ms.median,delay_ms.max,fps.min,fps.median,fps.max,reconnects,duration_s,end\r\n';
++    expect(await store.csv('no rows'), header);
++    await store.append('demo', _row(8));
++    final dest = File('${root.path}/chosen.csv');
++    await store.exportCsv('demo', dest);
++    expect(await dest.readAsString(),
++        '${header}1,${_id(8)},10203040,2026-11-13T19:00:00Z,,,,50,220,direct,ok,3,5.5,8,,,,0,12,closed_by_agent\r\n');
++    final file = await log();
++    await expectLater(store.exportCsv('demo', file), throwsFormatException);
++    expect(jsonDecode(await file.readAsString())['session'], _id(8));
++  });
++}

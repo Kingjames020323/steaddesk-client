@@ -29,6 +29,12 @@ if cases not in ("", "0", "1", "false", "true"):
     raise ValueError("STEADDESK_CASES must be true, false, 1 or 0")
 cases = not merchant and cases in ("true", "1")
 lib = tree / "flutter/lib/steaddesk"
+metrics = os.environ.get("STEADDESK_METRICS", "").strip().lower()
+if metrics not in ("", "0", "1", "false", "true"):
+    raise ValueError("STEADDESK_METRICS must be true, false, 1 or 0")
+enabled = not merchant and metrics not in ("0", "false")
+module = "support_metrics" if enabled else "support_metrics_off"
+(lib / "metrics_api.dart").write_text(f"export 'metrics/{module}.dart';\n", encoding="utf-8")
 # The merchant and disabled builds never import the case form or its storage.
 for name in ("case_session", "case_inbox", "history_host"):
     source = name if cases else name + "_off"

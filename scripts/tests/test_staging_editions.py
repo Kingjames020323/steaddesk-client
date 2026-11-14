@@ -30,18 +30,22 @@ class StagingEditionTests(unittest.TestCase):
             main.write_text(original)
             assets = app / "steaddeskStaging"
             manifest = assets / "AndroidManifest.xml"
-            for edition, flag, enable in [
-                ("support", "", False), ("support", "true", True),
-                ("merchant", "true", False), ("support", "false", False),
-                ("merchant", "", False),
+            for edition, flag, enable, metrics in [
+                ("support", "", False, ""), ("support", "true", True, "false"),
+                ("merchant", "true", False, "true"), ("support", "false", False, "1"),
+                ("merchant", "", False, ""),
             ]:
-                with self.subTest(edition=edition, flag=flag):
+                with self.subTest(edition=edition, flag=flag, metrics=metrics):
                     subprocess.run(["bash", ROOT / "scripts/configure-edition.sh", tree, edition],
                                    env={**os.environ, "STEADDESK_CASES": flag,
+                                        "STEADDESK_METRICS": metrics,
                                         "STEADDESK_AGENT_CERT_SHA256": "aa" * 32 if flag else ""}, check=True)
                     lib = tree / "flutter/lib/steaddesk"
                     self.assertIn(f"const casesEnabled = {str(enable).lower()};",
                                   (lib / "merchant_build.dart").read_text())
+                    expected_metrics = "support_metrics" if edition == "support" and metrics != "false" else "support_metrics_off"
+                    self.assertEqual((lib / "metrics_api.dart").read_text().strip(),
+                                     f"export 'metrics/{expected_metrics}.dart';")
                     for name in ("case_session", "case_inbox", "history_host"):
                         target = name if enable else name + "_off"
                         self.assertEqual((lib / f"{name}_api.dart").read_text().strip(),

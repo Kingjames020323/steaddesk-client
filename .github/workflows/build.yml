@@ -13,6 +13,7 @@ name: Build SteadDesk
 permissions:
   contents: read
 env:
+  STEADDESK_METRICS: ${{ vars.STEADDESK_METRICS }}
   STEADDESK_AGENT_CERT_SHA256: ${{ vars.STEADDESK_AGENT_CERT_SHA256 }}
   STEADDESK_SUPPORT_PHONE: ${{ vars.STEADDESK_SUPPORT_PHONE }}
   SCITER_RUST_VERSION: '1.75'
@@ -661,7 +662,7 @@ jobs:
         (
           cd flutter
           flutter pub get
-          flutter analyze --no-pub --no-fatal-infos --no-fatal-warnings lib/steaddesk/cases lib/models/model.dart lib/utils/multi_window_manager.dart lib/desktop/pages/desktop_home_page.dart lib/steaddesk/support_home.dart lib/desktop/pages/remote_page.dart lib/desktop/pages/remote_tab_page.dart lib/desktop/widgets/remote_toolbar.dart
+          flutter analyze --no-pub --no-fatal-infos --no-fatal-warnings lib/steaddesk/metrics lib/steaddesk/cases lib/models/model.dart lib/utils/multi_window_manager.dart lib/desktop/pages/desktop_home_page.dart lib/steaddesk/support_home.dart lib/desktop/pages/remote_page.dart lib/desktop/pages/remote_tab_page.dart lib/desktop/widgets/remote_toolbar.dart
           flutter test --no-pub test/steaddesk
         )
         # Restore this run's chosen setting for the actual installer.
