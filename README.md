@@ -50,3 +50,9 @@ The merchant managed-configuration boolean `self_heal_enabled` defaults to true.
 The support build records ordinary outgoing remote desktop sessions locally by default. In the support home navigation menu, choose **Export connection statistics** to save the current account’s CSV. Signed-out sessions have their own history. The application support directory retains up to 5,000 rows per account in `support-metrics-v1.jsonl`. The records contain timing, outcome, and sampled quality. No session contents are collected or sent.
 
 Set `STEADDESK_METRICS=false` when configuring the build (or in the GitHub Actions repository variables) to disable both collection and export. Merchant builds always omit the recorder.
+
+### Support session quality
+
+The support toolbar starts in Auto. During the first five seconds after the route is ready it collects new delay reports. With samples available, relay or a median above 150 ms selects Low. Otherwise it selects Balanced, including when there are no samples. A manual choice takes over for the session. The quality indicator turns grey after five seconds without a fresh delay. Hover over it for display frame rates.
+
+Set `STEADDESK_QUALITY=false` when configuring the build or in GitHub Actions repository variables to use the previous toolbar. This option is independent of local connection measurements.
