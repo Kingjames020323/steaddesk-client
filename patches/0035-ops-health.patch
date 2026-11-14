@@ -1,0 +1,1111 @@
+diff --git a/flutter/lib/desktop/widgets/remote_toolbar.dart b/flutter/lib/desktop/widgets/remote_toolbar.dart
+index 9661839..75ee45b 100644
+--- a/flutter/lib/desktop/widgets/remote_toolbar.dart
++++ b/flutter/lib/desktop/widgets/remote_toolbar.dart
+@@ -30,7 +30,8 @@ import 'package:flutter_hbb/common/widgets/custom_scale_base.dart';
+ import '../../steaddesk/dialogs.dart' show steadUsesChinese;
+ import '../../steaddesk/history_host_api.dart';
+ import '../../steaddesk/quality_badge.dart';
+-import '../../steaddesk/merchant_build.dart' show casesEnabled;
++import '../../steaddesk/merchant_build.dart' show casesEnabled, opsHealthEnabled;
++import '../../steaddesk/ops_health_host.dart';
+ 
+ part '../../steaddesk/session_surface.dart';
+ 
+diff --git a/flutter/lib/steaddesk/device_card.dart b/flutter/lib/steaddesk/device_card.dart
+index 3bdfd9a..f2d8f4e 100644
+--- a/flutter/lib/steaddesk/device_card.dart
++++ b/flutter/lib/steaddesk/device_card.dart
+@@ -263,6 +263,8 @@ class _DeviceCardState extends State<_DeviceCard> {
+               child: tab != _DeviceTab.overview
+                   ? const SizedBox.shrink()
+                   : ListView(padding: const EdgeInsets.all(16), children: [
++                      if (opsHealthEnabled)
++                        OpsHealthHost(HealthSurface.card, device: d.id),
+                       Text(translate('Device ID')),
+                       Row(children: [
+                         Expanded(
+diff --git a/flutter/lib/steaddesk/ops_groups.dart b/flutter/lib/steaddesk/ops_groups.dart
+index fdf316c..06fd330 100644
+--- a/flutter/lib/steaddesk/ops_groups.dart
++++ b/flutter/lib/steaddesk/ops_groups.dart
+@@ -57,6 +57,20 @@ class OpsGroup {
+       };
+ }
+ 
++Uri opsEndpoint(Uri origin) {
++  final loopback = origin.host == 'localhost' ||
++      (InternetAddress.tryParse(origin.host)?.isLoopback ?? false);
++  if ((origin.scheme != 'https' && !(origin.scheme == 'http' && loopback)) ||
++      origin.host.isEmpty ||
++      origin.userInfo.isNotEmpty ||
++      origin.hasQuery ||
++      origin.hasFragment ||
++      !{'', '/', '/ops/v1', '/ops/v1/'}.contains(origin.path)) {
++    throw ArgumentError('Invalid ops origin');
++  }
++  return origin.replace(path: '/ops/v1/');
++}
++
+ class OpsGroupStore extends ChangeNotifier {
+   final Uri _base;
+   final String _token;
+@@ -77,25 +91,11 @@ class OpsGroupStore extends ChangeNotifier {
+       required this.refreshBooks,
+       this.pollInterval = const Duration(minutes: 5),
+       this.reconnectDelay = const Duration(seconds: 1)})
+-      : _base = _endpoint(origin),
++      : _base = opsEndpoint(origin),
+         _token = token {
+     if (account.isEmpty || token.isEmpty) throw ArgumentError('Missing login');
+   }
+ 
+-  static Uri _endpoint(Uri origin) {
+-    final loopback = origin.host == 'localhost' ||
+-        (InternetAddress.tryParse(origin.host)?.isLoopback ?? false);
+-    if ((origin.scheme != 'https' && !(origin.scheme == 'http' && loopback)) ||
+-        origin.host.isEmpty ||
+-        origin.userInfo.isNotEmpty ||
+-        origin.hasQuery ||
+-        origin.hasFragment ||
+-        !{'', '/', '/ops/v1', '/ops/v1/'}.contains(origin.path)) {
+-      throw ArgumentError('Invalid ops origin');
+-    }
+-    return origin.replace(path: '/ops/v1/');
+-  }
+-
+   List<OpsGroup> _shared = const [], _mine = const [];
+   List<OpsGroup> get shared => _shared;
+   List<OpsGroup> get mine => _mine;
+diff --git a/flutter/lib/steaddesk/ops_health.dart b/flutter/lib/steaddesk/ops_health.dart
+new file mode 100644
+index 0000000..98e9a8d
+--- /dev/null
++++ b/flutter/lib/steaddesk/ops_health.dart
+@@ -0,0 +1,323 @@
++import 'dart:async';
++import 'dart:convert';
++import 'dart:io';
++
++import 'package:flutter/foundation.dart';
++import 'package:uuid/uuid.dart';
++
++import 'ops_groups.dart' show opsEndpoint;
++
++class HealthFailure implements Exception {
++  final int status;
++  const HealthFailure(this.status);
++  @override
++  String toString() => switch (status) {
++        401 => '请重新登录后查看。',
++        403 || 404 => '已无权查看此记录，或记录已移除。',
++        409 => '预警状态已变化，请刷新后再试。',
++        422 => '请先核对店内设备清单或填写有效原因。',
++        429 => '操作受限。每台设备每分钟最多检查一次。',
++        408 => '等待检查结果超时。',
++        _ => '暂时无法读取设备健康，请稍后重试。',
++      };
++}
++
++abstract interface class HealthApi {
++  Future<Map<String, dynamic>> request(String method, String route,
++      [Map<String, dynamic>? body]);
++  Stream<String> changes();
++  void close();
++}
++
++class OpsHealthHttp implements HealthApi {
++  final Uri _base;
++  final String _token;
++  final HttpClient _http = HttpClient()
++    ..connectionTimeout = const Duration(seconds: 8)
++    ..findProxy = (_) => 'DIRECT';
++  OpsHealthHttp(Uri origin, this._token) : _base = opsEndpoint(origin);
++
++  Future<HttpClientResponse> _open(String method, String route,
++      {Map<String, dynamic>? body, bool events = false}) async {
++    if (!RegExp(r'^[a-zA-Z0-9_-]+(?:/[a-zA-Z0-9_-]+)*$').hasMatch(route)) {
++      throw const HealthFailure(400);
++    }
++    final req = await _http
++        .openUrl(method, _base.resolve(route))
++        .timeout(const Duration(seconds: 10));
++    req.followRedirects = false;
++    req.headers.set(HttpHeaders.authorizationHeader, 'Bearer $_token');
++    req.headers.set(HttpHeaders.acceptHeader,
++        events ? 'text/event-stream' : 'application/json');
++    if (body != null) {
++      req.headers.set('Idempotency-Key', const Uuid().v4());
++      req.headers.contentType = ContentType.json;
++      final encoded = utf8.encode(jsonEncode(body));
++      req.contentLength = encoded.length;
++      req.add(encoded);
++    }
++    final res = await req.close().timeout(const Duration(seconds: 15));
++    if (res.statusCode < 200 || res.statusCode >= 300) {
++      await res.listen((_) {}).cancel();
++      throw HealthFailure(res.statusCode);
++    }
++    return res;
++  }
++
++  @override
++  Future<Map<String, dynamic>> request(String method, String route,
++      [Map<String, dynamic>? body]) async {
++    final res = await _open(method, route, body: body);
++    final bytes = <int>[];
++    await for (final chunk in res.timeout(const Duration(seconds: 12))) {
++      if (bytes.length + chunk.length > 4 * 1024 * 1024) {
++        throw const HealthFailure(0);
++      }
++      bytes.addAll(chunk);
++    }
++    return jsonDecode(utf8.decode(bytes)) as Map<String, dynamic>;
++  }
++
++  @override
++  Stream<String> changes() async* {
++    final response = await _open('GET', 'events', events: true);
++    if (response.headers.contentType?.mimeType != 'text/event-stream') {
++      await response.listen((_) {}).cancel();
++      throw const HealthFailure(0);
++    }
++    yield 'connected';
++    await for (final line in response
++        .timeout(const Duration(seconds: 45))
++        .transform(utf8.decoder)
++        .transform(const LineSplitter())) {
++      if (line.startsWith('event:')) yield line.substring(6).trim();
++    }
++  }
++
++  @override
++  void close() => _http.close(force: true);
++}
++
++class DeviceHealth {
++  final String id, status;
++  final List<String> reasons;
++  final DateTime? updated;
++  DeviceHealth.from(Map<String, dynamic> row)
++      : id = row['device_id'] as String,
++        status = row['status'] as String,
++        reasons = List<String>.from(row['reasons'] as List),
++        updated =
++            DateTime.tryParse(row['updated_at'] as String? ?? '')?.toUtc();
++
++  String level(DateTime now) {
++    final age = updated == null ? null : now.difference(updated!);
++    return age == null ||
++            age.isNegative ||
++            age > const Duration(minutes: 3) ||
++            !{'normal', 'attention', 'alert'}.contains(status)
++        ? 'unknown'
++        : status;
++  }
++}
++
++class HealthStore extends ChangeNotifier {
++  final HealthApi api;
++  final bool Function() isCurrent;
++  final DateTime Function() now;
++  final Duration checkInterval;
++  HealthStore(this.api,
++      {required this.isCurrent,
++      DateTime Function()? now,
++      this.checkInterval = const Duration(seconds: 2)})
++      : now = now ?? DateTime.now;
++  bool _closed = false, _expired = false;
++  bool get active => !_closed && !_expired && isCurrent();
++  bool available = false;
++  String? error;
++  Map<String, DeviceHealth> devices = {};
++  List<Map<String, dynamic>> alerts = [];
++  Timer? _poll, _retry, _coalesce, _stale;
++  StreamSubscription<String>? _events;
++  Future<void>? _pending;
++  int scopeRevision = 0;
++  void start() {
++    refresh();
++    _poll = Timer.periodic(const Duration(minutes: 1), (_) => refresh());
++    _listen();
++  }
++
++  void _listen() {
++    if (!active) return;
++    _events = api.changes().listen((kind) {
++      if (!active ||
++          !{
++            'connected',
++            'health.changed',
++            'alert.changed',
++            'check.changed',
++            'group.changed'
++          }.contains(kind)) return;
++      if (kind == 'group.changed' || kind == 'connected') {
++        // Existing result rows may describe a store this account can no longer see.
++        scopeRevision++;
++        notifyListeners();
++      }
++      _coalesce ??= Timer(const Duration(milliseconds: 180), () {
++        _coalesce = null;
++        refreshAfterPending();
++      });
++    }, onError: (Object e) {
++      if (e is HealthFailure && e.status == 401) _expire();
++    }, onDone: () {
++      if (active) _retry = Timer(const Duration(seconds: 10), _listen);
++    });
++  }
++
++  void _ensure() {
++    if (!active) throw const HealthFailure(401);
++  }
++
++  void _expire() {
++    if (!active) return;
++    _expired = true;
++    available = false;
++    devices = {};
++    alerts = [];
++    error = const HealthFailure(401).toString();
++    _poll?.cancel();
++    _retry?.cancel();
++    _stale?.cancel();
++    _coalesce?.cancel();
++    _events?.cancel();
++    api.close();
++    notifyListeners();
++  }
++
++  Future<Map<String, dynamic>> _fetch(String method, String path,
++      [Map<String, dynamic>? body]) async {
++    _ensure();
++    try {
++      final result = await api.request(method, path, body);
++      _ensure();
++      return result;
++    } on HealthFailure catch (e) {
++      if (e.status == 401) _expire();
++      rethrow;
++    } catch (_) {
++      throw const HealthFailure(0);
++    }
++  }
++
++  Future<void> refresh() =>
++      _pending ??= _refresh().whenComplete(() => _pending = null);
++  Future<void> refreshAfterPending() async {
++    if (_pending != null) await _pending;
++    if (active) await refresh();
++  }
++
++  Future<void> _refresh() async {
++    if (!active) return;
++    try {
++      final both =
++          await Future.wait([_fetch('GET', 'health'), _fetch('GET', 'alerts')]);
++      final rows = (both[0]['devices'] as List)
++          .cast<Map<String, dynamic>>()
++          .map(DeviceHealth.from);
++      final snapshot = {for (final row in rows) row.id: row};
++      final notices = (both[1]['alerts'] as List).cast<Map<String, dynamic>>();
++      if (!active) return;
++      devices = snapshot;
++      alerts = notices;
++      available = true;
++      error = null;
++      _scheduleStaleness();
++    } catch (e) {
++      if (!active) return;
++      error = (e is HealthFailure ? e : const HealthFailure(0)).toString();
++      available = false;
++      if (e is HealthFailure && (e.status == 403 || e.status == 404)) {
++        devices = {};
++        alerts = [];
++      }
++    }
++    if (active) notifyListeners();
++  }
++
++  void _scheduleStaleness() {
++    _stale?.cancel();
++    final instant = now();
++    final deadlines = devices.values
++        .map((row) =>
++            row.updated?.add(const Duration(minutes: 3, milliseconds: 1)))
++        .whereType<DateTime>()
++        .where((t) => t.isAfter(instant))
++        .toList()
++      ..sort();
++    if (deadlines.isNotEmpty) {
++      _stale = Timer(deadlines.first.difference(instant), () {
++        if (!active) return;
++        notifyListeners();
++        _scheduleStaleness();
++      });
++    }
++  }
++
++  Future<void> updateAlert(String id, String? reason) async {
++    _ensure();
++    if (reason != null &&
++        (reason.trim().isEmpty || reason.runes.length > 256)) {
++      throw const HealthFailure(422);
++    }
++    try {
++      await _fetch('POST', 'alerts/$id/${reason == null ? 'claim' : 'close'}',
++          reason == null ? {} : {'reason': reason.trim()});
++    } finally {
++      if (active) {
++        // An in-flight read can have a pre-mutation snapshot.
++        await refreshAfterPending();
++      }
++    }
++  }
++
++  Future<Map<String, dynamic>> check(String device,
++      {required bool Function() visible}) async {
++    if (!visible()) throw const HealthFailure(401);
++    final queued = await _fetch('POST', 'devices/$device/checks', {});
++    final id = queued['id'] as String;
++    final elapsed = Stopwatch()..start();
++    while (elapsed.elapsed < const Duration(minutes: 3, seconds: 15)) {
++      if (!visible()) throw const HealthFailure(401);
++      final result = await _fetch('GET', 'devices/$device/checks/$id');
++      if (!visible()) throw const HealthFailure(401);
++      if ({'timeout', 'completed', 'cancelled'}.contains(result['state'])) {
++        return result;
++      }
++      if (!{'queued', 'running'}.contains(result['state'])) {
++        throw const HealthFailure(0);
++      }
++      await Future<void>.delayed(checkInterval);
++    }
++    throw const HealthFailure(408);
++  }
++
++  void retire({bool notify = true}) {
++    if (_closed) return;
++    _closed = true;
++    devices = {};
++    alerts = [];
++    available = false;
++    if (notify) notifyListeners();
++  }
++
++  @override
++  void dispose() {
++    _closed = true;
++    _poll?.cancel();
++    _retry?.cancel();
++    _stale?.cancel();
++    _coalesce?.cancel();
++    _events?.cancel();
++    api.close();
++    super.dispose();
++  }
++}
+diff --git a/flutter/lib/steaddesk/ops_health_host.dart b/flutter/lib/steaddesk/ops_health_host.dart
+new file mode 100644
+index 0000000..9039ca8
+--- /dev/null
++++ b/flutter/lib/steaddesk/ops_health_host.dart
+@@ -0,0 +1,173 @@
++import 'dart:async';
++import 'dart:convert';
++
++import 'package:flutter/material.dart';
++import '../common.dart' show gFFI;
++import '../models/platform_model.dart' show bind;
++import 'ops_health.dart';
++import 'ops_health_widgets.dart';
++
++typedef _Login = ({String name, String token});
++_Login? _login() {
++  try {
++    final token = bind.mainGetLocalOption(key: 'access_token');
++    if (token.isEmpty) return null;
++    final data = jsonDecode(bind.mainGetLocalOption(key: 'user_info'));
++    final name = data['name'];
++    if (name is String && name.isNotEmpty) return (name: name, token: token);
++  } catch (_) {}
++  return null;
++}
++
++// Each Flutter engine (including a detached session window) owns its HTTP credentials.
++// One feed is shared by all mounted health surfaces in that engine.
++class _EngineHealth extends ChangeNotifier {
++  int users = 0, generation = 0;
++  Timer? timer;
++  _Login? login;
++  Uri? origin;
++  HealthStore? store;
++  bool resolving = false;
++  void acquire() {
++    if (users++ > 0) return;
++    timer = Timer.periodic(const Duration(seconds: 1), (_) => sync());
++    scheduleMicrotask(sync);
++  }
++
++  void release() {
++    if (--users != 0) return;
++    timer?.cancel();
++    timer = null;
++    login = null;
++    origin = null;
++    generation++;
++    retire(notify: false);
++  }
++
++  void retire({bool notify = true}) {
++    final old = store;
++    store = null;
++    if (old != null) {
++      old.retire(notify: notify);
++      // Modal routes may still have a listener until the next frame.
++      scheduleMicrotask(old.dispose);
++    }
++    if (notify) notifyListeners();
++  }
++
++  Future<void> sync() async {
++    final current = _login();
++    if (login != current) {
++      login = current;
++      origin = null;
++      generation++;
++      retire();
++    }
++    if (current == null || resolving) return;
++    final guard = generation;
++    resolving = true;
++    try {
++      final target = Uri.parse(await bind.mainGetApiServer());
++      if (users == 0 || guard != generation || current != _login()) return;
++      if (origin == target && store != null) return;
++      origin = target;
++      retire();
++      final next = HealthStore(OpsHealthHttp(target, current.token),
++          isCurrent: () =>
++              users > 0 &&
++              generation == guard &&
++              origin == target &&
++              _login() == current);
++      store = next;
++      notifyListeners();
++      next.start();
++    } catch (_) {
++      if (guard == generation && store != null) {
++        origin = null;
++        retire();
++      }
++    } finally {
++      resolving = false;
++    }
++  }
++}
++
++final _engine = _EngineHealth();
++
++enum HealthSurface { header, card, sidebar, overview }
++
++class OpsHealthHost extends StatefulWidget {
++  final HealthSurface surface;
++  final String? device;
++  const OpsHealthHost(this.surface, {super.key, this.device});
++  @override
++  State<OpsHealthHost> createState() => _OpsHealthHostState();
++}
++
++class _OpsHealthHostState extends State<OpsHealthHost> {
++  late final StreamSubscription<String> loginSubscription;
++  @override
++  void initState() {
++    super.initState();
++    _engine.acquire();
++    loginSubscription = gFFI.userModel.userName.listen((_) => _engine.sync());
++  }
++
++  @override
++  void dispose() {
++    loginSubscription.cancel();
++    _engine.release();
++    super.dispose();
++  }
++
++  @override
++  Widget build(BuildContext context) => AnimatedBuilder(
++      animation: _engine,
++      builder: (_, __) {
++        final store = _engine.store;
++        if (store == null || !store.active) {
++          return widget.surface == HealthSurface.header
++              ? const SizedBox.shrink()
++              : const Text('设备健康 · 未知', style: TextStyle(color: Colors.grey));
++        }
++        return AnimatedBuilder(
++            animation: store,
++            builder: (_, __) {
++              switch (widget.surface) {
++                case HealthSurface.header:
++                  return TextButton(
++                      onPressed: () => showDialog<void>(
++                          context: context,
++                          builder: (ctx) => AlertDialog(
++                                  title: const Text('预警列表'),
++                                  content: SizedBox(
++                                      width: 520,
++                                      height: 360,
++                                      child: HealthAlertList(store: store)),
++                                  actions: [
++                                    TextButton(
++                                        onPressed: () => Navigator.pop(ctx),
++                                        child: const Text('返回'))
++                                  ])),
++                      child: Text(
++                          '告警 ${store.available ? store.alerts.length : '—'}'));
++                case HealthSurface.overview:
++                  return ListView(padding: const EdgeInsets.all(16), children: [
++                    if (store.error != null) Text(store.error!),
++                    if (store.available && store.devices.isEmpty)
++                      const Text('暂无可见设备'),
++                    for (final id in store.devices.keys)
++                      ListTile(
++                          title: Text(id),
++                          subtitle: HealthDeviceView(store: store, id: id)),
++                  ]);
++                default:
++                  return HealthDeviceView(
++                      key: ValueKey((store, widget.device)),
++                      store: store,
++                      id: widget.device!,
++                      checks: widget.surface == HealthSurface.card);
++              }
++            });
++      });
++}
+diff --git a/flutter/lib/steaddesk/ops_health_widgets.dart b/flutter/lib/steaddesk/ops_health_widgets.dart
+new file mode 100644
+index 0000000..2a05077
+--- /dev/null
++++ b/flutter/lib/steaddesk/ops_health_widgets.dart
+@@ -0,0 +1,203 @@
++import 'package:flutter/material.dart';
++import 'ops_health.dart';
++
++String reasonText(String rule) =>
++    const {
++      'merchant_stopped': '商户手动停止',
++      'remote_paused': '商户已暂停远程',
++      'capture_permission_lost': '授权掉失',
++      'device_offline': '设备失联',
++      'steaddesk_offline': 'SteadDesk 掉线',
++    }[rule] ??
++    '设备状态变化';
++
++class HealthDeviceView extends StatefulWidget {
++  final HealthStore store;
++  final String id;
++  final bool checks;
++  const HealthDeviceView(
++      {super.key, required this.store, required this.id, this.checks = false});
++  @override
++  State<HealthDeviceView> createState() => _HealthDeviceViewState();
++}
++
++class _HealthDeviceViewState extends State<HealthDeviceView> {
++  Map<String, dynamic>? result;
++  String? error;
++  bool busy = false;
++  int epoch = 0;
++  int? resultScope;
++  @override
++  void didUpdateWidget(HealthDeviceView old) {
++    super.didUpdateWidget(old);
++    if (old.store != widget.store || old.id != widget.id) {
++      epoch++;
++      result = null;
++      error = null;
++      busy = false;
++    }
++  }
++
++  Future<void> run() async {
++    if (busy) return;
++    final run = ++epoch, store = widget.store, id = widget.id;
++    final scope = store.scopeRevision;
++    bool visible() =>
++        mounted &&
++        epoch == run &&
++        scope == store.scopeRevision &&
++        store.active &&
++        store.devices.containsKey(id);
++    setState(() {
++      busy = true;
++      error = null;
++      result = null;
++      resultScope = scope;
++    });
++    try {
++      final done = await store.check(id, visible: visible);
++      if (visible()) setState(() => result = done);
++    } catch (e) {
++      if (visible()) {
++        setState(() => error =
++            (e is HealthFailure ? e : const HealthFailure(0)).toString());
++      }
++    } finally {
++      if (mounted && epoch == run) setState(() => busy = false);
++    }
++  }
++
++  @override
++  Widget build(BuildContext context) => AnimatedBuilder(
++      animation: widget.store,
++      builder: (_, __) {
++        final store = widget.store;
++        final row = store.active ? store.devices[widget.id] : null;
++        final level = row?.level(store.now()) ?? 'unknown';
++        final label = const {
++          'normal': '正常',
++          'attention': '关注',
++          'alert': '告警',
++          'unknown': '未知'
++        }[level]!;
++        final color = const {
++          'normal': Color(0xff176747),
++          'attention': Color(0xff946000),
++          'alert': Color(0xffb91c1c),
++          'unknown': Color(0xff687782)
++        }[level];
++        final updated =
++            row?.updated?.toLocal().toString().split('.').first ?? '—';
++        final reasons =
++            level == 'unknown' ? '' : row!.reasons.map(reasonText).join('、');
++        return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
++          Text('设备健康 · $label${reasons.isEmpty ? '' : ' · $reasons'}',
++              style: TextStyle(color: color, fontWeight: FontWeight.w600)),
++          Text('最后更新 $updated', style: Theme.of(context).textTheme.bodySmall),
++          if (widget.checks)
++            TextButton(
++                onPressed: !busy && row != null && store.available ? run : null,
++                child: Text(busy ? '检查中…' : 'ping 全部')),
++          if (row != null &&
++              widget.checks &&
++              resultScope == store.scopeRevision) ...[
++            if (error != null) Text(error!),
++            if (result?['state'] == 'cancelled') const Text('检查已取消。'),
++            if (result?['state'] == 'timeout') const Text('检查超时。'),
++            for (final item in (result?['results'] as List? ?? [])
++                .cast<Map<String, dynamic>>())
++              Text('${item['name']} · ${item['ip']} · ${const {
++                    'reachable': '通',
++                    'unreachable': '不通',
++                    'timeout': '超时'
++                  }[item['outcome']] ?? '未知'} · ${item['latency_ms'] == null ? '—' : '${item['latency_ms']} ms'}'),
++          ]
++        ]);
++      });
++}
++
++class HealthAlertList extends StatefulWidget {
++  final HealthStore store;
++  const HealthAlertList({super.key, required this.store});
++  @override
++  State<HealthAlertList> createState() => _HealthAlertListState();
++}
++
++class _HealthAlertListState extends State<HealthAlertList> {
++  String? busy, error;
++  Future<void> update(String id, bool close) async {
++    if (busy != null) return;
++    final store = widget.store;
++    setState(() {
++      busy = id;
++      error = null;
++    });
++    try {
++      String? reason;
++      if (close) {
++        var draft = '';
++        reason = await showDialog<String>(
++            context: context,
++            builder: (ctx) => StatefulBuilder(
++                builder: (context, redraw) => AlertDialog(
++                        title: const Text('关闭预警'),
++                        content: TextField(
++                            autofocus: true,
++                            maxLength: 256,
++                            decoration:
++                                const InputDecoration(labelText: '关闭原因'),
++                            onChanged: (s) => redraw(() => draft = s.trim())),
++                        actions: [
++                          TextButton(
++                              onPressed: () => Navigator.pop(ctx),
++                              child: const Text('取消')),
++                          TextButton(
++                              onPressed: draft.isEmpty
++                                  ? null
++                                  : () => Navigator.pop(ctx, draft),
++                              child: const Text('确认关闭'))
++                        ])));
++        if (reason == null) return;
++      }
++      if (!mounted || store != widget.store || !store.active) return;
++      await store.updateAlert(id, reason);
++    } catch (e) {
++      if (mounted && store == widget.store) {
++        setState(() => error =
++            (e is HealthFailure ? e : const HealthFailure(0)).toString());
++      }
++    } finally {
++      if (mounted && store == widget.store) setState(() => busy = null);
++    }
++  }
++
++  @override
++  Widget build(BuildContext context) => AnimatedBuilder(
++      animation: widget.store,
++      builder: (_, __) {
++        final store = widget.store;
++        if (!store.active) return const Text('请重新登录后查看。');
++        return ListView(children: [
++          if (error ?? store.error case final String message) Text(message),
++          if (store.alerts.isEmpty) Text(store.available ? '暂无预警' : '正在读取预警…'),
++          for (final row in store.alerts)
++            ListTile(
++                title: Text(reasonText(row['rule'])),
++                subtitle: Text(
++                    '${row['device_id']}${row['claimed_by'] == null ? '' : ' · ${row['claimed_by']} 已认领'}'),
++                trailing: Wrap(children: [
++                  if (row['state'] == 'open')
++                    TextButton(
++                        onPressed: busy != null || !store.available
++                            ? null
++                            : () => update(row['id'], false),
++                        child: const Text('认领')),
++                  TextButton(
++                      onPressed: busy != null || !store.available
++                          ? null
++                          : () => update(row['id'], true),
++                      child: const Text('关闭预警'))
++                ]))
++        ]);
++      });
++}
+diff --git a/flutter/lib/steaddesk/session_surface.dart b/flutter/lib/steaddesk/session_surface.dart
+index 4360e2a..6a2d669 100644
+--- a/flutter/lib/steaddesk/session_surface.dart
++++ b/flutter/lib/steaddesk/session_surface.dart
+@@ -691,6 +691,8 @@ class _DevicePanel extends StatelessWidget {
+                                       }),
+                                       if (pi.version.isNotEmpty)
+                                         field('SteadDesk version', pi.version),
++                                      if (opsHealthEnabled)
++                                        OpsHealthHost(HealthSurface.sidebar, device: ffi.id),
+                                       if (history != null) history!,
+                                       const SizedBox(height: 10),
+                                     ]))),
+diff --git a/flutter/lib/steaddesk/support_home.dart b/flutter/lib/steaddesk/support_home.dart
+index f43c09f..a851bfe 100644
+--- a/flutter/lib/steaddesk/support_home.dart
++++ b/flutter/lib/steaddesk/support_home.dart
+@@ -18,9 +18,10 @@ import '../common/widgets/peer_card.dart' show connectInPeerTab;
+ import '../models/peer_model.dart';
+ import '../models/peer_tab_model.dart';
+ import '../models/ab_model.dart';
++import 'ops_health_host.dart';
+ import 'case_inbox_api.dart' show PendingCasesBar;
+ import 'merchant_build.dart'
+-    show casesEnabled, opsGroupsEnabled, merchantEdition;
++    show casesEnabled, opsGroupsEnabled, opsHealthEnabled, merchantEdition;
+ import 'ops_groups.dart';
+ import 'ops_group_tile.dart';
+ import 'support_device.dart';
+@@ -397,6 +398,9 @@ class _SupportHomeState extends State<SupportHome> {
+       case SupportPage.recent:
+       case SupportPage.favorites:
+         return _Directory(page, search.text, _ops, key: directoryKeys[page]);
++      case SupportPage.health:
++        if (opsHealthEnabled) return const OpsHealthHost(HealthSurface.overview);
++        return Center(child: Text(translate('Coming soon')));
+       default:
+         return Center(child: Text(translate('Coming soon')));
+     }
+diff --git a/flutter/lib/steaddesk/support_home_bar.dart b/flutter/lib/steaddesk/support_home_bar.dart
+index 7647c90..5521d08 100644
+--- a/flutter/lib/steaddesk/support_home_bar.dart
++++ b/flutter/lib/steaddesk/support_home_bar.dart
+@@ -45,6 +45,7 @@ class _HomeHeader extends StatelessWidget {
+                 onSearch: onSearch,
+                 directory: directory,
+                 jump: jump)),
++        if (opsHealthEnabled) const OpsHealthHost(HealthSurface.header),
+         const SizedBox(width: 12),
+         ValueListenableBuilder<TextEditingValue>(
+             valueListenable: gFFI.serverModel.serverId,
+diff --git a/flutter/test/steaddesk/ops_health_test.dart b/flutter/test/steaddesk/ops_health_test.dart
+new file mode 100644
+index 0000000..86f722d
+--- /dev/null
++++ b/flutter/test/steaddesk/ops_health_test.dart
+@@ -0,0 +1,198 @@
++import 'dart:async';
++import 'package:flutter/material.dart';
++import 'package:flutter_test/flutter_test.dart';
++import 'package:flutter_hbb/steaddesk/ops_health.dart';
++import 'package:flutter_hbb/steaddesk/ops_health_widgets.dart';
++
++class FakeApi implements HealthApi {
++  String status = 'normal';
++  String reason = 'merchant_stopped';
++  String jobState = 'completed';
++  int checks = 0;
++  int claims = 0;
++  String? closed;
++  int? failure;
++  final events = StreamController<String>.broadcast();
++  DateTime at = DateTime.utc(2026, 11, 14);
++  @override
++  Future<Map<String, dynamic>> request(String method, String path,
++      [Map<String, dynamic>? body]) async {
++    if (failure != null) throw HealthFailure(failure!);
++    if (path == 'health') {
++      return {
++        'devices': [
++          {
++            'device_id': '123456789',
++            'status': status,
++            'reasons': status == 'normal' ? <String>[] : [reason],
++            'updated_at': at.toIso8601String()
++          }
++        ]
++      };
++    }
++    if (path == 'alerts') {
++      return {
++        'alerts': closed != null
++            ? []
++            : [
++                {
++                  'id': 'a_demo',
++                  'device_id': '123456789',
++                  'rule': reason,
++                  'state': claims > 0 ? 'claimed' : 'open'
++                }
++              ]
++      };
++    }
++    if (path.endsWith('/claim')) claims++;
++    if (path.endsWith('/close')) closed = body!['reason'];
++    if (path.endsWith('/checks')) {
++      checks++;
++      return {'id': 'c_demo', 'state': 'queued', 'results': []};
++    }
++    if (path.endsWith('/checks/c_demo')) {
++      return {
++        'id': 'c_demo',
++        'state': jobState,
++        'results': [
++          {
++            'name': '测试打印机',
++            'ip': '192.168.50.1',
++            'outcome': jobState == 'timeout' ? 'timeout' : 'reachable',
++            'latency_ms': jobState == 'timeout' ? null : 12
++          }
++        ]
++      };
++    }
++    return {};
++  }
++
++  @override
++  Stream<String> changes() => events.stream;
++  @override
++  void close() {}
++}
++
++void main() {
++  test('health status, reasons and three minute freshness boundary', () async {
++    final api = FakeApi();
++    final store = HealthStore(api, isCurrent: () => true, now: () => api.at);
++    for (final status in ['normal', 'attention', 'alert']) {
++      api.status = status;
++      await store.refresh();
++      final row = store.devices['123456789']!;
++      expect(row.level(api.at.add(const Duration(minutes: 3))), status);
++      expect(row.level(api.at.add(const Duration(seconds: 181))), 'unknown');
++    }
++    store.dispose();
++  });
++
++  test('expired identity discards responses and cannot write', () async {
++    final api = FakeApi();
++    bool current = true;
++    final store = HealthStore(api, isCurrent: () => current);
++    final pending = store.refresh();
++    current = false;
++    await pending;
++    expect(store.devices, isEmpty);
++    await expectLater(
++        store.updateAlert('a_demo', null), throwsA(isA<HealthFailure>()));
++    expect(api.claims, 0);
++    store.dispose();
++  });
++
++  testWidgets(
++      'a current SSE update refreshes active surfaces and revoked sessions clear immediately',
++      (tester) async {
++    final api = FakeApi();
++    final live = HealthStore(api, isCurrent: () => true, now: () => api.at);
++    live.start();
++    await tester.pump();
++    expect(live.devices['123456789']!.status, 'normal');
++    api.status = 'alert';
++    api.reason = 'capture_permission_lost';
++    api.events.add('health.changed');
++    await tester.pump();
++    await tester.pump(const Duration(milliseconds: 220));
++    expect(live.devices['123456789']!.reasons, ['capture_permission_lost']);
++    api.status = 'attention';
++    await tester.pump(const Duration(minutes: 1));
++    expect(live.devices['123456789']!.status, 'attention');
++    api.failure = 401;
++    await live.refresh();
++    expect(live.alerts, isEmpty);
++    expect(live.devices, isEmpty);
++    expect(live.active, isFalse);
++    live.dispose();
++  });
++
++  testWidgets('a stationary sidebar turns grey just after the third minute',
++      (tester) async {
++    final api = FakeApi();
++    var instant = api.at;
++    final store = HealthStore(api, now: () => instant, isCurrent: () => true);
++    await store.refresh();
++    await tester.pumpWidget(MaterialApp(
++        home: Scaffold(body: HealthDeviceView(store: store, id: '123456789'))));
++    expect(find.text('设备健康 · 正常'), findsOneWidget);
++    instant = instant.add(const Duration(minutes: 3, milliseconds: 1));
++    await tester.pump(const Duration(minutes: 3, milliseconds: 1));
++    final unknown = tester.widget<Text>(find.text('设备健康 · 未知'));
++    expect(unknown.style?.color, const Color(0xff687782));
++    expect(find.text('ping 全部'), findsNothing);
++    store.dispose();
++  });
++
++  testWidgets('panel shows reasons, check rows, timeout and rate limit',
++      (tester) async {
++    final api = FakeApi()..status = 'attention';
++    final store = HealthStore(api,
++        now: () => api.at, isCurrent: () => true, checkInterval: Duration.zero);
++    await store.refresh();
++    await tester.pumpWidget(MaterialApp(
++        home: Scaffold(
++            body: HealthDeviceView(
++                store: store, id: '123456789', checks: true))));
++    expect(find.textContaining('商户手动停止'), findsOneWidget);
++    expect(find.textContaining('2026'), findsOneWidget);
++    for (final state in ['completed', 'timeout']) {
++      api.jobState = state;
++      await tester.tap(find.text('ping 全部'));
++      await tester.pumpAndSettle();
++      expect(find.textContaining('192.168.50.1'), findsOneWidget);
++      expect(find.textContaining(state == 'timeout' ? '超时' : '12 ms'),
++          findsWidgets);
++    }
++    api.failure = 429;
++    await tester.tap(find.text('ping 全部'));
++    await tester.pumpAndSettle();
++    expect(find.textContaining('每分钟'), findsOneWidget);
++    store.dispose();
++  });
++
++  testWidgets('alert claim and manual close require a nonblank reason',
++      (tester) async {
++    final api = FakeApi();
++    final store = HealthStore(api, isCurrent: () => true);
++    await store.refresh();
++    await tester.pumpWidget(
++        MaterialApp(home: Scaffold(body: HealthAlertList(store: store))));
++    await tester.tap(find.text('认领'));
++    await tester.pumpAndSettle();
++    expect(api.claims, 1);
++    await tester.tap(find.text('关闭预警'));
++    await tester.pumpAndSettle();
++    expect(
++        tester
++            .widget<TextButton>(find.widgetWithText(TextButton, '确认关闭'))
++            .onPressed,
++        isNull);
++    await tester.enterText(find.byType(TextField), '已经核对');
++    await tester.pump();
++    await tester.tap(find.text('确认关闭'));
++    await tester.pumpAndSettle();
++    expect(api.closed, '已经核对');
++    expect(find.text('暂无预警'), findsOneWidget);
++    store.dispose();
++  });
++}
+diff --git a/flutter/tool/ops_health_drill.dart b/flutter/tool/ops_health_drill.dart
+new file mode 100644
+index 0000000..0d8c6b6
+--- /dev/null
++++ b/flutter/tool/ops_health_drill.dart
+@@ -0,0 +1,54 @@
++// Run with OPS_HEALTH_DRILL pointing at an owner-only config from the local
++// exercise. Expected keys: origin (loopback only), token, normal, attention,
++// alert, stale and timeoutDevice. A test worker completes normal's queue row
++// and expires timeoutDevice's row via the same server transitions as ops-watch.
++import 'dart:convert';
++import 'dart:io';
++import 'package:flutter_test/flutter_test.dart';
++import 'package:flutter_hbb/steaddesk/ops_health.dart';
++
++void main() {
++  test('authenticated OPS health, claims, checks and limits over loopback',
++      () async {
++    final config = jsonDecode(
++        await File(Platform.environment['OPS_HEALTH_DRILL']!).readAsString());
++    final uri = Uri.parse(config['origin']);
++    expect(InternetAddress.tryParse(uri.host)?.isLoopback, isTrue);
++    expect(uri.scheme, 'http');
++    final api = OpsHealthHttp(uri, config['token']);
++    final store = HealthStore(api,
++        isCurrent: () => true,
++        checkInterval: const Duration(milliseconds: 100));
++    try {
++      await store.refresh();
++      expect(store.available, isTrue);
++      for (final key in ['normal', 'attention', 'alert', 'stale']) {
++        expect(store.devices[config[key]]?.level(store.now()),
++            key == 'stale' ? 'unknown' : key);
++      }
++      final notice = store.alerts
++          .singleWhere((r) => r['device_id'] == config['attention']);
++      expect(notice['rule'], 'remote_paused');
++      await store.updateAlert(notice['id'], null);
++      expect(store.alerts.singleWhere((r) => r['id'] == notice['id'])['state'],
++          'claimed');
++      await store.updateAlert(notice['id'], '演练完成');
++      expect(store.alerts.where((r) => r['id'] == notice['id']), isEmpty);
++      final done = await store.check(config['normal'], visible: () => true);
++      expect(done['state'], 'completed');
++      final row = done['results'].single;
++      expect(row['name'], 'Fixture printer');
++      expect(row['outcome'], 'reachable');
++      expect(row['latency_ms'], 12);
++      expect(row['ip'], '192.168.50.12');
++      await expectLater(store.check(config['normal'], visible: () => true),
++          throwsA(isA<HealthFailure>().having((e) => e.status, 'status', 429)));
++      final timeout =
++          await store.check(config['timeoutDevice'], visible: () => true);
++      expect(timeout['state'], 'timeout');
++      expect(timeout['results'].single['outcome'], 'timeout');
++    } finally {
++      store.dispose();
++    }
++  }, timeout: const Timeout(Duration(minutes: 2)));
++}

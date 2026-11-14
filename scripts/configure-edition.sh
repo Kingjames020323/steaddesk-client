@@ -45,6 +45,10 @@ ops_groups = os.environ.get("STEADDESK_OPS_GROUPS", "").strip().lower()
 if ops_groups not in ("", "0", "1", "false", "true"):
     raise ValueError("STEADDESK_OPS_GROUPS must be true, false, 1 or 0")
 ops_groups_enabled = not merchant and ops_groups in ("true", "1")
+ops_health = os.environ.get("STEADDESK_OPS_HEALTH", "").strip().lower()
+if ops_health not in ("", "0", "1", "false", "true"):
+    raise ValueError("STEADDESK_OPS_HEALTH must be true, false, 1 or 0")
+ops_health_enabled = not merchant and ops_health in ("true", "1")
 module = "support_metrics" if enabled else "support_metrics_off"
 (lib / "metrics_api.dart").write_text(f"export 'metrics/{module}.dart';\n", encoding="utf-8")
 # The merchant and disabled builds never import the case form or its storage.
@@ -57,6 +61,7 @@ def dart_string(value):
 
 (tree / "flutter/lib/steaddesk/merchant_build.dart").write_text(
     "const merchantEdition = " + str(merchant).lower() + ";\n"
+    "const opsHealthEnabled = " + str(ops_health_enabled).lower() + ";\n"
     "const opsGroupsEnabled = " + str(ops_groups_enabled).lower() + ";\n"
     "const qualityEnabled = " + str(quality_enabled).lower() + ";\n"
     "const reconnectEnabled = " + str(reconnect_enabled).lower() + ";\n"
