@@ -33,6 +33,9 @@ help_flag = os.environ.get("STEADDESK_HELP", "").strip().lower()
 if help_flag not in ("", "0", "1", "false", "true"):
     raise ValueError("STEADDESK_HELP must be true, false, 1 or 0")
 help_enabled = help_flag in ("true", "1")
+support_help = not merchant and help_enabled
+module = "support_help_host" if support_help else "support_help_off"
+(lib / "support_help_header_api.dart").write_text(f"export '{module}.dart';\n", encoding="utf-8")
 merchant_help = "merchant_help_host" if merchant and help_enabled else "merchant_help_off"
 (lib / "merchant_help_api.dart").write_text(f"export 'help/{merchant_help}.dart';\n", encoding="utf-8")
 metrics = os.environ.get("STEADDESK_METRICS", "").strip().lower()
@@ -59,7 +62,7 @@ module = "support_metrics" if enabled else "support_metrics_off"
 (lib / "metrics_api.dart").write_text(f"export 'metrics/{module}.dart';\n", encoding="utf-8")
 # The merchant and disabled builds never import the case form or its storage.
 for name in ("case_session", "case_inbox", "history_host"):
-    source = name if cases else name + "_off"
+    source = name if cases or support_help else name + "_off"
     (lib / (name + "_api.dart")).write_text(
         f"export 'cases/{source}.dart';\n", encoding="utf-8")
 def dart_string(value):
@@ -72,7 +75,8 @@ def dart_string(value):
     "const opsGroupsEnabled = " + str(ops_groups_enabled).lower() + ";\n"
     "const qualityEnabled = " + str(quality_enabled).lower() + ";\n"
     "const reconnectEnabled = " + str(reconnect_enabled).lower() + ";\n"
-    "const casesEnabled = " + str(cases).lower() + ";\n"
+    "const normalCasesEnabled = " + str(cases).lower() + ";\n"
+    "const casesEnabled = " + str(cases or support_help).lower() + ";\n"
     "const merchantVersion = " + dart_string((tree / "RELEASE_VERSION").read_text().strip()) + ";\n"
     "const merchantPhone = String.fromEnvironment('STEADDESK_SUPPORT_PHONE', defaultValue: "
     + dart_string(phone) + ");\n", encoding="utf-8")
