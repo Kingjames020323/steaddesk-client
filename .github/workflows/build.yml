@@ -5,9 +5,21 @@ name: Build SteadDesk
   push:
     tags: ['v1.5.0-sd.*']
   workflow_dispatch:
+    inputs:
+      steaddesk_cases:
+        description: Enable case closing in the Windows support build
+        type: boolean
+        default: false
 permissions:
   contents: read
 env:
+  STEADDESK_QUALITY: ${{ vars.STEADDESK_QUALITY }}
+  STEADDESK_OPS_HEALTH: ${{ vars.STEADDESK_OPS_HEALTH }}
+  STEADDESK_OPS_GROUPS: ${{ vars.STEADDESK_OPS_GROUPS }}
+  STEADDESK_RECONNECT: ${{ vars.STEADDESK_RECONNECT }}
+  STEADDESK_METRICS: ${{ vars.STEADDESK_METRICS }}
+  STEADDESK_AGENT_CERT_SHA256: ${{ vars.STEADDESK_AGENT_CERT_SHA256 }}
+  STEADDESK_SUPPORT_PHONE: ${{ vars.STEADDESK_SUPPORT_PHONE }}
   SCITER_RUST_VERSION: '1.75'
   RUST_VERSION: '1.75'
   CARGO_NDK_VERSION: 3.1.2
@@ -73,6 +85,13 @@ jobs:
     - name: Apply distribution patches and assets
       shell: bash
       run: bash .distribution/scripts/apply-patches.sh "$GITHUB_WORKSPACE"
+    - name: Check merchant translations in the patched source
+      run: python3 .distribution/scripts/check-merchant-languages.py "$GITHUB_WORKSPACE"
+    - name: Test Android merchant file scope on an isolated filesystem
+      shell: bash
+      run: |
+        rustc --edition=2021 --test src/common/android_file_scope.rs -o "$RUNNER_TEMP/file-scope-tests"
+        "$RUNNER_TEMP/file-scope-tests"
     - name: Install prerequisites
       run: |
         sudo apt-get install ca-certificates -y
@@ -445,7 +464,7 @@ jobs:
         popd
         mkdir -p dist
         version=$(cat .distribution/RELEASE_VERSION)
-        apk="dist/SteadDesk-$version-universal.unsigned.apk"
+        apk="dist/SteadDesk-$version-universal.apk"
         cp flutter/build/app/outputs/flutter-apk/app-release.apk "$apk"
         build_tools=$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -1)
         "$build_tools/aapt" dump badging "$apk" > "$RUNNER_TEMP/badging"
@@ -472,14 +491,77 @@ jobs:
         name: SteadDesk-Android-universal
         path: dist
         if-no-files-found: error
+  android-staging:
+    name: Android merchant staging password
+    needs: android
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      ANDROID_SERIAL: emulator-5554
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: SteadDesk-Android-universal
+          path: merchant-apk
+      - name: Start AOSP API 34 emulator
+        shell: bash
+        run: |
+          export JAVA_HOME="$JAVA_HOME_17_X64"
+          export PATH="$ANDROID_HOME/platform-tools:$JAVA_HOME/bin:$ANDROID_HOME/cmdline-tools/latest/bin:$PATH"
+          export ANDROID_USER_HOME="$HOME/.android"
+          export ANDROID_AVD_HOME="$ANDROID_USER_HOME/avd"
+          mkdir -p "$ANDROID_AVD_HOME"
+          sudo apt-get install -y python3-nacl
+          sdkmanager 'platform-tools' 'platforms;android-34' 'build-tools;34.0.0' 'emulator' 'system-images;android-34;default;x86_64'
+          sudo chmod a+rw /dev/kvm
+          create_log="$RUNNER_TEMP/staging-avd-create.log"
+          if ! avdmanager create avd --name staging --package 'system-images;android-34;default;x86_64' --device pixel_4 <<< 'no' >"$create_log" 2>&1; then
+            cat "$create_log" >&2
+            exit 1
+          fi
+          emulator="$ANDROID_HOME/emulator/emulator"
+          avd_list="$RUNNER_TEMP/staging-avds.txt"
+          if ! "$emulator" -list-avds >"$avd_list" || ! grep -Fxq staging "$avd_list"; then
+            echo "Expected staging in emulator -list-avds (ANDROID_AVD_HOME=$ANDROID_AVD_HOME)" >&2
+            cat "$create_log" "$avd_list" >&2
+            exit 1
+          fi
+          "$emulator" -accel-check
+          adb start-server
+          "$emulator" @staging -port 5554 -no-window -no-audio -no-boot-anim -no-snapshot -accel on -gpu software >"$RUNNER_TEMP/emulator.log" 2>&1 &
+          emulator_pid=$!
+          deadline=$((SECONDS + 360))
+          until [[ $(timeout 5 adb shell getprop sys.boot_completed 2>/dev/null | tr -d "\r") == 1 ]]; do
+            if ! kill -0 "$emulator_pid" 2>/dev/null || (( SECONDS >= deadline )); then
+              adb devices -l
+              df -h "$HOME"
+              tail -80 "$RUNNER_TEMP/emulator.log"
+              exit 1
+            fi
+            sleep 2
+          done
+      - name: Test provider across Binder and adb stdin
+        run: |
+          export JAVA_HOME="$JAVA_HOME_17_X64"
+          export PATH="$ANDROID_HOME/platform-tools:$JAVA_HOME/bin:$PATH"
+          (cd merchant-apk && sha256sum --strict -c SHA256SUMS)
+          STAGING_PYTHON=/usr/bin/python3 bash scripts/tests/staging/run.sh "merchant-apk/SteadDesk-$(cat RELEASE_VERSION)-universal.apk"
+
   windows:
-    name: "${{ matrix.job.target }}"
+    name: Windows x64 ${{ matrix.edition }}
+    env:
+      STEADDESK_EDITION: ${{ matrix.edition }}
+      STEADDESK_CASES: ${{ inputs.steaddesk_cases && 'true' || 'false' }}
     needs:
     - bridge
     runs-on: "${{ matrix.job.os }}"
     strategy:
       fail-fast: false
       matrix:
+        edition: [merchant, support]
         job:
         - target: x86_64-pc-windows-msvc
           os: windows-2022
@@ -578,6 +660,19 @@ jobs:
         fi
         head -n 100 "${VCPKG_ROOT}/buildtrees/ffmpeg/build-${{ matrix.job.vcpkg-triplet }}-rel-out.log" || true
       shell: bash
+    - name: Test support case closing with its feature enabled
+      if: matrix.edition == 'support'
+      shell: bash
+      run: |
+        STEADDESK_CASES=true bash .distribution/scripts/configure-edition.sh "$PWD" support
+        (
+          cd flutter
+          flutter pub get
+          flutter analyze --no-pub --no-fatal-infos --no-fatal-warnings lib/steaddesk/metrics lib/steaddesk/cases lib/models/model.dart lib/utils/multi_window_manager.dart lib/desktop/pages/desktop_home_page.dart lib/steaddesk/support_home.dart lib/desktop/pages/remote_page.dart lib/desktop/pages/remote_tab_page.dart lib/desktop/widgets/remote_toolbar.dart
+          flutter test --no-pub test/steaddesk
+        )
+        # Restore this run's chosen setting for the actual installer.
+        bash .distribution/scripts/configure-edition.sh "$PWD" support
     - name: Build rustdesk
       run: |+
         # Windows: build RustDesk
@@ -602,22 +697,29 @@ jobs:
       shell: bash
       run: |
         sed -i '/dpiAware/d' res/manifest.xml
-        mv rustdesk/rustdesk.exe rustdesk/SteadDesk.exe
+        product=SteadDesk
+        if [[ "$STEADDESK_EDITION" == support ]]; then product="SteadDesk Support"; fi
+        mv rustdesk/rustdesk.exe "rustdesk/$product.exe"
         pushd ./libs/portable
         pip3 install -r requirements.txt
-        python3 ./generate.py -f ../../rustdesk/ -o . -e ../../rustdesk/SteadDesk.exe
+        python3 ./generate.py -f ../../rustdesk/ -o . -e "../../rustdesk/$product.exe"
         popd
         mkdir -p dist
         version=$(cat .distribution/RELEASE_VERSION)
-        mv target/release/rustdesk-portable-packer.exe "dist/SteadDesk-$version-x64.unsigned.exe"
+        mv target/release/rustdesk-portable-packer.exe "dist/${product// /}-$version-x64.exe"
         cd dist && sha256sum *.exe > SHA256SUMS
     - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
       with:
-        name: SteadDesk-Windows-x64
+        name: SteadDesk-Windows-x64-${{ matrix.edition }}
         path: dist
         if-no-files-found: error
   windows-smoke:
-    name: Offline Windows UI
+    name: Offline Windows UI ${{ matrix.edition }}
+    strategy:
+      matrix:
+        edition: [merchant, support]
+    env:
+      STEADDESK_EDITION: ${{ matrix.edition }}
     needs: windows
     runs-on: windows-2022
     steps:
@@ -626,7 +728,7 @@ jobs:
         persist-credentials: false
     - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
       with:
-        name: SteadDesk-Windows-x64
+        name: SteadDesk-Windows-x64-${{ matrix.edition }}
         path: package
     - name: Prepare UI automation
       run: python -m pip install pywinauto==0.6.9 Pillow==11.3.0
@@ -637,7 +739,7 @@ jobs:
         python scripts/windows-smoke.py $package screenshots
     - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
       with:
-        name: Windows-UI-evidence
+        name: Windows-UI-evidence-${{ matrix.edition }}
         path: screenshots/*.png
         if-no-files-found: error
 
@@ -651,13 +753,39 @@ jobs:
         persist-credentials: false
     - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
       with:
-        name: SteadDesk-Windows-x64
+        name: SteadDesk-Windows-x64-merchant
         path: package
     - name: Verify installed service and password command line
       shell: pwsh
       run: |
         . ./scripts/windows-isolate.ps1
         & ./scripts/windows-password-smoke.ps1 -Package $package
+
+    - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      with:
+        name: SteadDesk-Windows-x64-support
+        path: support-package
+    - name: Verify the support installation alongside the merchant service
+      shell: pwsh
+      env:
+        STEADDESK_EDITION: support
+      run: |
+        . ./scripts/windows-isolate.ps1 -PackageDir support-package
+        $null = Start-Process -PassThru -FilePath $package -ArgumentList '--silent-install'
+        $deadline = [datetime]::UtcNow.AddMinutes(2)
+        do {
+          $svc = Get-CimInstance Win32_Service -Filter "Name='SteadDesk Support'"
+          if ($svc.State -eq 'Running') { break }
+          Start-Sleep -Seconds 1
+        } while ([datetime]::UtcNow -lt $deadline)
+        $installed = Join-Path $env:ProgramFiles 'SteadDesk Support' 'SteadDesk Support.exe'
+        if (-not $svc) { throw "Support service was not registered. Installed EXE present: $(Test-Path -LiteralPath $installed)" }
+        if ($svc.State -ne 'Running') { throw "Support service state: $($svc.State), exit code: $($svc.ExitCode)" }
+        if ($svc.PathName -ine ('"' + $installed + '" --service')) { throw "Unexpected support service ImagePath: $($svc.PathName)" }
+        if ((Get-Service -Name SteadDesk).Status -ne 'Running') { throw 'Merchant service was replaced' }
+        if ((Get-Item $installed).VersionInfo.ProductName -cne 'SteadDesk Support') { throw 'Installed support identity mismatch' }
+        if ((& $installed --option approve-mode | Out-String).Trim() -cne 'click') { throw 'Support approval is not click-only' }
+        if ((& $installed --option allow-support-incoming | Out-String).Trim() -ceq 'Y') { throw 'Support unexpectedly allows incoming requests' }
 
   source:
     name: Corresponding source
@@ -680,7 +808,7 @@ jobs:
 
   bundle:
     name: Assemble unsigned release
-    needs: [source, android, windows-smoke, windows-password]
+    needs: [source, android-staging, windows-smoke, windows-password]
     runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.assemble.outputs.version }}
@@ -696,11 +824,16 @@ jobs:
       shell: bash
       run: |
         version=$(cat RELEASE_VERSION)
-        (cd artifacts/SteadDesk-Windows-x64 && sha256sum --strict -c SHA256SUMS)
+        (cd artifacts/SteadDesk-Windows-x64-merchant && sha256sum --strict -c SHA256SUMS)
         (cd artifacts/SteadDesk-Android-universal && sha256sum --strict -c SHA256SUMS)
+        (cd artifacts/SteadDesk-Windows-x64-support && sha256sum --strict -c SHA256SUMS)
+        for dir in artifacts/SteadDesk-Windows-x64-{merchant,support} artifacts/SteadDesk-Android-universal; do
+          cat "$dir/SHA256SUMS" >> "$GITHUB_STEP_SUMMARY"
+          echo >> "$GITHUB_STEP_SUMMARY"
+        done
         mkdir dist
-        cp "artifacts/SteadDesk-Windows-x64/SteadDesk-$version-x64.unsigned.exe" dist/
-        cp "artifacts/SteadDesk-Android-universal/SteadDesk-$version-universal.unsigned.apk" dist/
+        cp "artifacts/SteadDesk-Windows-x64-merchant/SteadDesk-$version-x64.exe" "dist/SteadDesk-$version-x64.unsigned.exe"
+        cp "artifacts/SteadDesk-Android-universal/SteadDesk-$version-universal.apk" "dist/SteadDesk-$version-universal.unsigned.apk"
         cp "artifacts/SteadDesk-source/SteadDesk-$version-source.tar.gz" dist/
         (cd dist && sha256sum SteadDesk-* > SHA256SUMS && sha256sum --strict -c SHA256SUMS)
         echo "version=$version" >> "$GITHUB_OUTPUT"

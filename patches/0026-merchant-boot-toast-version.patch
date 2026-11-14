@@ -1,0 +1,77 @@
+Subject: Default merchant boot recovery to silent and show the version on both panels
+
+diff --git a/flutter/android/app/build.gradle b/flutter/android/app/build.gradle
+index e7f9b32..d26bfe7 100644
+--- a/flutter/android/app/build.gradle
++++ b/flutter/android/app/build.gradle
+@@ -61,13 +61,18 @@ protobuf {
+     }
+ }
+ 
++def merchantEdition = file('../../../libs/hbb_common/src/steaddesk_support.rs').text.trim() == 'false'
++// Merchant recovery is silent by default. Package updates are always silent.
++def showMerchantBootToast = false
++
+ android {
+     namespace "com.carriez.flutter_hbb"
+     compileSdkVersion 36
++    buildFeatures { buildConfig = true }
+     sourceSets {
+         main.java.srcDirs += 'src/main/kotlin'
+         // The same build-time selector governs the native policy and provider packaging.
+-        if (file('../../../libs/hbb_common/src/steaddesk_support.rs').text.trim() == 'false') {
++        if (merchantEdition) {
+             main.manifest.srcFile 'src/steaddeskStaging/AndroidManifest.xml'
+             main.java.srcDir 'src/steaddeskStaging/java'
+         }
+@@ -85,6 +90,7 @@ android {
+     defaultConfig {
+         // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
+         applicationId "com.steaddesk.remote"
++        buildConfigField "boolean", "SHOW_BOOT_TOAST", (!merchantEdition || showMerchantBootToast).toString()
+         minSdkVersion 22
+         targetSdkVersion 36
+         versionCode releaseCode
+diff --git a/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/BootReceiver.kt b/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/BootReceiver.kt
+index 9fc2111..6bc1809 100644
+--- a/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/BootReceiver.kt
++++ b/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/BootReceiver.kt
+@@ -30,7 +30,7 @@ class BootReceiver : BroadcastReceiver() {
+                 action = ACT_INIT_MEDIA_PROJECTION_AND_SERVICE
+                 putExtra(EXT_INIT_FROM_BOOT, true)
+             }
+-            if (!fromUpdate) {
++            if (!fromUpdate && BuildConfig.SHOW_BOOT_TOAST) {
+                 Toast.makeText(context, R.string.steaddesk_service_started, Toast.LENGTH_LONG).show()
+             }
+             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+diff --git a/flutter/lib/steaddesk/merchant_panel.dart b/flutter/lib/steaddesk/merchant_panel.dart
+index bfae0c4..35e1d87 100644
+--- a/flutter/lib/steaddesk/merchant_panel.dart
++++ b/flutter/lib/steaddesk/merchant_panel.dart
+@@ -365,16 +365,14 @@ class _MerchantPanelState extends State<MerchantPanel>
+       Scaffold(
+         backgroundColor: Colors.white,
+         body: SafeArea(child: content()),
+-        bottomNavigationBar: merchantAndroid
+-            ? const SafeArea(
+-                top: false,
+-                child: Padding(
+-                  padding: EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+-                  child: Text('SteadDesk $merchantVersion',
+-                      textAlign: TextAlign.center,
+-                      style: TextStyle(color: _ink, fontSize: 12)),
+-                ),
+-              )
+-            : null,
++        bottomNavigationBar: const SafeArea(
++          top: false,
++          child: Padding(
++            padding: EdgeInsets.symmetric(horizontal: 16, vertical: 6),
++            child: Text('SteadDesk $merchantVersion',
++                textAlign: TextAlign.center,
++                style: TextStyle(color: _ink, fontSize: 12)),
++          ),
++        ),
+       );
+ }

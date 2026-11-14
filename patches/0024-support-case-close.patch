@@ -1,0 +1,2305 @@
+Subject: Capture eligible support sessions and queue local case closure
+
+diff --git a/flutter/lib/desktop/pages/desktop_home_page.dart b/flutter/lib/desktop/pages/desktop_home_page.dart
+index 324106d..31cee54 100644
+--- a/flutter/lib/desktop/pages/desktop_home_page.dart
++++ b/flutter/lib/desktop/pages/desktop_home_page.dart
+@@ -25,6 +25,9 @@ import 'package:window_manager/window_manager.dart';
+ import 'package:window_size/window_size.dart' as window_size;
+ import '../widgets/button.dart';
+ 
++import '../../steaddesk/merchant_build.dart' show casesEnabled;
++import '../../steaddesk/case_session_api.dart';
++import '../../steaddesk/case_inbox_api.dart' show caseEnded;
+ import '../../steaddesk/incoming_switch.dart';
+ import '../../steaddesk/support_home.dart';
+ 
+@@ -781,6 +784,10 @@ class _DesktopHomePageState extends State<DesktopHomePage>
+     }
+ 
+     rustDeskWinManager.setMethodHandler((call, fromWindowId) async {
++      // Handle case events before the upstream debug logger (may contain notes).
++      if (casesEnabled && call.method == 'steaddesk.case.lifecycle') {
++        return await CaseSession.route(call.arguments as String, caseEnded);
++      }
+       if (!isChattyMethod(call.method)) {
+         debugPrint(
+           "[Main] call ${call.method} with args ${call.arguments} from window $fromWindowId");
+diff --git a/flutter/lib/models/model.dart b/flutter/lib/models/model.dart
+index a5ba9e6..6497009 100644
+--- a/flutter/lib/models/model.dart
++++ b/flutter/lib/models/model.dart
+@@ -1,6 +1,7 @@
+ import 'dart:async';
+ import '../steaddesk/device_sessions.dart';
+-import '../steaddesk/merchant_build.dart' show merchantEdition;
++import '../steaddesk/merchant_build.dart' show merchantEdition, casesEnabled;
++import '../steaddesk/case_session_api.dart';
+ import 'dart:convert';
+ import 'dart:math';
+ import 'dart:typed_data';
+@@ -889,6 +890,13 @@ class FfiModel with ChangeNotifier {
+     final text = evt['text'];
+     final link = evt['link'];
+ 
++    if (casesEnabled &&
++        isWindows &&
++        parent.target?.connType == ConnType.defaultConn) {
++      CaseSession.message(bind.sessionGetConnSessionId(sessionId: sessionId),
++          type, title, text);
++    }
++
+     // The peer-gone detector reconnects under `restarting-show` rather than an error title, so
+     // it needs naming here too. By its own title, not the type: an explicitly restarted remote
+     // device reaches the same type from a path this change does not touch.
+@@ -1388,6 +1396,10 @@ class FfiModel with ChangeNotifier {
+     if (isWindows && !merchantEdition && !isCache && connType == ConnType.defaultConn) {
+       final connection = bind.sessionGetConnSessionId(sessionId: sessionId);
+       if (connection.isNotEmpty) {
++        if (casesEnabled) {
++          CaseSession.established(
++              connection, peerId, _pi.hostname, _pi.platform);
++        }
+         DeviceSessions.established(peerId, connection, _pi.version);
+       }
+     }
+@@ -4418,7 +4430,20 @@ class FFI {
+     inputModel.disposeRelativeMouseMode();
+     inputModel.disposeSideButtonTracking();
+     if (closeSession) {
+-      await bind.sessionClose(sessionId: sessionId);
++      if (casesEnabled && isWindows && connType == ConnType.defaultConn) {
++        final connection = bind.sessionGetConnSessionId(sessionId: sessionId);
++        final lastView = bind.willSessionCloseCloseSession(sessionId: sessionId);
++        await bind.sessionClose(sessionId: sessionId);
++        // A tab move retains its transport. Separate monitor windows share
++        // it; concurrent closes can each have observed two views beforehand.
++        if (connection.isNotEmpty &&
++            (lastView ||
++                bind.peerGetSessionsCount(id: id, connType: connType.index) == 0)) {
++          await CaseSession.closed(connection);
++        }
++      } else {
++        await bind.sessionClose(sessionId: sessionId);
++      }
+     }
+     debugPrint('model $id closed');
+     id = '';
+diff --git a/flutter/lib/steaddesk/cases/case_dialog.dart b/flutter/lib/steaddesk/cases/case_dialog.dart
+new file mode 100644
+index 0000000..d81aa8d
+--- /dev/null
++++ b/flutter/lib/steaddesk/cases/case_dialog.dart
+@@ -0,0 +1,628 @@
++import 'package:flutter/material.dart';
++import 'package:flutter/services.dart';
++
++import '../theme.dart';
++import 'case_store.dart';
++
++const _categories = {
++  'menu': '菜单',
++  'pos_operation': '收银操作',
++  'printer': '打印机',
++  'network': '网络',
++  'payment_device': '支付设备',
++  'crash': '系统或应用崩溃',
++  'hardware': '硬件',
++  'other': '其他',
++};
++const _results = {
++  'resolved': '已解决',
++  'unresolved': '未解决',
++  'onsite': '需上门',
++  'transferred': '转给同事…',
++  'not_needed': '商户不需要了',
++};
++const _phrases = ['重启打印机', '重新插网线', '换纸卷', '重打订单'];
++
++Future<void> showCaseCloseDialog(
++  BuildContext context, {
++  required CaseStore store,
++  required String account,
++  required Map<String, dynamic> record,
++  Iterable<String> colleagues = const [],
++}) async {
++  final appendOnly = await store.isAppendOnly(account, record['id'] as String);
++  if (!context.mounted) return;
++  await showDialog<void>(
++    context: context,
++    useRootNavigator: false,
++    barrierDismissible: false,
++    barrierColor: const Color(0x590E3A52),
++    builder: (_) => _CaseCloseDialog(
++      store: store,
++      account: account,
++      record: record,
++      appendOnly: appendOnly,
++      colleagues: colleagues
++          .map((name) => name.trim())
++          .where((name) => name.isNotEmpty && name != account)
++          .toSet()
++          .toList()
++        ..sort(),
++    ),
++  );
++}
++
++class _CaseCloseDialog extends StatefulWidget {
++  const _CaseCloseDialog(
++      {required this.store,
++      required this.account,
++      required this.record,
++      required this.appendOnly,
++      required this.colleagues});
++  final CaseStore store;
++  final String account;
++  final Map<String, dynamic> record;
++  final bool appendOnly;
++  final List<String> colleagues;
++
++  @override
++  State<_CaseCloseDialog> createState() => _CaseCloseDialogState();
++}
++
++class _CaseCloseDialogState extends State<_CaseCloseDialog> {
++  late bool appendOnly = widget.appendOnly;
++  bool get lockedFields => appendOnly && widget.record['status'] == 'saved';
++  String get original => widget.record['note'] as String? ?? '';
++  late final note = TextEditingController(text: appendOnly ? '' : original);
++  late final owner = TextEditingController(
++      text: widget.record['follow_up']?['owner'] as String? ?? widget.account);
++  late final colleague =
++      TextEditingController(text: widget.record['transferred_to'] as String?);
++  late String? category = widget.record['category'] as String?;
++  late String? result = widget.record['result'] as String?;
++  late DateTime? due =
++      DateTime.tryParse(widget.record['follow_up']?['due'] as String? ?? '');
++
++  final categoryNodes = {for (final key in _categories.keys) key: FocusNode()};
++  final resultNodes = {for (final key in _results.keys) key: FocusNode()};
++  final ownerNode = FocusNode(),
++      dateNode = FocusNode(),
++      colleagueNode = FocusNode(),
++      noteNode = FocusNode();
++  final formFocus = FocusNode(skipTraversal: true);
++  var busy = false;
++  String? error;
++
++  bool get followUp => result == 'unresolved' || result == 'onsite';
++  bool get transfer => result == 'transferred';
++
++  @override
++  void initState() {
++    super.initState();
++    _categoryTabStop();
++    FocusManager.instance.addEarlyKeyEventHandler(_key);
++  }
++
++  void _categoryTabStop() {
++    // The category chips form one Tab stop. Number keys can reach every chip.
++    for (final entry in categoryNodes.entries) {
++      entry.value.skipTraversal =
++          entry.key != (category ?? _categories.keys.first);
++    }
++  }
++
++  @override
++  void dispose() {
++    FocusManager.instance.removeEarlyKeyEventHandler(_key);
++    for (final node in [
++      ...categoryNodes.values,
++      ...resultNodes.values,
++      ownerNode,
++      dateNode,
++      colleagueNode,
++      noteNode,
++      formFocus
++    ]) {
++      node.dispose();
++    }
++    note.dispose();
++    owner.dispose();
++    colleague.dispose();
++    super.dispose();
++  }
++
++  void selectCategory(String value) {
++    setState(() {
++      category = value;
++      error = null;
++    });
++    _categoryTabStop();
++    categoryNodes[value]!.requestFocus();
++  }
++
++  KeyEventResult _key(KeyEvent event) {
++    if (event is! KeyDownEvent ||
++        !formFocus.hasFocus ||
++        ModalRoute.of(context)?.isCurrent != true) {
++      return KeyEventResult.ignored;
++    }
++    final keyboard = HardwareKeyboard.instance;
++    if (keyboard.isAltPressed ||
++        keyboard.isControlPressed ||
++        keyboard.isMetaPressed ||
++        keyboard.isShiftPressed) {
++      return KeyEventResult.ignored;
++    }
++    final key = event.logicalKey;
++    if (key == LogicalKeyboardKey.enter ||
++        key == LogicalKeyboardKey.numpadEnter) {
++      // Let a Chinese input method commit its active composition first.
++      for (final field in [note, owner, colleague]) {
++        if (!field.value.composing.isCollapsed) return KeyEventResult.ignored;
++      }
++      if (!busy && !lockedFields) {
++        for (final entry in resultNodes.entries) {
++          if (entry.value.hasPrimaryFocus) {
++            setState(() => result = entry.key);
++            break;
++          }
++        }
++      }
++      _submit();
++      return KeyEventResult.handled;
++    }
++    if (busy ||
++        lockedFields ||
++        noteNode.hasFocus ||
++        ownerNode.hasFocus ||
++        colleagueNode.hasFocus) {
++      return KeyEventResult.ignored;
++    }
++    final index = key.keyId - LogicalKeyboardKey.digit1.keyId;
++    final pad = key.keyId - LogicalKeyboardKey.numpad1.keyId;
++    final digit = index >= 0 && index < 8 ? index : pad;
++    if (digit < 0 || digit >= _categories.length) return KeyEventResult.ignored;
++    selectCategory(_categories.keys.elementAt(digit));
++    return KeyEventResult.handled;
++  }
++
++  void _missing(FocusNode node, String message) {
++    setState(() => error = message);
++    node.requestFocus();
++    final target = node.context;
++    if (target != null) Scrollable.ensureVisible(target, alignment: .5);
++  }
++
++  Future<void> _submit({bool later = false}) async {
++    if (busy) return;
++    if (!later && !lockedFields) {
++      if (caseFieldsRequired && category == null) {
++        return _missing(categoryNodes.values.first, '请选择问题类型');
++      }
++      if (caseFieldsRequired && result == null) {
++        return _missing(resultNodes.values.first, '请选择处理结果');
++      }
++      if (followUp && owner.text.trim().isEmpty) {
++        return _missing(ownerNode, '请填写跟进人');
++      }
++      if (followUp && due == null) return _missing(dateNode, '请选择跟进日期');
++      if (transfer &&
++          (colleague.text.trim().isEmpty ||
++              colleague.text.trim() == widget.account)) {
++        return _missing(colleagueNode, '请选择或填写同事账号');
++      }
++    }
++    setState(() {
++      busy = true;
++      error = null;
++    });
++    final id = widget.record['id'] as String;
++    try {
++      if (later) {
++        if (widget.record['status'] == 'saved') {
++          Navigator.of(context).pop();
++          return;
++        }
++        if (appendOnly ? note.text.trim().isNotEmpty : note.text != original) {
++          await widget.store.defer(widget.account, id,
++              note: note.text, expectedAppendOnly: appendOnly);
++        }
++      } else if (lockedFields) {
++        if (note.text.trim().isNotEmpty) {
++          await widget.store.append(widget.account, id, note.text);
++        }
++      } else {
++        await widget.store.save(widget.account, id,
++            category: category,
++            result: result,
++            followUp: followUp
++                ? {'owner': owner.text.trim(), 'due': _date(due!)}
++                : null,
++            transferredTo: transfer ? colleague.text.trim() : null,
++            note: note.text,
++            expectedAppendOnly: appendOnly);
++      }
++      if (mounted) Navigator.of(context).pop();
++    } on CaseEditWindowExpired {
++      if (!mounted) return;
++      setState(() {
++        appendOnly = true;
++        if (note.text.startsWith(original)) {
++          note.text = note.text.substring(original.length);
++        }
++        busy = false;
++        error = '已超过 24 小时，请确认要追加的说明后保存';
++      });
++      noteNode.requestFocus();
++    } catch (_) {
++      if (mounted) {
++        setState(() {
++          busy = false;
++          error = '写入失败，请重试';
++        });
++      }
++    }
++  }
++
++  String _date(DateTime day) =>
++      '${day.year}-${day.month.toString().padLeft(2, '0')}-${day.day.toString().padLeft(2, '0')}';
++
++  static const _muted =
++      TextStyle(fontSize: 12, color: SteadDeskTheme.secondaryText);
++
++  Widget _heading(String title, {bool requiredField = false, String? hint}) =>
++      Padding(
++          padding: const EdgeInsets.only(bottom: 8),
++          child: Text.rich(TextSpan(
++            text: title,
++            style: const TextStyle(
++                fontSize: 13,
++                fontWeight: FontWeight.w600,
++                color: SteadDeskTheme.bodyHighContrast),
++            children: [
++              if (requiredField && caseFieldsRequired)
++                const TextSpan(
++                    text: ' *', style: TextStyle(color: SteadDeskTheme.danger)),
++              if (hint != null)
++                TextSpan(
++                    text: '  $hint',
++                    style: _muted.copyWith(fontWeight: FontWeight.normal)),
++            ],
++          )));
++
++  Widget _choice(String label, bool selected, VoidCallback? activate,
++          {FocusNode? focus, bool autofocus = false, double height = 34}) =>
++      Semantics(
++          selected: selected,
++          child: SizedBox(
++              height: height,
++              child: OutlinedButton(
++                focusNode: focus,
++                autofocus: autofocus,
++                style: OutlinedButton.styleFrom(
++                  minimumSize: Size.zero,
++                  padding: const EdgeInsets.symmetric(horizontal: 12),
++                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
++                  shape: RoundedRectangleBorder(
++                      borderRadius: BorderRadius.circular(6)),
++                  side: BorderSide(
++                      color: selected
++                          ? SteadDeskTheme.action
++                          : SteadDeskTheme.divider,
++                      width: selected ? 2 : 1),
++                  backgroundColor: selected
++                      ? SteadDeskTheme.brandSurface
++                      : SteadDeskTheme.page,
++                  foregroundColor: selected
++                      ? SteadDeskTheme.action
++                      : SteadDeskTheme.bodyHighContrast,
++                  textStyle: Theme.of(context).textTheme.labelLarge?.copyWith(
++                      fontSize: 13,
++                      fontWeight:
++                          selected ? FontWeight.w600 : FontWeight.normal),
++                ),
++                onPressed: activate,
++                child: Text(label),
++              )));
++
++  Widget _followUp() {
++    final now = DateTime.now();
++    final tomorrow = DateTime(now.year, now.month, now.day + 1);
++    final after = DateTime(now.year, now.month, now.day + 2);
++    final custom = due != null &&
++        !DateUtils.isSameDay(due, tomorrow) &&
++        !DateUtils.isSameDay(due, after);
++    return Container(
++      width: double.infinity,
++      margin: const EdgeInsets.only(top: 12),
++      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
++      decoration: BoxDecoration(
++          color: const Color(0xFFFFF7E6),
++          borderRadius: BorderRadius.circular(8)),
++      child: Wrap(
++          spacing: 10,
++          runSpacing: 8,
++          crossAxisAlignment: WrapCrossAlignment.center,
++          children: [
++            const Text('跟进',
++                style: TextStyle(
++                    color: SteadDeskTheme.attentionText,
++                    fontWeight: FontWeight.w600)),
++            SizedBox(
++                width: 100,
++                child: TextField(
++                    controller: owner,
++                    focusNode: ownerNode,
++                    readOnly: lockedFields,
++                    style: const TextStyle(fontSize: 13),
++                    decoration: const InputDecoration(
++                        labelText: '跟进人', isDense: true))),
++            _choice('明天', DateUtils.isSameDay(due, tomorrow),
++                lockedFields ? null : () => setState(() => due = tomorrow),
++                focus: dateNode, height: 30),
++            _choice('后天', DateUtils.isSameDay(due, after),
++                lockedFields ? null : () => setState(() => due = after),
++                height: 30),
++            _choice(
++                custom ? _date(due!) : '自定…',
++                custom,
++                lockedFields
++                    ? null
++                    : () async {
++                        final selected = await showDatePicker(
++                            context: context,
++                            useRootNavigator: false,
++                            initialDate: due ?? tomorrow,
++                            firstDate: DateTime(
++                                due != null && due!.isBefore(now)
++                                    ? due!.year
++                                    : now.year),
++                            lastDate: DateTime((due?.year ?? now.year) + 100));
++                        if (mounted && selected != null) {
++                          setState(() => due = selected);
++                        }
++                      },
++                height: 30),
++          ]),
++    );
++  }
++
++  Widget _transfer() {
++    final names = widget.colleagues;
++    if (names.isEmpty || lockedFields) {
++      return TextField(
++          controller: colleague,
++          focusNode: colleagueNode,
++          readOnly: lockedFields,
++          decoration: const InputDecoration(labelText: '同事账号'));
++    }
++    return DropdownButtonFormField<String>(
++      focusNode: colleagueNode,
++      isExpanded: true,
++      decoration: const InputDecoration(labelText: '同事账号'),
++      value: names.contains(colleague.text) ? colleague.text : null,
++      items: [
++        for (final name in names)
++          DropdownMenuItem(value: name, child: Text(name))
++      ],
++      onChanged: (name) => setState(() => colleague.text = name ?? ''),
++    );
++  }
++
++  String? get duration {
++    final start =
++        DateTime.tryParse(widget.record['started_at'] as String? ?? '');
++    final end = DateTime.tryParse(widget.record['ended_at'] as String? ?? '');
++    if (start == null || end == null || end.isBefore(start)) return null;
++    final elapsed = end.difference(start);
++    if (elapsed.inMinutes == 0) return '${elapsed.inSeconds} 秒';
++    if (elapsed.inSeconds % 60 == 0) return '${elapsed.inMinutes} 分钟';
++    return '${elapsed.inMinutes} 分 ${elapsed.inSeconds % 60} 秒';
++  }
++
++  Widget _note() {
++    final appends = widget.record['appends'] as List? ?? [];
++    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
++      _heading('备注',
++          hint: !appendOnly && original.isNotEmpty ? '已带入随手记' : null),
++      if (appendOnly && original.isNotEmpty) SelectableText(original),
++      if (appendOnly)
++        for (final entry in appends.whereType<Map>())
++          Text('${entry['by']} · ${entry['text']}'),
++      TextField(
++          focusNode: noteNode,
++          controller: note,
++          minLines: 3,
++          maxLines: 4,
++          style: const TextStyle(fontSize: 13),
++          decoration: InputDecoration(
++              hintText: appendOnly ? '追加说明（原备注已锁定）' : '填写处理步骤',
++              border:
++                  OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
++              isDense: true)),
++      const SizedBox(height: 8),
++      Wrap(
++          spacing: 6,
++          runSpacing: 6,
++          crossAxisAlignment: WrapCrossAlignment.center,
++          children: [
++            const Text('常用：', style: _muted),
++            for (final phrase in _phrases)
++              SizedBox(
++                  height: 28,
++                  child: OutlinedButton(
++                      style: OutlinedButton.styleFrom(
++                          minimumSize: Size.zero,
++                          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
++                          foregroundColor: SteadDeskTheme.secondaryText,
++                          side: const BorderSide(color: Color(0xFFCBD5E1)),
++                          shape: RoundedRectangleBorder(
++                              borderRadius: BorderRadius.circular(6)),
++                          padding: const EdgeInsets.symmetric(horizontal: 10),
++                          textStyle: Theme.of(context)
++                              .textTheme
++                              .labelLarge
++                              ?.copyWith(fontSize: 12)),
++                      onPressed: () {
++                        final value = note.text.isEmpty
++                            ? phrase
++                            : '${note.text}\n$phrase';
++                        note.value = TextEditingValue(
++                            text: value,
++                            selection:
++                                TextSelection.collapsed(offset: value.length));
++                      },
++                      child: Text('+ $phrase'))),
++          ]),
++    ]);
++  }
++
++  Widget _fields() {
++    final auto = widget.record['auto'] as Map?;
++    final facts = [
++      if (duration != null) '时长 $duration',
++      if (auto?['files'] != null) '传输 ${auto!['files']} 个文件',
++      if (auto?['recording_id'] != null && auto!['recording_id'] != '')
++        '录像 #${auto['recording_id']}',
++    ];
++    return SingleChildScrollView(
++      padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
++      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
++        _heading('问题类型', requiredField: true, hint: '按 1–8 选择'),
++        Wrap(spacing: 8, runSpacing: 8, children: [
++          for (final (i, entry) in _categories.entries.indexed)
++            _choice('${i + 1} ${entry.value}', category == entry.key,
++                lockedFields ? null : () => selectCategory(entry.key),
++                focus: categoryNodes[entry.key],
++                autofocus: !categoryNodes[entry.key]!.skipTraversal),
++        ]),
++        const SizedBox(height: 16),
++        _heading('结果', requiredField: true),
++        Wrap(spacing: 8, runSpacing: 8, children: [
++          for (final entry in _results.entries)
++            _choice(
++                entry.value,
++                result == entry.key,
++                lockedFields
++                    ? null
++                    : () => setState(() {
++                          result = entry.key;
++                          error = null;
++                        }),
++                focus: resultNodes[entry.key]),
++        ]),
++        if (followUp) _followUp(),
++        if (transfer) _transfer(),
++        const SizedBox(height: 16),
++        _note(),
++        if (facts.isNotEmpty)
++          ExpansionTile(
++              tilePadding: EdgeInsets.zero,
++              dense: true,
++              title: const Text('自动记录', style: _muted),
++              expandedAlignment: Alignment.centerLeft,
++              children: [
++                Align(
++                    alignment: Alignment.centerLeft,
++                    child: Text(facts.join(' · '), style: _muted))
++              ]),
++      ]),
++    );
++  }
++
++  @override
++  Widget build(BuildContext context) {
++    final record = widget.record;
++    final isDraft = record['status'] != 'saved';
++    final name = [
++      record['display_name'],
++      record['device_name'],
++      record['device_id']
++    ]
++        .whereType<String>()
++        .firstWhere((s) => s.trim().isNotEmpty, orElse: () => '');
++    final helpId = record['help_id'];
++    final subtitle = [
++      if (duration != null) '会话 $duration',
++      if (helpId != null && helpId != '') '求助 #$helpId'
++    ];
++    return Focus(
++        focusNode: formFocus,
++        child: Dialog(
++          backgroundColor: SteadDeskTheme.page,
++          surfaceTintColor: Colors.transparent,
++          insetPadding:
++              const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
++          shape:
++              RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
++          child: SizedBox(
++              width: 600,
++              child: Column(
++                  mainAxisSize: MainAxisSize.min,
++                  crossAxisAlignment: CrossAxisAlignment.stretch,
++                  children: [
++                    Padding(
++                        padding: const EdgeInsets.fromLTRB(24, 20, 24, 14),
++                        child: Column(
++                            crossAxisAlignment: CrossAxisAlignment.start,
++                            children: [
++                              Text('结案 · $name',
++                                  maxLines: 2,
++                                  overflow: TextOverflow.ellipsis,
++                                  style: const TextStyle(
++                                      fontSize: 18,
++                                      fontWeight: FontWeight.w700,
++                                      color: SteadDeskTheme.bodyHighContrast)),
++                              if (subtitle.isNotEmpty)
++                                Padding(
++                                    padding: const EdgeInsets.only(top: 4),
++                                    child: Text(subtitle.join(' · '),
++                                        style: _muted.copyWith(
++                                            fontSize: 13,
++                                            fontFeatures:
++                                                SteadDeskTheme.tabularDigits))),
++                            ])),
++                    const Divider(height: 1),
++                    Flexible(
++                        child:
++                            AbsorbPointer(absorbing: busy, child: _fields())),
++                    const Divider(height: 1),
++                    Padding(
++                        padding: const EdgeInsets.symmetric(
++                            horizontal: 24, vertical: 14),
++                        child: Column(
++                            crossAxisAlignment: CrossAxisAlignment.stretch,
++                            children: [
++                              if (error != null)
++                                Semantics(
++                                    liveRegion: true,
++                                    child: Text(error!,
++                                        style: const TextStyle(
++                                            color: SteadDeskTheme.danger))),
++                              Row(children: [
++                                Expanded(
++                                    child: isDraft
++                                        ? const Text('稍后补会进入「待补结案」',
++                                            style: _muted)
++                                        : const SizedBox.shrink()),
++                                OutlinedButton(
++                                    onPressed: busy
++                                        ? null
++                                        : () => _submit(later: true),
++                                    child: Text(isDraft ? '稍后补' : '关闭')),
++                                const SizedBox(width: 10),
++                                ElevatedButton(
++                                    style: ElevatedButton.styleFrom(
++                                        backgroundColor: SteadDeskTheme.action,
++                                        foregroundColor: Colors.white,
++                                        shape: RoundedRectangleBorder(
++                                            borderRadius:
++                                                BorderRadius.circular(8))),
++                                    onPressed: busy ? null : _submit,
++                                    child: const Text('保存（Enter）')),
++                              ]),
++                            ])),
++                  ])),
++        ));
++  }
++}
+diff --git a/flutter/lib/steaddesk/cases/case_inbox.dart b/flutter/lib/steaddesk/cases/case_inbox.dart
+new file mode 100644
+index 0000000..632d2d7
+--- /dev/null
++++ b/flutter/lib/steaddesk/cases/case_inbox.dart
+@@ -0,0 +1,292 @@
++import 'dart:async';
++import 'dart:collection';
++import 'dart:io';
++
++import 'package:flutter/material.dart';
++import 'package:path_provider/path_provider.dart';
++
++import 'case_dialog.dart';
++import 'case_store.dart';
++
++/// The main window is the single owner of persistence and of the modal queue.
++class CaseInbox extends ChangeNotifier {
++  final CaseStore store;
++  CaseInbox(this.store);
++  final _prompts = Queue<({String account, String id})>();
++  bool recovered = false;
++
++  Future<bool> ended(Map<String, dynamic> event) async {
++    final account = event['agent'] as String;
++    final id = event['id'] as String;
++    final record = Map<String, dynamic>.of(event)..remove('interrupted');
++    final inserted = await store.addDraft(account, record);
++    if (inserted) {
++      if (event['interrupted'] != true) {
++        _prompts.add((account: account, id: id));
++      }
++      notifyListeners();
++    }
++    return true;
++  }
++
++  void selectAccount(String account) {
++    _prompts.removeWhere((item) => item.account != account);
++  }
++
++  String? next(String account) {
++    selectAccount(account);
++    return _prompts.isEmpty ? null : _prompts.removeFirst().id;
++  }
++
++  void reportRecovery() {
++    recovered = true;
++    notifyListeners();
++  }
++}
++
++final _inbox = CaseInbox(LocalCaseStore(
++    file: () async => File(
++        '${(await getApplicationSupportDirectory()).path}/$caseStoreFileName'),
++    onCorrupt: _reportRecovery));
++void _reportRecovery() => _inbox.reportRecovery();
++Future<bool> caseEnded(Map<String, dynamic> event) => _inbox.ended(event);
++
++class PendingCasesBar extends StatefulWidget {
++  const PendingCasesBar({
++    super.key,
++    required this.account,
++    required this.colleagues,
++    required this.showMainWindow,
++    this.inbox,
++  });
++  final String account;
++  final List<String> Function() colleagues;
++  final Future<void> Function() showMainWindow;
++  final CaseInbox? inbox;
++
++  @override
++  State<PendingCasesBar> createState() => _PendingCasesBarState();
++}
++
++class _PendingCasesBarState extends State<PendingCasesBar> {
++  CaseInbox get inbox => widget.inbox ?? _inbox;
++  List<Map<String, dynamic>> rows = [];
++  bool failed = false;
++  bool draining = false;
++  int revision = 0;
++  int accountEpoch = 0;
++  Route<void>? host;
++
++  @override
++  void initState() {
++    super.initState();
++    inbox.addListener(_changed);
++    _changed();
++  }
++
++  @override
++  void didUpdateWidget(PendingCasesBar oldWidget) {
++    super.didUpdateWidget(oldWidget);
++    if (oldWidget.account != widget.account) {
++      accountEpoch++;
++      // The editor, colleague list and date picker all belong to this route.
++      final old = host;
++      if (old != null) {
++        WidgetsBinding.instance.addPostFrameCallback((_) {
++          if (old.isActive) old.navigator?.removeRoute(old);
++        });
++      }
++      inbox.selectAccount(widget.account);
++      rows = [];
++      failed = false;
++      _changed();
++    }
++  }
++
++  @override
++  void dispose() {
++    inbox.removeListener(_changed);
++    final old = host;
++    if (old != null) {
++      WidgetsBinding.instance.addPostFrameCallback((_) {
++        if (old.isActive) old.navigator?.removeRoute(old);
++      });
++    }
++    super.dispose();
++  }
++
++  void _changed() {
++    final generation = ++revision;
++    WidgetsBinding.instance.addPostFrameCallback((_) async {
++      if (!mounted || generation != revision || widget.account.isEmpty) return;
++      try {
++        final list = await inbox.store.pending(widget.account);
++        if (!mounted || generation != revision) return;
++        setState(() {
++          rows = list;
++          failed = false;
++        });
++        if (inbox.recovered) {
++          inbox.recovered = false;
++          ScaffoldMessenger.maybeOf(context)?.showSnackBar(
++            const SnackBar(content: Text('结案文件损坏，已备份并重置。')),
++          );
++        }
++        if (!draining) unawaited(_drain());
++      } catch (_) {
++        if (mounted && generation == revision) setState(() => failed = true);
++      }
++    });
++    WidgetsBinding.instance.ensureVisualUpdate();
++  }
++
++  Future<void> _drain() async {
++    if (draining) return;
++    draining = true;
++    try {
++      while (mounted && widget.account.isNotEmpty) {
++        final id = inbox.next(widget.account);
++        if (id == null) break;
++        final account = widget.account;
++        final epoch = accountEpoch;
++        try {
++          final list = await inbox.store.pending(account);
++          if (!mounted || epoch != accountEpoch) continue;
++          final match = list.where((row) => row['id'] == id);
++          if (match.isEmpty) continue;
++          await widget.showMainWindow();
++          if (mounted && epoch == accountEpoch) await _open(match.first);
++        } catch (_) {
++          // A durable draft remains available from the main window.
++          if (mounted && epoch == accountEpoch) {
++            ScaffoldMessenger.maybeOf(context)?.showSnackBar(
++              const SnackBar(content: Text('结案窗口未打开，可从待补结案重试。')),
++            );
++          }
++        }
++      }
++    } finally {
++      draining = false;
++    }
++  }
++
++  Future<void> _browse() async {
++    if (draining) return;
++    draining = true;
++    try {
++      await _open(null);
++    } finally {
++      draining = false;
++      if (mounted) _changed();
++    }
++  }
++
++  // One removable route isolates the entire dialog stack for the signed-in account.
++  Future<void> _open(Map<String, dynamic>? record) async {
++    final account = widget.account;
++    final epoch = accountEpoch;
++    final nav = Navigator.of(context, rootNavigator: true);
++    late final RawDialogRoute<void> route;
++    route = RawDialogRoute<void>(
++      barrierDismissible: false,
++      barrierColor: Colors.transparent,
++      transitionDuration: Duration.zero,
++      pageBuilder: (_, __, ___) => Navigator(
++        onGenerateRoute: (_) => PageRouteBuilder<void>(
++          opaque: false,
++          transitionDuration: Duration.zero,
++          pageBuilder: (_, __, ___) => _CaseFlow(start: (inner) async {
++            try {
++              final selected = record ?? await _choose(inner);
++              if (selected != null &&
++                  inner.mounted &&
++                  mounted &&
++                  epoch == accountEpoch) {
++                await showCaseCloseDialog(inner,
++                    store: inbox.store,
++                    account: account,
++                    record: selected,
++                    colleagues: widget.colleagues());
++              }
++            } finally {
++              if (route.isActive) nav.removeRoute(route);
++            }
++          }),
++        ),
++      ),
++    );
++    host = route;
++    // On Flutter 3.24 removeRoute does not complete Navigator.push's future.
++    nav.push(route);
++    await route.completed;
++    if (identical(host, route)) host = null;
++    if (mounted) _changed();
++  }
++
++  Future<Map<String, dynamic>?> _choose(BuildContext inner) =>
++      showDialog<Map<String, dynamic>>(
++        context: inner,
++        useRootNavigator: false,
++        builder: (context) => AlertDialog(
++          title: const Text('待补结案'),
++          content: SizedBox(
++            width: 420,
++            child: ListView(shrinkWrap: true, children: [
++              for (final row in rows)
++                ListTile(
++                  title: Text((row['display_name'] ??
++                          row['device_name'] ??
++                          row['device_id'])
++                      .toString()),
++                  subtitle: Text(DateTime.parse(row['ended_at'] as String)
++                      .toLocal()
++                      .toString()
++                      .split('.')
++                      .first),
++                  onTap: () => Navigator.of(context).pop(row),
++                ),
++            ]),
++          ),
++          actions: [
++            TextButton(
++                onPressed: () => Navigator.of(context).pop(),
++                child: const Text('关闭'))
++          ],
++        ),
++      );
++
++  @override
++  Widget build(BuildContext context) {
++    if (widget.account.isEmpty || (rows.isEmpty && !failed)) {
++      return const SizedBox.shrink();
++    }
++    return Align(
++      alignment: Alignment.centerLeft,
++      child: TextButton.icon(
++        icon: const Icon(Icons.assignment_outlined, size: 18),
++        label: Text(failed ? '结案列表读取失败，重试' : '待补结案 ${rows.length}'),
++        onPressed: failed ? _changed : _browse,
++      ),
++    );
++  }
++}
++
++class _CaseFlow extends StatefulWidget {
++  const _CaseFlow({required this.start});
++  final Future<void> Function(BuildContext) start;
++  @override
++  State<_CaseFlow> createState() => _CaseFlowState();
++}
++
++class _CaseFlowState extends State<_CaseFlow> {
++  @override
++  void initState() {
++    super.initState();
++    WidgetsBinding.instance.addPostFrameCallback((_) {
++      if (mounted) widget.start(context);
++    });
++  }
++
++  @override
++  Widget build(BuildContext context) => const SizedBox.shrink();
++}
+diff --git a/flutter/lib/steaddesk/cases/case_inbox_off.dart b/flutter/lib/steaddesk/cases/case_inbox_off.dart
+new file mode 100644
+index 0000000..47987f6
+--- /dev/null
++++ b/flutter/lib/steaddesk/cases/case_inbox_off.dart
+@@ -0,0 +1,15 @@
++import 'package:flutter/widgets.dart';
++
++Future<bool> caseEnded(Map<String, dynamic> event) async => false;
++
++class PendingCasesBar extends StatelessWidget {
++  const PendingCasesBar({
++    super.key,
++    required String account,
++    required List<String> Function() colleagues,
++    required Future<void> Function() showMainWindow,
++  });
++
++  @override
++  Widget build(BuildContext context) => const SizedBox.shrink();
++}
+diff --git a/flutter/lib/steaddesk/cases/case_session.dart b/flutter/lib/steaddesk/cases/case_session.dart
+new file mode 100644
+index 0000000..d6db6e5
+--- /dev/null
++++ b/flutter/lib/steaddesk/cases/case_session.dart
+@@ -0,0 +1,114 @@
++import 'dart:async';
++import 'dart:convert';
++
++import 'package:desktop_multi_window/desktop_multi_window.dart';
++import 'package:flutter/foundation.dart';
++import 'package:uuid/uuid.dart';
++
++import '../../common.dart' show gFFI;
++import '../../consts.dart' show kMainWindowId;
++import '../../models/platform_model.dart' show bind;
++import '../support_device.dart';
++import 'case_session_ledger.dart';
++
++class CaseSession {
++  static const _uuid = Uuid();
++  static final _ledger = CaseSessionLedger(_snapshot);
++  static final _sending = <String, Future<void>>{};
++
++  static CaseData? _snapshot(CaseData event) {
++    // The main engine owns login and address-book state. Child engines do not
++    // load the active account. Snapshot here rather than attributing on close.
++    final account = gFFI.userModel.userName.value.trim();
++    if (account.isEmpty) return null;
++    final id = event['device_id'] as String;
++    final ab = gFFI.abModel;
++    final peers = [
++      for (final book in {ab.current, ...ab.addressbooks.values}) ...book.peers,
++      ...gFFI.groupModel.peers,
++      ...gFFI.recentPeersModel.peers,
++    ].where((peer) => peer.id == id);
++    final alias = peers.map((peer) => peer.alias).firstWhere(
++        (s) => s.isNotEmpty,
++        orElse: () => bind.mainGetPeerOptionSync(id: id, key: 'alias'));
++    final device = SupportDevice(
++        id: id,
++        alias: alias,
++        hostnames: [
++          event['hostname'] as String,
++          ...peers.map((p) => p.hostname)
++        ],
++        platform: event['platform'] as String,
++        groupName: '',
++        online: null);
++    final name = device.alias.isNotEmpty
++        ? device.alias
++        : device.name.isEmpty
++            ? id
++            : device.name;
++    return {
++      'id': _uuid.v4(),
++      'device_id': id,
++      'device_name': name,
++      'display_name': name,
++      'merchant_code': device.merchant,
++      'store_code': device.store,
++      'agent': account,
++      'note': '',
++      'auto': {'files': null, 'recording_id': null}
++    };
++  }
++
++  static Future<bool> route(
++          String message, Future<bool> Function(CaseData) ended) =>
++      _ledger.receive(jsonDecode(message) as CaseData, ended);
++
++  static Future<void> shutdown(Future<bool> Function(CaseData) ended) =>
++      _ledger.shutdown(DateTime.now().toUtc(), ended);
++
++  static void established(
++      String connection, String peerId, String hostname, String platform) {
++    unawaited(_send(connection, 'established',
++        {'device_id': peerId, 'hostname': hostname, 'platform': platform}));
++  }
++
++  static void message(
++      String connection, String type, String title, String text) {
++    final kind = caseEndKind(type, title, text);
++    if (kind != null) unawaited(_send(connection, kind));
++  }
++
++  static Future<void> closed(String connection) => _send(connection, 'closed');
++
++  static Future<void> _send(String connection, String kind, [CaseData? data]) {
++    if (connection.isEmpty) return Future.value();
++    final message = jsonEncode({
++      'connection': connection,
++      'kind': kind,
++      'at': DateTime.now().toUtc().toIso8601String(),
++      'event_id': _uuid.v4(),
++      ...?data
++    });
++    final next = (_sending[connection] ?? Future<void>.value()).then((_) async {
++      for (var attempt = 0; attempt < 3; attempt++) {
++        if (attempt > 0) {
++          await Future<void>.delayed(Duration(milliseconds: 200 * attempt));
++        }
++        try {
++          final ack = await DesktopMultiWindow.invokeMethod(
++                  kMainWindowId, 'steaddesk.case.lifecycle', message)
++              .timeout(const Duration(seconds: 3));
++          if (ack == true) return;
++        } catch (_) {
++          // Same event ID and timestamp on retry, including a lost reply.
++        }
++      }
++      debugPrint(
++          'Case lifecycle event $kind was not acknowledged by the main window');
++    });
++    _sending[connection] = next;
++    return next.whenComplete(() {
++      if (identical(_sending[connection], next)) _sending.remove(connection);
++    });
++  }
++}
+diff --git a/flutter/lib/steaddesk/cases/case_session_ledger.dart b/flutter/lib/steaddesk/cases/case_session_ledger.dart
+new file mode 100644
+index 0000000..bc41d38
+--- /dev/null
++++ b/flutter/lib/steaddesk/cases/case_session_ledger.dart
+@@ -0,0 +1,133 @@
++// An authenticated transport can have several monitor windows. Their events
++// converge here, in the main engine, including after a tab moves to a window.
++typedef CaseData = Map<String, dynamic>;
++
++String? caseEndKind(String type, String title, String text) {
++  if (type == 'restarting-show' && title == 'Connecting...') {
++    return 'interrupted';
++  }
++  if (title == 'Connecting...' &&
++      text == 'Someone turns on privacy mode, exit') {
++    return 'closed';
++  }
++  if (title == 'Restarting remote device' && type.startsWith('restarting')) {
++    return 'closed';
++  }
++  if (title != 'Connection Error') return null;
++  if (const {'Connection not allowed', 'Incoming only mode', '连接未加密，已拒绝，请联系管理员'}
++      .contains(text)) {
++    return 'discard';
++  }
++  if (const {
++    'Closed manually by the peer',
++    'Closed manually by web console',
++    'Connection failed due to inactivity',
++    'closed'
++  }.contains(text)) {
++    return 'closed';
++  }
++  // This is the terminal transport error channel. A failed handshake or
++  // failed login has no established round, so it cannot produce a report.
++  return 'interrupted';
++}
++
++class CaseSessionLedger {
++  final CaseData? Function(CaseData event) snapshot;
++  final _active = <String, CaseData>{};
++  final _endedAt = <String, DateTime>{};
++  final _unacknowledged = <String, CaseData>{};
++  Future<void> _queue = Future.value();
++  DateTime? _lastShutdown;
++
++  CaseSessionLedger(this.snapshot);
++
++  Future<bool> receive(CaseData event, Future<bool> Function(CaseData) save) {
++    final next = _queue.then((_) => _receive(event, save));
++    _queue = next.then<void>((_) {}, onError: (Object _) {});
++    return next;
++  }
++
++  Future<bool> _receive(
++      CaseData event, Future<bool> Function(CaseData) save) async {
++    final connection = event['connection'] as String;
++    final at = DateTime.parse(event['at'] as String).toUtc();
++    final key = event['event_id'] as String;
++    if (_unacknowledged.containsKey(key)) return _persist(key, save);
++    if (_lastShutdown != null && !at.isAfter(_lastShutdown!)) return true;
++    // Ignore duplicate monitor events and IPC retries from the previous round.
++    // Sender retries last only seconds. Expire old terminal markers after a minute.
++    _endedAt.removeWhere(
++        (_, time) => at.difference(time) > const Duration(minutes: 1));
++    final endedAt = _endedAt[connection];
++    if (endedAt != null && !at.isAfter(endedAt)) return true;
++    final current = _active[connection];
++    if (event['kind'] == 'established') {
++      if (current == null) {
++        // Keep even an anonymous start until it ends; changing accounts later
++        // must never adopt an already-open session.
++        _active[connection] = {
++          ...?snapshot(event),
++          'started_at': at.toIso8601String()
++        };
++      }
++      return true;
++    }
++    if (!_finish(connection, at, event['kind'] as String, key)) return true;
++    return _persist(key, save);
++  }
++
++  bool _finish(String connection, DateTime at, String kind, String key) {
++    final current = _active[connection];
++    if (current != null && at.isBefore(DateTime.parse(current['started_at']))) {
++      return false;
++    }
++    _endedAt[connection] = at;
++    _active.remove(connection);
++    if (kind == 'discard' ||
++        current == null ||
++        current['agent'] == null ||
++        at.difference(DateTime.parse(current['started_at'])) <
++            const Duration(seconds: 30)) {
++      return false;
++    }
++    _unacknowledged[key] = {
++      ...current,
++      'ended_at': at.toIso8601String(),
++      'interrupted': kind == 'interrupted'
++    };
++    return true;
++  }
++
++  Future<bool> _persist(
++      String key, Future<bool> Function(CaseData) save) async {
++    if (!await save(_unacknowledged[key]!)) return false;
++    _unacknowledged.remove(key);
++    return true;
++  }
++
++  /// Window destruction can stop child Dart engines before dispose completes.
++  /// Drain the same main-engine queue, keeping failed writes retryable by ID.
++  Future<void> shutdown(DateTime at, Future<bool> Function(CaseData) save) {
++    final next = _queue.then((_) async {
++      for (final connection in _active.keys.toList()) {
++        _finish(connection, at.toUtc(), 'interrupted',
++            'shutdown-${_active[connection]!['id']}');
++      }
++      _lastShutdown = at;
++      Object? failed;
++      for (final entry in _unacknowledged.entries.toList()) {
++        entry.value['interrupted'] = true;
++        try {
++          if (!await _persist(entry.key, save)) {
++            failed = StateError('Case draft write was not acknowledged');
++          }
++        } catch (error) {
++          failed = error;
++        }
++      }
++      if (failed != null) throw failed;
++    });
++    _queue = next.then<void>((_) {}, onError: (Object _) {});
++    return next;
++  }
++}
+diff --git a/flutter/lib/steaddesk/cases/case_session_off.dart b/flutter/lib/steaddesk/cases/case_session_off.dart
+new file mode 100644
+index 0000000..f614883
+--- /dev/null
++++ b/flutter/lib/steaddesk/cases/case_session_off.dart
+@@ -0,0 +1,12 @@
++class CaseSession {
++  static Future<bool> route(String message,
++          Future<bool> Function(Map<String, dynamic>) ended) async =>
++      false;
++  static Future<void> shutdown(
++      Future<bool> Function(Map<String, dynamic>) ended) async {}
++  static void established(
++      String connection, String peerId, String hostname, String platform) {}
++  static void message(
++      String connection, String type, String title, String text) {}
++  static Future<void> closed(String connection) async {}
++}
+diff --git a/flutter/lib/steaddesk/cases/case_store.dart b/flutter/lib/steaddesk/cases/case_store.dart
+new file mode 100644
+index 0000000..79d436b
+--- /dev/null
++++ b/flutter/lib/steaddesk/cases/case_store.dart
+@@ -0,0 +1,330 @@
++import 'dart:convert';
++import 'dart:io';
++
++const caseFieldsRequired = true;
++const caseStoreFileName = 'support-cases-v1.json';
++
++const caseCategories = [
++  'menu',
++  'pos_operation',
++  'printer',
++  'network',
++  'payment_device',
++  'crash',
++  'hardware',
++  'other',
++];
++const caseResults = [
++  'resolved',
++  'unresolved',
++  'onsite',
++  'transferred',
++  'not_needed',
++];
++
++typedef CaseRecord = Map<String, dynamic>;
++typedef _Accounts = Map<String, List<CaseRecord>>;
++
++class CaseEditWindowExpired implements Exception {
++  const CaseEditWindowExpired();
++}
++
++abstract class CaseStore {
++  Future<List<CaseRecord>> pending(String account);
++  Future<bool> addDraft(String account, CaseRecord record);
++  Future<bool> isAppendOnly(String account, String id);
++  Future<void> defer(String account, String id,
++      {required String note, bool? expectedAppendOnly});
++  Future<void> save(String account, String id,
++      {String? category,
++      String? result,
++      Map<String, dynamic>? followUp,
++      String? transferredTo,
++      required String note,
++      bool? expectedAppendOnly});
++  Future<void> append(String account, String id, String text);
++}
++
++class LocalCaseStore implements CaseStore {
++  final Future<File> Function() file;
++  final DateTime Function() clock;
++  final void Function()? onCorrupt;
++  LocalCaseStore(
++      {required this.file, DateTime Function()? clock, this.onCorrupt})
++      : clock = clock ?? DateTime.now;
++
++  // All store instances in the main engine share the queue. The separate lock
++  // file stays in place when a writer atomically replaces the JSON file.
++  static Future<void> _queue = Future.value();
++  static final _id = RegExp(
++      r'^[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-4[a-fA-F0-9]{3}-[89abAB][a-fA-F0-9]{3}-[a-fA-F0-9]{12}$');
++
++  static DateTime _timestamp(dynamic value) {
++    final time = value is String ? DateTime.tryParse(value) : null;
++    if (time == null || !time.isUtc) {
++      throw const FormatException('UTC timestamp');
++    }
++    return time;
++  }
++
++  static bool _present(dynamic value) =>
++      value is String && value.trim().isNotEmpty;
++
++  static void _validateSession(CaseRecord row) {
++    if (row['id'] is! String ||
++        !_id.hasMatch(row['id']) ||
++        !_present(row['device_id']) ||
++        (row['display_name'] != null && row['display_name'] is! String) ||
++        (row['auto'] != null && row['auto'] is! Map) ||
++        _timestamp(row['ended_at']).isBefore(_timestamp(row['started_at']))) {
++      throw const FormatException('case session');
++    }
++  }
++
++  static _Accounts _decode(List<int> bytes) {
++    final raw = jsonDecode(utf8.decode(bytes));
++    if (raw is! Map ||
++        raw['version'] != 1 ||
++        raw['accounts'] is! Map<String, dynamic>) {
++      throw const FormatException('version/accounts');
++    }
++    final accounts = <String, List<CaseRecord>>{};
++    for (final entry in (raw['accounts'] as Map<String, dynamic>).entries) {
++      final rows = entry.value;
++      if (rows is! List) throw const FormatException('case list');
++      final records = accounts[entry.key] = [];
++      final ids = <String>{};
++      for (final row in rows) {
++        if (row is! CaseRecord ||
++            row['agent'] != entry.key ||
++            row['note'] is! String ||
++            row['appends'] is! List ||
++            (row['follow_up'] != null &&
++                (row['follow_up'] is! Map ||
++                    !_present(row['follow_up']['owner']) ||
++                    !_validDue(row['follow_up']['due']))) ||
++            (row['transferred_to'] != null &&
++                !_present(row['transferred_to'])) ||
++            !const ['draft', 'saved'].contains(row['status']) ||
++            (row['category'] != null &&
++                !caseCategories.contains(row['category'])) ||
++            (row['result'] != null && !caseResults.contains(row['result']))) {
++          throw const FormatException('case record');
++        }
++        _validateSession(row);
++        if (!ids.add(row['id'])) {
++          throw const FormatException('duplicate case id');
++        }
++        _timestamp(row['created_at']);
++        _timestamp(row['updated_at']);
++        for (final addition in row['appends']) {
++          if (addition is! Map ||
++              !_present(addition['by']) ||
++              !_present(addition['text'])) {
++            throw const FormatException('append');
++          }
++          _timestamp(addition['at']);
++        }
++        records.add(row);
++      }
++    }
++    return accounts;
++  }
++
++  static Future<void> _replace(File target, _Accounts accounts) async {
++    final tmp = File('${target.path}.tmp');
++    await tmp.writeAsString(jsonEncode({'version': 1, 'accounts': accounts}),
++        flush: true);
++    await tmp.rename(target.path);
++  }
++
++  Future<_Accounts> _read(File target) async {
++    if (!await target.exists()) return {};
++    final bytes = await target.readAsBytes();
++    try {
++      return _decode(bytes);
++    } on FormatException {
++      final stamp = clock().toUtc().toIso8601String().replaceAll(':', '-');
++      final prefix = '${target.path}.corrupt-$stamp';
++      var backup = File(prefix);
++      for (var n = 1; await backup.exists(); n++) {
++        backup = File('$prefix-$n');
++      }
++      // Leave the original file in place until both its backup and the fresh
++      // replacement are durable. An interrupted reset can then be retried.
++      await backup.writeAsBytes(bytes, flush: true);
++      await _replace(target, {});
++      onCorrupt?.call();
++      return {};
++    }
++  }
++
++  Future<T> _locked<T>(Future<T> Function(File, _Accounts) action) {
++    final next = _queue.then((_) async {
++      final target = await file();
++      await target.parent.create(recursive: true);
++      final lock =
++          await File('${target.path}.lock').open(mode: FileMode.append);
++      try {
++        await lock.lock(FileLock.blockingExclusive);
++        return await action(target, await _read(target));
++      } finally {
++        await lock.close();
++      }
++    });
++    _queue = next.then<void>((_) {}, onError: (Object _) {});
++    return next;
++  }
++
++  static int _newestFirst(CaseRecord a, CaseRecord b) =>
++      _timestamp(b['created_at']).compareTo(_timestamp(a['created_at']));
++
++  static void _trim(List<CaseRecord> rows) {
++    final excess = rows.length - 2000;
++    if (excess <= 0) return;
++    final saved = rows.where((row) => row['status'] == 'saved').toList()
++      ..sort((a, b) => _newestFirst(b, a));
++    final evict = saved.take(excess).map((row) => row['id']).toSet();
++    rows.removeWhere((row) => evict.contains(row['id']));
++  }
++
++  @override
++  Future<List<CaseRecord>> pending(String account) =>
++      _locked((_, accounts) async => [
++            ...?accounts[account]?.where((row) => row['status'] == 'draft')
++          ]..sort(_newestFirst));
++
++  @override
++  Future<bool> addDraft(String account, CaseRecord record) =>
++      _locked((target, accounts) async {
++        if (!_present(account)) throw StateError('Sign in');
++        _validateSession(record);
++        final rows = accounts.putIfAbsent(account, () => []);
++        if (rows.any((row) => row['id'] == record['id'])) return false;
++        final now = clock().toUtc().toIso8601String();
++        rows.add({
++          'id': record['id'],
++          'device_id': record['device_id'],
++          'display_name': record['display_name'] ?? record['device_id'],
++          'merchant_code': record['merchant_code'],
++          'store_code': record['store_code'],
++          'agent': account,
++          'started_at': record['started_at'],
++          'ended_at': record['ended_at'],
++          'category': null,
++          'result': null,
++          'follow_up': null,
++          'transferred_to': null,
++          'note': record['note'] as String? ?? '',
++          'auto': record['auto'] ?? <String, dynamic>{},
++          'help_id': null,
++          'created_at': now,
++          'updated_at': now,
++          'appends': [],
++          'status': 'draft',
++        });
++        _trim(rows);
++        await _replace(target, accounts);
++        return true;
++      });
++
++  static CaseRecord _find(_Accounts accounts, String account, String id) =>
++      (accounts[account] ?? const <CaseRecord>[])
++          .firstWhere((row) => row['id'] == id);
++
++  static bool _expired(CaseRecord row, DateTime now) =>
++      now.difference(_timestamp(row['created_at'])) > const Duration(hours: 24);
++
++  @override
++  Future<bool> isAppendOnly(String account, String id) =>
++      _locked((_, accounts) async =>
++          _expired(_find(accounts, account, id), clock().toUtc()));
++
++  Future<void> _edit(String account, String id,
++          void Function(CaseRecord, DateTime, bool) edit,
++          {bool? expectedAppendOnly}) =>
++      _locked((target, accounts) async {
++        final row = _find(accounts, account, id);
++        final now = clock().toUtc();
++        final expired = _expired(row, now);
++        if (expectedAppendOnly == false && expired) {
++          throw const CaseEditWindowExpired();
++        }
++        edit(row, now, expired);
++        row['updated_at'] = now.toIso8601String();
++        _trim(accounts[account]!);
++        await _replace(target, accounts);
++      });
++
++  static void _note(
++      CaseRecord row, DateTime now, String note, bool appendOnly) {
++    if (!appendOnly) {
++      row['note'] = note;
++    } else if (note.trim().isNotEmpty) {
++      (row['appends'] as List)
++          .add({'at': now.toIso8601String(), 'by': row['agent'], 'text': note});
++    }
++  }
++
++  @override
++  Future<void> defer(String account, String id,
++          {required String note, bool? expectedAppendOnly}) =>
++      _edit(account, id, (row, now, expired) {
++        if (row['status'] != 'draft') throw StateError('Case already closed');
++        _note(row, now, note, expired);
++      }, expectedAppendOnly: expectedAppendOnly);
++
++  static bool _validDue(dynamic value) {
++    if (value is! String || !RegExp(r'^\d{4}-\d{2}-\d{2}$').hasMatch(value)) {
++      return false;
++    }
++    final date = DateTime.tryParse('${value}T00:00:00Z');
++    return date != null && date.toIso8601String().startsWith('${value}T');
++  }
++
++  @override
++  Future<void> save(String account, String id,
++          {String? category,
++          String? result,
++          Map<String, dynamic>? followUp,
++          String? transferredTo,
++          required String note,
++          bool? expectedAppendOnly}) =>
++      _edit(account, id, (row, now, expired) {
++        if (expired && row['status'] == 'saved') {
++          throw StateError('Case is append only');
++        }
++        if ((category == null
++                ? caseFieldsRequired
++                : !caseCategories.contains(category)) ||
++            (result == null
++                ? caseFieldsRequired
++                : !caseResults.contains(result))) {
++          throw const FormatException('category/result');
++        }
++        final needsFollowUp = result == 'unresolved' || result == 'onsite';
++        if (needsFollowUp &&
++            (!_present(followUp?['owner']) || !_validDue(followUp?['due']))) {
++          throw const FormatException('follow_up');
++        }
++        if (result == 'transferred' && !_present(transferredTo)) {
++          throw const FormatException('transferred_to');
++        }
++        row['category'] = category;
++        row['result'] = result;
++        row['follow_up'] = needsFollowUp
++            ? {'owner': followUp!['owner'], 'due': followUp['due']}
++            : null;
++        row['transferred_to'] =
++            result == 'transferred' ? transferredTo!.trim() : null;
++        row['status'] = 'saved';
++        _note(row, now, note, expired);
++      }, expectedAppendOnly: expectedAppendOnly);
++
++  @override
++  Future<void> append(String account, String id, String text) =>
++      _edit(account, id, (row, now, _) {
++        if (!_present(text)) throw const FormatException('append text');
++        _note(row, now, text, true);
++      });
++}
+diff --git a/flutter/lib/steaddesk/support_home.dart b/flutter/lib/steaddesk/support_home.dart
+index 64f168f..8664c3b 100644
+--- a/flutter/lib/steaddesk/support_home.dart
++++ b/flutter/lib/steaddesk/support_home.dart
+@@ -11,11 +11,14 @@ import 'package:get/get.dart';
+ import 'package:url_launcher/url_launcher.dart';
+ 
+ import '../common.dart';
++import '../common/hbbs/hbbs.dart' show UserStatus;
+ import '../common/widgets/login.dart';
+ import '../common/widgets/peer_card.dart' show connectInPeerTab;
+ import '../models/peer_model.dart';
+ import '../models/peer_tab_model.dart';
+ import '../models/ab_model.dart';
++import 'case_inbox_api.dart' show PendingCasesBar;
++import 'merchant_build.dart' show casesEnabled;
+ import 'support_device.dart';
+ import 'incoming_switch.dart';
+ import '../consts.dart';
+@@ -309,6 +312,13 @@ class _SupportHomeState extends State<SupportHome> {
+                                       ?.selectScope(scope);
+                                 }),
+                             const Divider(height: 1, color: Color(0xffe5e7eb)),
++                            if (casesEnabled && isWindows)
++                              Obx(() => PendingCasesBar(
++                                  account: gFFI.userModel.userName.value,
++                                  colleagues: () => gFFI.groupModel.users
++                                      .where((user) => user.status == UserStatus.kNormal)
++                                      .map((user) => user.name).toList(),
++                                  showMainWindow: () => windowOnTop(null))),
+                             Expanded(child: _body()),
+                             const _ServerStatus(),
+                           ])),
+diff --git a/flutter/lib/utils/multi_window_manager.dart b/flutter/lib/utils/multi_window_manager.dart
+index 9e26f8c..6182b6a 100644
+--- a/flutter/lib/utils/multi_window_manager.dart
++++ b/flutter/lib/utils/multi_window_manager.dart
+@@ -8,6 +8,9 @@ import 'package:flutter_hbb/consts.dart';
+ import 'package:flutter_hbb/common.dart';
+ import 'package:flutter_hbb/main.dart';
+ import 'package:flutter_hbb/models/input_model.dart';
++import '../steaddesk/merchant_build.dart' show casesEnabled;
++import '../steaddesk/case_session_api.dart';
++import '../steaddesk/case_inbox_api.dart' show caseEnded;
+ 
+ /// must keep the order
+ // ignore: constant_identifier_names
+@@ -450,6 +453,9 @@ class RustDeskMultiWindowManager {
+   }
+ 
+   Future<void> closeAllSubWindows() async {
++    if (casesEnabled && isWindows) {
++      await CaseSession.shutdown(caseEnded);
++    }
+     await Future.wait(WindowType.values.map((e) => _closeWindows(e)));
+   }
+ 
+diff --git a/flutter/test/steaddesk/case_dialog_test.dart b/flutter/test/steaddesk/case_dialog_test.dart
+new file mode 100644
+index 0000000..93b26b6
+--- /dev/null
++++ b/flutter/test/steaddesk/case_dialog_test.dart
+@@ -0,0 +1,153 @@
++import 'package:flutter/material.dart';
++import 'package:flutter/services.dart';
++import 'package:flutter_test/flutter_test.dart';
++
++import '../../lib/steaddesk/cases/case_dialog.dart';
++import '../../lib/steaddesk/cases/case_store.dart';
++
++class _Store extends Fake implements CaseStore {
++  bool expired = false;
++  Map<String, dynamic>? submitted;
++  String? deferred;
++
++  @override
++  Future<bool> isAppendOnly(String account, String id) async => expired;
++
++  @override
++  Future<void> save(String account, String id,
++      {String? category,
++      String? result,
++      Map<String, dynamic>? followUp,
++      String? transferredTo,
++      required String note,
++      bool? expectedAppendOnly}) async {
++    if (expired && expectedAppendOnly == false)
++      throw const CaseEditWindowExpired();
++    submitted = {
++      'category': category,
++      'result': result,
++      'follow_up': followUp,
++      'transferred_to': transferredTo,
++      'note': note
++    };
++  }
++
++  @override
++  Future<void> defer(String account, String id,
++      {required String note, bool? expectedAppendOnly}) async {
++    deferred = note;
++  }
++}
++
++Future<void> _open(WidgetTester t, _Store store,
++    {List<String> colleagues = const []}) async {
++  await t.binding.setSurfaceSize(const Size(1280, 800));
++  addTearDown(() => t.binding.setSurfaceSize(null));
++  await t.pumpWidget(MaterialApp(
++      home: Builder(
++          builder: (context) => Scaffold(
++              body: TextButton(
++                  onPressed: () => showCaseCloseDialog(context,
++                          store: store,
++                          account: 'test-agent',
++                          colleagues: colleagues,
++                          record: {
++                            'id': 'test-case',
++                            'display_name': '示例门店 · 测试设备',
++                            'note': '原始随手记',
++                            'status': 'draft',
++                            'started_at': '2026-01-01T09:00:00Z',
++                            'ended_at': '2026-01-01T09:14:00Z',
++                            'auto': {'files': 0}
++                          }),
++                  child: const Text('open'))))));
++  await t.tap(find.text('open'));
++  await t.pumpAndSettle();
++}
++
++void main() {
++  testWidgets(
++      'number, Tab and Enter validate and close a case without using a pointer',
++      (t) async {
++    final store = _Store();
++    await _open(t, store);
++    await t.sendKeyEvent(LogicalKeyboardKey.enter);
++    await t.pumpAndSettle();
++    expect(find.text('请选择问题类型'), findsOneWidget);
++    expect(store.submitted, isNull);
++    await t.sendKeyEvent(LogicalKeyboardKey.digit3);
++    await t.pumpAndSettle();
++    await t.sendKeyEvent(LogicalKeyboardKey.tab);
++    await t.pumpAndSettle();
++    await t.sendKeyEvent(LogicalKeyboardKey.enter);
++    await t.pumpAndSettle();
++    expect(store.submitted, {
++      'category': 'printer',
++      'result': 'resolved',
++      'follow_up': null,
++      'transferred_to': null,
++      'note': '原始随手记'
++    });
++    expect(find.byType(Dialog), findsNothing);
++  });
++
++  testWidgets(
++      'conditional follow-up and transfer validate and only submit relevant fields',
++      (t) async {
++    final store = _Store();
++    await _open(t, store, colleagues: ['test-agent', 'test-peer']);
++    await t.tap(find.text('4 网络'));
++    await t.tap(find.text('未解决'));
++    await t.tap(find.text('保存（Enter）'));
++    await t.pumpAndSettle();
++    expect(find.text('请选择跟进日期'), findsOneWidget);
++    expect(find.text('test-agent'), findsOneWidget);
++    await t.tap(find.text('明天'));
++    await t.tap(find.text('转给同事…'));
++    await t.pumpAndSettle();
++    expect(find.text('跟进人'), findsNothing);
++    await t.tap(find.text('保存（Enter）'));
++    await t.pumpAndSettle();
++    expect(find.text('请选择或填写同事账号'), findsOneWidget);
++    await t.tap(find.byType(DropdownButtonFormField<String>));
++    await t.pumpAndSettle();
++    await t.tap(find.text('test-peer').last);
++    await t.pumpAndSettle();
++    await t.tap(find.text('+ 重新插网线'));
++    await t.tap(find.text('保存（Enter）'));
++    await t.pumpAndSettle();
++    expect(store.submitted, {
++      'category': 'network',
++      'result': 'transferred',
++      'follow_up': null,
++      'transferred_to': 'test-peer',
++      'note': '原始随手记\n重新插网线'
++    });
++  });
++
++  testWidgets(
++      'defer keeps edited notes; an expiry during editing requires confirming the addition',
++      (t) async {
++    final store = _Store();
++    await _open(t, store);
++    await t.tap(find.text('+ 重打订单'));
++    await t.tap(find.text('稍后补'));
++    await t.pumpAndSettle();
++    expect(store.deferred, '原始随手记\n重打订单');
++    expect(store.submitted, isNull);
++    await t.tap(find.text('open'));
++    await t.pumpAndSettle();
++    await t.tap(find.text('3 打印机'));
++    await t.tap(find.text('已解决'));
++    await t.tap(find.text('+ 换纸卷'));
++    store.expired = true;
++    await t.tap(find.text('保存（Enter）'));
++    await t.pumpAndSettle();
++    expect(find.text('已超过 24 小时，请确认要追加的说明后保存'), findsOneWidget);
++    expect(find.text('原始随手记'), findsOneWidget);
++    expect(store.submitted, isNull);
++    await t.tap(find.text('保存（Enter）'));
++    await t.pumpAndSettle();
++    expect(store.submitted?['note'], '\n换纸卷');
++  });
++}
+diff --git a/flutter/test/steaddesk/case_inbox_test.dart b/flutter/test/steaddesk/case_inbox_test.dart
+new file mode 100644
+index 0000000..10f5d29
+--- /dev/null
++++ b/flutter/test/steaddesk/case_inbox_test.dart
+@@ -0,0 +1,102 @@
++import 'package:flutter/material.dart';
++import 'package:flutter_test/flutter_test.dart';
++import 'package:flutter_hbb/steaddesk/cases/case_inbox.dart';
++import 'package:flutter_hbb/steaddesk/cases/case_store.dart';
++
++class _Store implements CaseStore {
++  final records = <String, CaseRecord>{};
++  @override
++  Future<bool> addDraft(String account, CaseRecord record) async {
++    if (records.containsKey(record['id'])) return false;
++    records[record['id']] = {...record, 'appends': [], 'note': ''};
++    return true;
++  }
++
++  @override
++  Future<List<CaseRecord>> pending(String account) async =>
++      records.values.where((r) => r['agent'] == account).toList();
++  @override
++  Future<bool> isAppendOnly(String account, String id) async => false;
++  @override
++  Future<void> defer(String account, String id,
++      {required String note, bool? expectedAppendOnly}) async {}
++  @override
++  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
++}
++
++CaseRecord _ended(String id, String account, {bool interrupted = false}) => {
++      'id': id,
++      'device_id': id,
++      'display_name': 'Demo $id',
++      'agent': account,
++      'started_at': '2026-11-13T12:00:00Z',
++      'ended_at': '2026-11-13T12:01:00Z',
++      'interrupted': interrupted,
++      'auto': <String, dynamic>{},
++    };
++
++void main() {
++  testWidgets(
++      'queues normal sessions, keeps disconnect quiet, suppresses duplicate IPC',
++      (t) async {
++    final inbox = CaseInbox(_Store());
++    var activations = 0;
++    await t.pumpWidget(MaterialApp(
++        home: Scaffold(
++            body: PendingCasesBar(
++      account: 'demo',
++      inbox: inbox,
++      colleagues: () => [],
++      showMainWindow: () async {
++        activations++;
++      },
++    ))));
++    await inbox.ended(_ended('net', 'demo', interrupted: true));
++    await t.pumpAndSettle();
++    expect(find.text('待补结案 1'), findsOneWidget);
++    expect(activations, 0);
++    await inbox.ended(_ended('one', 'demo'));
++    await inbox.ended(_ended('one', 'demo'));
++    await inbox.ended(_ended('two', 'demo'));
++    await t.pumpAndSettle();
++    expect(find.text('结案 · Demo one'), findsOneWidget);
++    expect(find.text('结案 · Demo two'), findsNothing);
++    await t.tap(find.text('稍后补'));
++    await t.pumpAndSettle();
++    expect(find.text('结案 · Demo two'), findsOneWidget);
++    await t.tap(find.text('稍后补'));
++    await t.pumpAndSettle();
++    expect(find.text('待补结案 3'), findsOneWidget);
++    expect(activations, 2);
++    await t.tap(find.text('待补结案 3'));
++    await t.pumpAndSettle();
++    await t.tap(find.text('Demo net'));
++    await t.pumpAndSettle();
++    expect(find.text('结案 · Demo net'), findsOneWidget);
++  });
++
++  testWidgets('account change removes the old account editor and drafts',
++      (t) async {
++    final inbox = CaseInbox(_Store());
++    Widget app(String account) => MaterialApp(
++            home: Scaffold(
++                body: PendingCasesBar(
++          account: account,
++          inbox: inbox,
++          colleagues: () => [],
++          showMainWindow: () async {},
++        )));
++    await t.pumpWidget(app('first'));
++    await inbox.ended(_ended('private', 'first'));
++    await t.pumpAndSettle();
++    expect(find.text('结案 · Demo private'), findsOneWidget);
++    await t.pumpWidget(app('second'));
++    await t.pumpAndSettle();
++    expect(find.textContaining('private'), findsNothing);
++    expect(find.text('待补结案 1'), findsNothing);
++    await t.pumpWidget(app('first'));
++    await t.pumpAndSettle();
++    expect(find.text('待补结案 1'), findsOneWidget);
++    expect(find.text('结案 · Demo private'), findsNothing);
++  });
++}
+diff --git a/flutter/test/steaddesk/case_session_test.dart b/flutter/test/steaddesk/case_session_test.dart
+new file mode 100644
+index 0000000..cdbb57b
+--- /dev/null
++++ b/flutter/test/steaddesk/case_session_test.dart
+@@ -0,0 +1,141 @@
++import 'package:flutter_test/flutter_test.dart';
++import 'package:flutter_hbb/steaddesk/cases/case_session_ledger.dart';
++
++void main() {
++  late String account;
++  late List<CaseData> writes;
++  late CaseSessionLedger ledger;
++  var sequence = 0;
++  setUp(() {
++    account = 'test-agent';
++    writes = [];
++    ledger = CaseSessionLedger((event) => account.isEmpty
++        ? null
++        : {
++            'agent': account,
++            'id': 'test-${sequence++}',
++            'device_id': event['connection']
++          });
++  });
++  final start = DateTime.utc(2026);
++  CaseData event(String kind, int seconds,
++          [String connection = 'test-device']) =>
++      {
++        'kind': kind,
++        'connection': connection,
++        'at': start.add(Duration(seconds: seconds)).toIso8601String(),
++        'event_id': '${sequence++}'
++      };
++  Future<bool> save(CaseData record) async {
++    writes.add(record);
++    return true;
++  }
++
++  Future<bool> emit(String kind, int seconds, [String id = 'test-device']) =>
++      ledger.receive(event(kind, seconds, id), save);
++
++  test('failed handshake, failed auth and a 29s session create no case',
++      () async {
++    await emit('interrupted', 2);
++    await emit('closed', 100);
++    await emit('established', 101);
++    await emit('closed', 130);
++    expect(writes, isEmpty);
++    expect(caseEndKind('re-input-password', 'Wrong Password', ''), isNull);
++    expect(caseEndKind('error', 'Login Error', 'Rejected'), isNull);
++  });
++  test(
++      'two monitor handshakes, moved tab and repeated last close yield one case at 30s',
++      () async {
++    await emit('established', 1);
++    account = 'new-agent';
++    await emit('established', 2);
++    await emit('closed', 31);
++    await emit('closed', 32);
++    expect(writes.single, containsPair('agent', 'test-agent'));
++    expect(writes.single['started_at'],
++        start.add(const Duration(seconds: 1)).toIso8601String());
++    expect(writes.single['interrupted'], isFalse);
++  });
++  test('interrupted transport retries, then reconnect starts a distinct case',
++      () async {
++    await emit('established', 0);
++    final firstHandshake = event('established', 1);
++    await ledger.receive(firstHandshake, save);
++    final loss = event('interrupted', 31);
++    await ledger.receive(loss, save);
++    await ledger.receive(
++        firstHandshake, save); // lost acknowledgement, late retry
++    await emit('established', 35);
++    await ledger.receive(loss, save); // delayed by another monitor
++    await emit('closed', 65);
++    expect(writes.map((r) => r['interrupted']), [true, false]);
++    expect(writes.map((r) => r['id']).toSet(), hasLength(2));
++  });
++  test('durable ack failure retries the same snapshot and UUID', () async {
++    await emit('established', 0);
++    final loss = event('interrupted', 30);
++    CaseData? attempted;
++    expect(
++        await ledger.receive(loss, (row) async {
++          attempted = row;
++          return false;
++        }),
++        isFalse);
++    await ledger.receive(loss, save);
++    await ledger.receive(loss, save);
++    expect(writes.single, attempted);
++  });
++  test('overlapping devices end independently; signed-out start stays unowned',
++      () async {
++    await emit('established', 0, 'one');
++    await emit('established', 0, 'two');
++    account = '';
++    await emit('established', 0, 'three');
++    account = 'new-agent';
++    await emit('established', 1, 'three');
++    await Future.wait([
++      emit('closed', 30, 'one'),
++      emit('interrupted', 30, 'two'),
++      emit('closed', 30, 'three')
++    ]);
++    expect(writes.map((r) => r['device_id']), ['one', 'two']);
++  });
++  test(
++      'orderly app shutdown drains eligible active and unacknowledged rounds as drafts',
++      () async {
++    await emit('established', 0, 'old');
++    final old = event('closed', 30, 'old');
++    CaseData? failed;
++    await ledger.receive(old, (record) async {
++      failed = record;
++      return false;
++    });
++    await emit('established', 10, 'active');
++    await emit('established', 29, 'young');
++    await ledger.shutdown(start.add(const Duration(seconds: 40)), save);
++    // Child teardown and an old unacknowledged retry may still reach main.
++    await ledger.receive(old, save);
++    await emit('closed', 41, 'active');
++    await ledger.shutdown(start.add(const Duration(seconds: 42)), save);
++    expect(writes.map((r) => r['device_id']), ['old', 'active']);
++    expect(writes.first['id'], failed!['id']);
++    expect(writes.every((r) => r['interrupted'] == true), isTrue);
++  });
++  test(
++      'core reason distinguishes remote stop, network loss and in-session messages',
++      () {
++    expect(
++        caseEndKind('error', 'Connection Error', 'Closed manually by the peer'),
++        'closed');
++    expect(caseEndKind('error', 'Connection Error', 'Reset by the peer'),
++        'interrupted');
++    expect(caseEndKind('error', 'Connection Error', 'Timeout'), 'interrupted');
++    expect(caseEndKind('relay-hint', 'Connection Error', 'os error 10054'),
++        'interrupted');
++    expect(caseEndKind('restarting-show', 'Connecting...', ''), 'interrupted');
++    expect(caseEndKind('restarting', 'Restarting remote device', ''), 'closed');
++    expect(caseEndKind('elevation-error', 'Elevation Error', ''), isNull);
++    expect(caseEndKind('custom-error', 'Privacy mode', 'Peer denied'), isNull);
++  });
++}
+diff --git a/flutter/test/steaddesk/case_store_test.dart b/flutter/test/steaddesk/case_store_test.dart
+new file mode 100644
+index 0000000..0efc0e3
+--- /dev/null
++++ b/flutter/test/steaddesk/case_store_test.dart
+@@ -0,0 +1,175 @@
++import 'dart:convert';
++import 'dart:io';
++
++import 'package:flutter_test/flutter_test.dart';
++import '../../lib/steaddesk/cases/case_store.dart';
++
++void main() {
++  late Directory dir;
++  late File target;
++  late DateTime now;
++  late int resets;
++  late LocalCaseStore store;
++  LocalCaseStore open() => LocalCaseStore(
++      file: () async => target, clock: () => now, onCorrupt: () => resets++);
++
++  String id(int n) =>
++      '00000000-0000-4000-8000-${n.toString().padLeft(12, '0')}';
++  CaseRecord session(int n) => {
++        'id': id(n),
++        'device_id': 'demo-device-$n',
++        'display_name': 'Demo Station $n',
++        'started_at':
++            now.subtract(const Duration(minutes: 3)).toIso8601String(),
++        'ended_at': now.toIso8601String(),
++        'note': 'session note',
++      };
++  Future<List<dynamic>> rows(String account) async =>
++      jsonDecode(await target.readAsString())['accounts'][account] as List;
++  setUp(() async {
++    dir = await Directory.systemTemp.createTemp('sd-case-store-');
++    target = File('${dir.path}/$caseStoreFileName');
++    now = DateTime.utc(2026, 1, 1, 12);
++    resets = 0;
++    store = open();
++  });
++  tearDown(() => dir.delete(recursive: true));
++
++  test(
++      'overlapping writers across instances preserve isolated draft IDs and retries',
++      () async {
++    final jobs = [
++      for (var n = 0; n < 15; n++)
++        open().addDraft(n.isEven ? 'demo-a' : 'demo-b', session(n)),
++    ];
++    expect(await Future.wait(jobs), everyElement(isTrue));
++    expect(await open().addDraft('demo-a', session(0)), isFalse);
++    final pending = await open().pending('demo-a');
++    expect(pending, hasLength(8));
++    expect(await open().pending('demo-b'), hasLength(7));
++    final row = pending.singleWhere((r) => r['id'] == id(0));
++    expect(row, containsPair('display_name', 'Demo Station 0'));
++    expect(row, containsPair('merchant_code', null));
++    expect(row, containsPair('category', null));
++    expect(row, containsPair('result', null));
++    expect(row, containsPair('status', 'draft'));
++    await expectLater(
++        store.append('demo-b', id(0), 'foreign note'), throwsStateError);
++    expect(await store.pending(''), isEmpty);
++  });
++
++  test(
++      'follow-up and transfer must be complete; a successful edit clears stale fields',
++      () async {
++    await store.addDraft('demo', session(1));
++    Future<void> save(String? category, String? result,
++            {Map<String, dynamic>? follow, String? to}) =>
++        store.save('demo', id(1),
++            category: category,
++            result: result,
++            followUp: follow,
++            transferredTo: to,
++            note: 'revised');
++    await expectLater(save(null, null), throwsFormatException);
++    await expectLater(save('other', 'unresolved'), throwsFormatException);
++    await expectLater(
++        save('other', 'onsite', follow: {'owner': 'demo', 'due': '2026-02-30'}),
++        throwsFormatException);
++    await expectLater(
++        save('other', 'transferred', to: ' '), throwsFormatException);
++    expect((await store.pending('demo')).single['note'], 'session note');
++    const follow = {'owner': 'demo', 'due': '2026-01-02'};
++    await save('network', 'unresolved', follow: follow);
++    expect((await rows('demo')).single['follow_up'], follow);
++    await save('printer', 'transferred', to: 'other-demo');
++    final row = (await rows('demo')).single;
++    expect(row['follow_up'], isNull);
++    expect(row['transferred_to'], 'other-demo');
++    expect(row['note'], 'revised');
++    expect(await store.pending('demo'), isEmpty);
++    expect(await open().addDraft('demo', session(1)), isFalse);
++  });
++
++  test(
++      'store rechecks the 24-hour boundary and only appends to the original note',
++      () async {
++    await store.addDraft('demo', session(2));
++    now = now.add(const Duration(hours: 24));
++    expect(await store.isAppendOnly('demo', id(2)), isFalse);
++    await store.defer('demo', id(2),
++        note: 'original', expectedAppendOnly: false);
++    now = now.add(const Duration(microseconds: 1));
++    expect(await store.isAppendOnly('demo', id(2)), isTrue);
++    await expectLater(
++        store.save('demo', id(2),
++            category: 'printer',
++            result: 'resolved',
++            note: 'stale replacement',
++            expectedAppendOnly: false),
++        throwsA(isA<CaseEditWindowExpired>()));
++    expect((await store.pending('demo')).single['note'], 'original');
++    await store.defer('demo', id(2),
++        note: 'next shift', expectedAppendOnly: true);
++    await store.save('demo', id(2),
++        category: 'printer',
++        result: 'resolved',
++        note: 'verified',
++        expectedAppendOnly: true);
++    await expectLater(
++        store.save('demo', id(2),
++            category: 'menu', result: 'not_needed', note: 'rewrite'),
++        throwsStateError);
++    await store.append('demo', id(2), 'customer confirmed');
++    final row = (await rows('demo')).single;
++    expect(row['note'], 'original');
++    expect(row['category'], 'printer');
++    expect(row['appends'], [
++      for (final text in ['next shift', 'verified', 'customer confirmed'])
++        {'at': now.toIso8601String(), 'by': 'demo', 'text': text}
++    ]);
++    expect(await open().pending('demo'), isEmpty);
++  });
++
++  test('corrupt bytes backed up and one reader reports the reset', () async {
++    const broken = [0xff, 0xfe];
++    await target.writeAsBytes(broken);
++    await Future.wait([open().pending('demo'), open().pending('demo')]);
++    expect(resets, 1);
++    final backups =
++        await dir.list().where((f) => f.path.contains('.corrupt-')).toList();
++    expect(await File(backups.single.path).readAsBytes(), broken);
++    expect(jsonDecode(await target.readAsString()),
++        {'version': 1, 'accounts': {}});
++    expect(await store.addDraft('demo', session(0)), isTrue);
++  });
++
++  test(
++      '2000-record cap evicts oldest completed cases, preserving drafts and other accounts',
++      () async {
++    await store.addDraft('demo', session(0));
++    await store.addDraft('other-agent', session(0));
++    final initial = jsonDecode(await target.readAsString());
++    final template = initial['accounts']['demo'].single;
++    initial['accounts']['demo'] = [
++      template,
++      for (var n = 1999; n >= 1; n--)
++        {
++          ...template,
++          'id': id(n),
++          'status': 'saved',
++          'category': 'menu',
++          'result': 'resolved',
++          'created_at': now.add(Duration(seconds: n)).toIso8601String(),
++        }
++    ];
++    await target.writeAsString(jsonEncode(initial));
++    await store.addDraft('demo', session(2000));
++    final retained = await rows('demo');
++    expect(retained, hasLength(2000));
++    expect(retained.map((r) => r['id']), isNot(contains(id(1))));
++    expect((await store.pending('demo')).map((r) => r['id']),
++        unorderedEquals([id(0), id(2000)]));
++    expect(await store.pending('other-agent'), hasLength(1));
++    expect(resets, 0);
++  });
++}

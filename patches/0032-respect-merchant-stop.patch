@@ -1,0 +1,1253 @@
+diff --git a/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/BootReceiver.kt b/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/BootReceiver.kt
+index 9f8ded7..f42bb30 100644
+--- a/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/BootReceiver.kt
++++ b/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/BootReceiver.kt
+@@ -29,6 +29,7 @@ class BootReceiver : BroadcastReceiver() {
+ 
+     companion object {
+         @JvmStatic fun resumeService(context: Context): Boolean {
++            if (MerchantRecovery.userPaused(context)) return false
+             if (!XXPermissions.isGranted(context, REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, SYSTEM_ALERT_WINDOW)) {
+                 Log.d("tagBootReceiver", context.merchantText(R.string.recovery_permissions) { "Recovery permissions missing" })
+                 return false
+diff --git a/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MainActivity.kt b/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MainActivity.kt
+index 9ce5eb7..c10f952 100644
+--- a/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MainActivity.kt
++++ b/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MainActivity.kt
+@@ -54,6 +54,22 @@ class MainActivity : FlutterActivity() {
+     private val channelTag = "mChannel"
+     private val logTag = "mMainActivity"
+     private var mainService: MainService? = null
++    private var serviceBound = false
++
++    private fun bindMainService() {
++        if (!serviceBound && !MerchantRecovery.userPaused(this)) {
++            serviceBound = bindService(Intent(this, MainService::class.java), serviceConnection, Context.BIND_AUTO_CREATE)
++        }
++    }
++
++    private fun unbindMainService() {
++        if (serviceBound) {
++            unbindService(serviceConnection)
++            serviceBound = false
++        }
++        mainService = null
++    }
++
+     private sealed class PendingPicker {
+         data class ImportFiles(val result: MethodChannel.Result) : PendingPicker()
+         data class ExportFile(val source: File, val result: MethodChannel.Result) : PendingPicker()
+@@ -78,9 +94,7 @@ class MainActivity : FlutterActivity() {
+     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
+         super.configureFlutterEngine(flutterEngine)
+         if (MainService.isReady) {
+-            Intent(activity, MainService::class.java).also {
+-                bindService(it, serviceConnection, Context.BIND_AUTO_CREATE)
+-            }
++            bindMainService()
+         }
+         flutterMethodChannel = MethodChannel(
+             flutterEngine.dartExecutor.binaryMessenger,
+@@ -243,9 +257,7 @@ class MainActivity : FlutterActivity() {
+         if (isFinishing) {
+             FFI.closeAllSessions()
+         }
+-        mainService?.let {
+-            unbindService(serviceConnection)
+-        }
++        unbindMainService()
+         super.onDestroy()
+     }
+ 
+@@ -267,12 +279,30 @@ class MainActivity : FlutterActivity() {
+             // make sure result will be invoked, otherwise flutter will await forever
+             when (call.method) {
+                 "merchant_set_language" -> result.success(MerchantLanguage.save(this, call.arguments as? String))
++                "merchant_remote_paused" -> result.success(MerchantRecovery.userPaused(this))
++                "merchant_set_remote_paused" -> {
++                    val paused = call.arguments as? Boolean
++                    if (!BuildConfig.MERCHANT_EDITION || paused == null) {
++                        result.success(false)
++                        return@setMethodCallHandler
++                    }
++                    val saved = MerchantRecovery.setUserPaused(this, paused)
++                    if (paused) {
++                        MainService.runningInstance?.destroy()
++                        unbindMainService()
++                        stopService(Intent(this, MainService::class.java))
++                    }
++                    result.success(saved)
++                }
+                 "init_service" -> {
+-                    Intent(activity, MainService::class.java).also {
+-                        bindService(it, serviceConnection, Context.BIND_AUTO_CREATE)
++                    if (MerchantRecovery.userPaused(this)) {
++                        result.success(false)
++                        return@setMethodCallHandler
+                     }
++                    bindMainService()
++                    if (BuildConfig.MERCHANT_EDITION) FFI.startService()
+                     if (MainService.isReady) {
+-                        result.success(false)
++                        result.success(BuildConfig.MERCHANT_EDITION)
+                         return@setMethodCallHandler
+                     }
+                     requestMediaProjection()
+@@ -986,7 +1016,7 @@ class MainActivity : FlutterActivity() {
+     override fun onStop() {
+         super.onStop()
+         val disableFloatingWindow = FFI.getLocalOption("disable-floating-window") == "Y"
+-        if (!disableFloatingWindow && MainService.isReady) {
++        if (!disableFloatingWindow && MainService.isReady && !MerchantRecovery.userPaused(this)) {
+             startService(Intent(this, FloatingWindowService::class.java))
+         }
+     }
+diff --git a/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MainService.kt b/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MainService.kt
+index 450e9fe..773e76a 100644
+--- a/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MainService.kt
++++ b/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MainService.kt
+@@ -98,6 +98,8 @@ class MainService : Service() {
+     fun rustGetByName(name: String): String {
+         return when (name) {
+             "steaddesk_self_heal_paused" -> MerchantRecovery.paused()
++            "steaddesk_peer_user_stopped" -> MerchantRecovery.peerUserStopped()
++            "steaddesk_remote_paused" -> MerchantRecovery.userPaused(this).toString()
+             "steaddesk_file_scope" -> JSONObject().apply {
+                 put("storage", Environment.getExternalStorageDirectory().absolutePath)
+                 put("authorized", Build.VERSION.SDK_INT >= Build.VERSION_CODES.R &&
+@@ -200,6 +202,8 @@ class MainService : Service() {
+     private val wakeLock: PowerManager.WakeLock by lazy { powerManager.newWakeLock(PowerManager.ACQUIRE_CAUSES_WAKEUP or PowerManager.SCREEN_BRIGHT_WAKE_LOCK, "rustdesk:wakelock")}
+ 
+     companion object {
++        var runningInstance: MainService? = null
++            private set
+         private var _isReady = false // media permission ready status
+         private var _isStart = false // screen capture start status
+         private var _isAudioStart = false // audio capture start status
+@@ -261,6 +265,11 @@ class MainService : Service() {
+     override fun onCreate() {
+         super.onCreate()
+         Log.d(logTag,"MainService onCreate, sdk int:${Build.VERSION.SDK_INT} reuseVirtualDisplay:$reuseVirtualDisplay")
++        if (!MerchantRecovery.prepareServer(this)) {
++            stopSelf()
++            return
++        }
++        runningInstance = this
+         FFI.init(this)
+         HandlerThread("Service", Process.THREAD_PRIORITY_BACKGROUND).apply {
+             start()
+@@ -287,6 +296,7 @@ class MainService : Service() {
+         if (BuildConfig.MERCHANT_EDITION) {
+             MerchantLanguage.preferences(this).unregisterOnSharedPreferenceChangeListener(languageListener)
+         }
++        if (runningInstance === this) runningInstance = null
+         MerchantRecovery.stop(this)
+         checkMediaPermission()
+         stopService(Intent(this, FloatingWindowService::class.java))
+@@ -359,7 +369,8 @@ class MainService : Service() {
+         }
+     }
+ 
+-    override fun onBind(intent: Intent): IBinder {
++    override fun onBind(intent: Intent): IBinder? {
++        if (MerchantRecovery.userPaused(this)) return null
+         Log.d(logTag, "service onBind")
+         return binder
+     }
+@@ -375,6 +386,10 @@ class MainService : Service() {
+     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+         Log.d("whichService", "this service: ${Thread.currentThread()}")
+         super.onStartCommand(intent, flags, startId)
++        if (MerchantRecovery.userPaused(this)) {
++            stopSelf(startId)
++            return START_NOT_STICKY
++        }
+         if (intent?.action == ACT_INIT_MEDIA_PROJECTION_AND_SERVICE) {
+             if (intent.getBooleanExtra(EXT_INIT_FROM_BOOT, false)) {
+                 FFI.startService()
+@@ -400,6 +415,7 @@ class MainService : Service() {
+     }
+ 
+     private fun requestMediaProjection(recovery: Boolean = false) {
++        if (MerchantRecovery.userPaused(this)) return
+         val intent = Intent(this, PermissionRequestTransparentActivity::class.java).apply {
+             action = ACT_REQUEST_MEDIA_PROJECTION
+             flags = Intent.FLAG_ACTIVITY_NEW_TASK
+@@ -601,6 +617,7 @@ class MainService : Service() {
+ 
+     @Synchronized
+     private fun startCapture(inVoiceCall: Boolean): Boolean {
++        if (MerchantRecovery.userPaused(this)) return false
+         if (isStart) {
+             return true
+         }
+diff --git a/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/PermissionRequestTransparentActivity.kt b/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/PermissionRequestTransparentActivity.kt
+index 0464962..60f8f7e 100644
+--- a/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/PermissionRequestTransparentActivity.kt
++++ b/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/PermissionRequestTransparentActivity.kt
+@@ -16,6 +16,11 @@ class PermissionRequestTransparentActivity: Activity() {
+         super.onCreate(savedInstanceState)
+         Log.d(logTag, "onCreate PermissionRequestTransparentActivity: intent.action: ${intent.action}")
+ 
++        if (MerchantRecovery.userPaused(this)) {
++            setResult(RES_FAILED)
++            finish()
++            return
++        }
+         when (intent.action) {
+             ACT_REQUEST_MEDIA_PROJECTION -> {
+                 val mediaProjectionManager =
+@@ -36,7 +41,7 @@ class PermissionRequestTransparentActivity: Activity() {
+     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+         super.onActivityResult(requestCode, resultCode, data)
+         if (requestCode == REQ_REQUEST_MEDIA_PROJECTION) {
+-            if (resultCode == RESULT_OK && data != null) {
++            if (!MerchantRecovery.userPaused(this) && resultCode == RESULT_OK && data != null) {
+                 launchService(data)
+             } else {
+                 val resultReceiver =
+diff --git a/flutter/android/app/src/steaddeskMerchant/java/com/carriez/flutter_hbb/AgentWakeService.java b/flutter/android/app/src/steaddeskMerchant/java/com/carriez/flutter_hbb/AgentWakeService.java
+index 3cd2736..32e6a4a 100644
+--- a/flutter/android/app/src/steaddeskMerchant/java/com/carriez/flutter_hbb/AgentWakeService.java
++++ b/flutter/android/app/src/steaddeskMerchant/java/com/carriez/flutter_hbb/AgentWakeService.java
+@@ -20,7 +20,7 @@ public final class AgentWakeService extends Service {
+                 throw new SecurityException(MerchantLanguage.text(AgentWakeService.this, R.string.recovery_uid));
+             long identity = Binder.clearCallingIdentity();
+             try {
+-                int state = MerchantRecovery.status();
++                int state = MerchantRecovery.status(AgentWakeService.this);
+                 if (code == FIRST_CALL_TRANSACTION && state == 0 && !MerchantRecovery.restore(AgentWakeService.this))
+                     throw new IllegalStateException(MerchantLanguage.text(AgentWakeService.this, R.string.recovery_unavailable));
+                 if (reply != null) {
+diff --git a/flutter/android/app/src/steaddeskMerchant/java/com/carriez/flutter_hbb/MerchantPause.java b/flutter/android/app/src/steaddeskMerchant/java/com/carriez/flutter_hbb/MerchantPause.java
+new file mode 100644
+index 0000000..5c2aa92
+--- /dev/null
++++ b/flutter/android/app/src/steaddeskMerchant/java/com/carriez/flutter_hbb/MerchantPause.java
+@@ -0,0 +1,44 @@
++package com.carriez.flutter_hbb;
++
++import android.content.ComponentName;
++import android.content.Context;
++import android.content.pm.PackageManager;
++import android.os.Build;
++
++/** PackageManager persists the merchant's choice across process death, updates and reboot. */
++public final class MerchantPause {
++    private static ComponentName marker(Context context) {
++        return new ComponentName(context, MerchantRemotePaused.class);
++    }
++
++    public static boolean isPaused(Context context) {
++        PackageManager pm = context.getPackageManager();
++        ComponentName component = marker(context);
++        try {
++            pm.getReceiverInfo(component, PackageManager.MATCH_DISABLED_COMPONENTS);
++            int setting = pm.getComponentEnabledSetting(component);
++            return setting != PackageManager.COMPONENT_ENABLED_STATE_DEFAULT
++                    && setting != PackageManager.COMPONENT_ENABLED_STATE_DISABLED;
++        } catch (PackageManager.NameNotFoundException | RuntimeException unavailable) {
++            return true;
++        }
++    }
++
++    public static boolean setPaused(Context context, boolean paused) {
++        try {
++            PackageManager pm = context.getPackageManager();
++            ComponentName component = marker(context);
++            pm.getReceiverInfo(component, PackageManager.MATCH_DISABLED_COMPONENTS);
++            int state = paused ? PackageManager.COMPONENT_ENABLED_STATE_ENABLED
++                    : PackageManager.COMPONENT_ENABLED_STATE_DISABLED;
++            int flags = PackageManager.DONT_KILL_APP;
++            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) flags |= PackageManager.SYNCHRONOUS;
++            pm.setComponentEnabledSetting(component, state, flags);
++            return pm.getComponentEnabledSetting(component) == state;
++        } catch (PackageManager.NameNotFoundException | RuntimeException unavailable) {
++            return false;
++        }
++    }
++
++    private MerchantPause() {}
++}
+diff --git a/flutter/android/app/src/steaddeskMerchant/java/com/carriez/flutter_hbb/MerchantRecovery.java b/flutter/android/app/src/steaddeskMerchant/java/com/carriez/flutter_hbb/MerchantRecovery.java
+index ecfebb9..ee564ff 100644
+--- a/flutter/android/app/src/steaddeskMerchant/java/com/carriez/flutter_hbb/MerchantRecovery.java
++++ b/flutter/android/app/src/steaddeskMerchant/java/com/carriez/flutter_hbb/MerchantRecovery.java
+@@ -13,8 +13,24 @@ public final class MerchantRecovery {
+     static { System.loadLibrary("rustdesk"); }
+     private static native int sessionState();
+ 
++    private static native void setNativePaused(boolean paused);
++
++    public static boolean userPaused(Context context) { return MerchantPause.isPaused(context); }
++
++    public static boolean setUserPaused(Context context, boolean paused) {
++        boolean saved = MerchantPause.setPaused(context, paused);
++        if (paused || saved) setNativePaused(paused);
++        return saved;
++    }
++
++    public static boolean prepareServer(Context context) {
++        if (userPaused(context)) return false;
++        setNativePaused(false);
++        return true;
++    }
++
+     public static synchronized void start(MainService service) {
+-        if (watchdog != null) return;
++        if (userPaused(service) || watchdog != null) return;
+         watchdog = new PeerWatchdog(service, new ComponentName("com.steaddesk.agent",
+                 "com.meshcentral.agent.MerchantWakeService"), "com.steaddesk.agent.IWakeConnection");
+         publication = PeerWatchdog.publish(service, AgentWakeService.class);
+@@ -29,18 +45,23 @@ public final class MerchantRecovery {
+         watchdog = null;
+     }
+ 
+-    static synchronized int status() {
++    static synchronized int status(Context context) {
++        if (userPaused(context)) return 4;
+         int session = sessionState();
+         return session == 0 ? (watchdog == null ? 0 : 1) : session;
+     }
+ 
+     static synchronized boolean restore(Context context) {
+-        return status() != 0 || BootReceiver.resumeService(context);
++        return status(context) != 0 || BootReceiver.resumeService(context);
+     }
+ 
+     public static synchronized String paused() {
+         return watchdog == null ? "" : Boolean.toString(watchdog.isPaused());
+     }
+ 
++    public static synchronized String peerUserStopped() {
++        return watchdog == null ? "" : Boolean.toString(watchdog.isPeerUserStopped());
++    }
++
+     private MerchantRecovery() {}
+ }
+diff --git a/flutter/android/app/src/steaddeskMerchant/java/com/carriez/flutter_hbb/MerchantRemotePaused.java b/flutter/android/app/src/steaddeskMerchant/java/com/carriez/flutter_hbb/MerchantRemotePaused.java
+new file mode 100644
+index 0000000..edb5f14
+--- /dev/null
++++ b/flutter/android/app/src/steaddeskMerchant/java/com/carriez/flutter_hbb/MerchantRemotePaused.java
+@@ -0,0 +1,10 @@
++package com.carriez.flutter_hbb;
++
++import android.content.BroadcastReceiver;
++import android.content.Context;
++import android.content.Intent;
++
++/** A private, filterless marker. Reading its enabled state never starts this process. */
++public final class MerchantRemotePaused extends BroadcastReceiver {
++    @Override public void onReceive(Context context, Intent intent) {}
++}
+diff --git a/flutter/android/app/src/steaddeskMerchant/java/com/steaddesk/recovery/PeerWatchdog.java b/flutter/android/app/src/steaddeskMerchant/java/com/steaddesk/recovery/PeerWatchdog.java
+index c57feba..ae308d3 100644
+--- a/flutter/android/app/src/steaddeskMerchant/java/com/steaddesk/recovery/PeerWatchdog.java
++++ b/flutter/android/app/src/steaddeskMerchant/java/com/steaddesk/recovery/PeerWatchdog.java
+@@ -1,13 +1,17 @@
+ package com.steaddesk.recovery;
+ 
++import android.app.ActivityManager;
++import android.app.ApplicationExitInfo;
+ import android.content.ComponentName;
+ import android.content.Context;
+ import android.content.Intent;
+ import android.content.RestrictionsManager;
+ import android.content.ServiceConnection;
+ import android.content.SharedPreferences;
++import android.content.pm.ApplicationInfo;
+ import android.content.pm.PackageManager;
+ import android.content.pm.ServiceInfo;
++import android.os.Build;
+ import android.os.Bundle;
+ import android.os.Handler;
+ import android.os.HandlerThread;
+@@ -40,6 +44,8 @@ public final class PeerWatchdog {
+     private static final long PERIOD = 300_000L, HOUR = 3_600_000L;
+     private static final int MAX_WAKES = 3;
+     private static final int WAKE = IBinder.FIRST_CALL_TRANSACTION, STATUS = WAKE + 1;
++    private final ComponentName pauseMarker = new ComponentName(
++            "com.steaddesk.remote", "com.carriez.flutter_hbb.MerchantRemotePaused");
+     private final Context app;
+     private final ComponentName peer;
+     private final String descriptor;
+@@ -48,6 +54,7 @@ public final class PeerWatchdog {
+     private Handler worker;
+     private Probe active;
+     private volatile boolean running;
++    private volatile boolean lastPeerStopped, lastRemotePaused;
+ 
+     public PeerWatchdog(Context context, ComponentName peer, String descriptor) {
+         app = context.getApplicationContext();
+@@ -85,7 +92,10 @@ public final class PeerWatchdog {
+         thread.start();
+         worker = new Handler(thread.getLooper());
+         running = true;
+-        worker.post(this::checkNow);
++        worker.post(() -> {
++            recordPreviousExit();
++            checkNow();
++        });
+     }
+ 
+     public void stop() {
+@@ -106,6 +116,79 @@ public final class PeerWatchdog {
+         return PreferenceManager.getDefaultSharedPreferences(app).getBoolean(key, true);
+     }
+ 
++    private boolean readPeerStopped() throws PackageManager.NameNotFoundException {
++        ApplicationInfo target = app.getPackageManager().getApplicationInfo(peer.getPackageName(), 0);
++        boolean stopped = (target.flags & ApplicationInfo.FLAG_STOPPED) != 0;
++        lastPeerStopped = stopped;
++        return stopped;
++    }
++
++    private boolean readRemotePaused() throws PackageManager.NameNotFoundException {
++        PackageManager pm = app.getPackageManager();
++        // A missing marker (including an older merchant build) must never authorize a wake.
++        // ComponentInfo.enabled is the manifest default, not the user's runtime override.
++        boolean manifestDefault = pm.getReceiverInfo(pauseMarker, PackageManager.GET_DISABLED_COMPONENTS).enabled;
++        int setting = pm.getComponentEnabledSetting(pauseMarker);
++        boolean paused = markerPaused(setting, manifestDefault);
++        lastRemotePaused = paused;
++        return paused;
++    }
++
++    static boolean markerPaused(int setting, boolean manifestDefault) {
++        switch (setting) {
++            case PackageManager.COMPONENT_ENABLED_STATE_DEFAULT: return manifestDefault;
++            case PackageManager.COMPONENT_ENABLED_STATE_ENABLED: return true;
++            case PackageManager.COMPONENT_ENABLED_STATE_DISABLED: return false;
++            default: throw new IllegalStateException("Unknown component setting");
++        }
++    }
++
++    public boolean isPeerUserStopped() {
++        try { return readPeerStopped(); }
++        catch (PackageManager.NameNotFoundException | RuntimeException unavailable) { return lastPeerStopped; }
++    }
++
++    public boolean isRemotePaused() {
++        try { return readRemotePaused(); }
++        catch (PackageManager.NameNotFoundException | RuntimeException unavailable) { return lastRemotePaused; }
++    }
++
++    // Read both decisions from the package manager without entering either target process.
++    private boolean allowed() {
++        if (!running) return false;
++        String reason;
++        try {
++            if (readPeerStopped()) reason = "user_force_stopped";
++            else if (readRemotePaused()) reason = "user_paused";
++            else return true;
++        } catch (PackageManager.NameNotFoundException | RuntimeException unavailable) {
++            reason = "stop_state_unavailable";
++        }
++        log("check", reason, "skipped");
++        return false;
++    }
++
++    private void recordPreviousExit() {
++        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return;
++        try {
++            ActivityManager manager = app.getSystemService(ActivityManager.class);
++            if (manager == null) return;
++            List<ApplicationExitInfo> exits = manager.getHistoricalProcessExitReasons(app.getPackageName(), 0, 1);
++            if (exits.isEmpty()) return;
++            ApplicationExitInfo exit = exits.get(0);
++            String key = exit.getTimestamp() + "/" + exit.getPid() + "/" + exit.getReason();
++            synchronized (PeerWatchdog.class) {
++                if (key.equals(budget.getString("last_logged_exit", ""))) return;
++                if (log("check", "previous_process_exit", "recorded", exit.getReason(),
++                        exit.getTimestamp(), exit.getPid())) {
++                    budget.edit().putString("last_logged_exit", key).commit();
++                }
++            }
++        } catch (RuntimeException unavailable) {
++            log("check", "previous_process_exit", "unavailable");
++        }
++    }
++
+     // Serialize reservations across overlapping service instances as well as Binder callbacks.
+     // A clock rollback conservatively retains future timestamps. Never overwrite corrupt history.
+     static List<Long> recent(String history, long now) {
+@@ -126,36 +209,41 @@ public final class PeerWatchdog {
+         }
+     }
+ 
+-    private boolean reserve(String cause) {
++    private Long reserve(String cause) {
+         if (!running || !enabled()) {
+             log("result", cause, "disabled");
+-            return false;
++            return null;
+         }
+         synchronized (PeerWatchdog.class) {
++            if (!allowed()) return null;
+             long now = System.currentTimeMillis();
+             try {
+                 List<Long> history = recent(budget.getString("attempts", ""), now);
+                 if (history.size() >= MAX_WAKES) {
+                     log("result", cause, "rate_limited");
+-                    return false;
++                    return null;
+                 }
+                 history.add(now);
+-                StringBuilder encoded = new StringBuilder();
+-                for (long value : history) {
+-                    if (encoded.length() > 0) encoded.append(',');
+-                    encoded.append(value);
+-                }
+-                if (!budget.edit().putString("attempts", encoded.toString()).commit()) {
++                if (!budget.edit().putString("attempts", android.text.TextUtils.join(",", history)).commit()) {
+                     log("result", cause, "budget_unavailable");
+-                    return false;
++                    return null;
+                 }
+             } catch (RuntimeException invalid) {
+                 log("result", cause, "budget_unavailable");
+-                return false;
++                return null;
++            }
++            return now;
++        }
++    }
++
++    // If a stop lands between budget persistence and the OS call, cancel only this reservation.
++    private void cancelReservation(long stamp) {
++        synchronized (PeerWatchdog.class) {
++            List<Long> entries = recent(budget.getString("attempts", ""), System.currentTimeMillis());
++            if (entries.remove(Long.valueOf(stamp))) {
++                budget.edit().putString("attempts", android.text.TextUtils.join(",", entries)).commit();
+             }
+         }
+-        log("wake", cause, "reserved");
+-        return true;
+     }
+ 
+     private static String wakePermission(String packageName) {
+@@ -166,7 +254,7 @@ public final class PeerWatchdog {
+     void checkNow() {
+         if (!running) return;
+         worker.postDelayed(this::checkNow, PERIOD);
+-        if (active != null) return;
++        if (active != null || !allowed()) return;
+         try {
+             PackageManager packages = app.getPackageManager();
+             ServiceInfo info = packages.getServiceInfo(peer, 0);
+@@ -182,21 +270,29 @@ public final class PeerWatchdog {
+             log("check", "peer_endpoint", "unavailable");
+             return;
+         }
+-        new Probe(false).bind();
++        new Probe(null).bind();
+     }
+ 
+     private final class Probe implements ServiceConnection {
++        final String wakeCause;
+         final boolean charged;
+         boolean needsUnbind;
+         final Runnable timeout = () -> unavailable("timeout");
+-        Probe(boolean charged) { this.charged = charged; }
++        Probe(String wakeCause) {
++            this.wakeCause = wakeCause;
++            this.charged = wakeCause != null;
++        }
+ 
+         void bind() {
++            if (!allowed()) return;
++            if (charged && !prepareWake(wakeCause)) return;
+             active = this;
+             try {
+                 needsUnbind = true;
+-                boolean bound = app.bindService(new Intent().setComponent(peer), this,
++                boolean bound = app.bindService(new Intent().setComponent(peer)
++                        .addFlags(Intent.FLAG_EXCLUDE_STOPPED_PACKAGES), this,
+                         charged ? Context.BIND_AUTO_CREATE : 0);
++                if (charged) log("wake", wakeCause, "reserved");
+                 if (!bound) { unavailable("not_bound"); return; }
+                 worker.postDelayed(timeout, charged ? 10_000L : 2_000L);
+             } catch (SecurityException denied) {
+@@ -226,25 +322,43 @@ public final class PeerWatchdog {
+         void unavailable(String reason) {
+             if (active != this) return;
+             close();
++            if (!allowed()) return;
+             log(charged ? "result" : "check", reason, "unavailable");
+             // AUTO_CREATE can start the target process, so it consumes a slot before binding.
+-            if (!charged && reserve(reason)) new Probe(true).bind();
++            if (!charged) new Probe(reason).bind();
++        }
++
++        boolean prepareWake(String cause) {
++            Long stamp = reserve(cause);
++            if (stamp == null) return false;
++            if (!allowed() || !enabled()) {
++                cancelReservation(stamp);
++                return false;
++            }
++            return true;
+         }
+ 
+         void inspect(IBinder binder) {
+             if (!running || active != this) return;
+             worker.removeCallbacks(timeout);
+             try {
++                if (!allowed()) return;
+                 int state = transact(binder, STATUS);
++                if (state == 4) {
++                    lastRemotePaused = true;
++                    log("check", "user_paused", "skipped");
++                    return;
++                }
+                 if (state != 0) {
+                     log(charged ? "result" : "check", "peer_status",
+                             state == 2 ? "in_session" : state == 1 ? "healthy" : "unknown");
+                     return;
+                 }
+-                if (!charged && !reserve("service_stopped")) return;
+-                if (!running || !enabled()) { log("result", "switch", "disabled"); return; }
++                if (!charged && !prepareWake("service_stopped")) return;
++                if (charged && (!allowed() || !enabled())) return;
+                 // The peer independently rechecks its live sessions when it receives WAKE.
+                 transact(binder, WAKE);
++                if (!charged) log("wake", "service_stopped", "reserved");
+                 log("result", "wake_request", "acknowledged");
+             } catch (RemoteException | RuntimeException failure) {
+                 log(charged ? "result" : "check", "transaction", "failed");
+@@ -276,6 +390,12 @@ public final class PeerWatchdog {
+     // These identifiers remain stable for JSONL readers. Only the additional description is localized.
+     private static int label(String code) {
+         switch (code) {
++            case "user_force_stopped": return R.string.recovery_user_force_stopped;
++            case "user_paused": return R.string.recovery_user_paused;
++            case "stop_state_unavailable": return R.string.recovery_stop_state_unavailable;
++            case "skipped": return R.string.recovery_skipped;
++            case "previous_process_exit": return R.string.recovery_previous_process_exit;
++            case "recorded": return R.string.recovery_recorded;
+             case "check": return R.string.recovery_check;
+             case "wake": return R.string.recovery_wake;
+             case "result": return R.string.recovery_result;
+@@ -309,6 +429,10 @@ public final class PeerWatchdog {
+ 
+     /** Atomic replacement leaves a complete 500-line JSONL file after process death. */
+     private void log(String action, String reason, String result) {
++        log(action, reason, result, -1, 0, 0);
++    }
++
++    private boolean log(String action, String reason, String result, int exitReason, long exitTime, int exitPid) {
+         synchronized (PeerWatchdog.class) {
+             AtomicFile file = new AtomicFile(new File(app.getFilesDir(), "self-heal.jsonl"));
+             FileOutputStream output = null;
+@@ -324,14 +448,21 @@ public final class PeerWatchdog {
+                 String description = MerchantLanguage.text(app, label(action)) + " · "
+                         + MerchantLanguage.text(app, label(reason)) + " · "
+                         + MerchantLanguage.text(app, label(result));
+-                lines.add(new JSONObject().put("time", utc.format(new Date())).put("action", action)
+-                        .put("reason", reason).put("result", result).put("description", description).toString());
++                JSONObject entry = new JSONObject().put("time", utc.format(new Date())).put("action", action)
++                        .put("reason", reason).put("result", result);
++                entry.put("description", description);
++                if (exitReason >= 0) {
++                    entry.put("exitReason", exitReason).put("exitTimestamp", exitTime).put("exitPid", exitPid);
++                }
++                lines.add(entry.toString());
+                 output = file.startWrite();
+-                for (String entry : lines) output.write((entry + "\n").getBytes(StandardCharsets.UTF_8));
++                for (String line : lines) output.write((line + "\n").getBytes(StandardCharsets.UTF_8));
+                 file.finishWrite(output);
++                return true;
+             } catch (Exception failure) {
+                 if (output != null) file.failWrite(output);
+                 Log.w("PeerWatchdog", MerchantLanguage.text(app, R.string.recovery_log_unavailable));
++                return false;
+             }
+         }
+     }
+diff --git a/flutter/android/app/src/steaddeskMerchant/res/values-es/recovery_stop.xml b/flutter/android/app/src/steaddeskMerchant/res/values-es/recovery_stop.xml
+new file mode 100644
+index 0000000..53caa68
+--- /dev/null
++++ b/flutter/android/app/src/steaddeskMerchant/res/values-es/recovery_stop.xml
+@@ -0,0 +1,8 @@
++<resources>
++    <string name="recovery_user_force_stopped">El comercio forzó la detención de la aplicación</string>
++    <string name="recovery_user_paused">El comercio pausó el soporte remoto</string>
++    <string name="recovery_stop_state_unavailable">No se pudo consultar el estado de detención</string>
++    <string name="recovery_skipped">Omitido</string>
++    <string name="recovery_previous_process_exit">Salida anterior del proceso</string>
++    <string name="recovery_recorded">Registrado</string>
++</resources>
+diff --git a/flutter/android/app/src/steaddeskMerchant/res/values-zh/recovery_stop.xml b/flutter/android/app/src/steaddeskMerchant/res/values-zh/recovery_stop.xml
+new file mode 100644
+index 0000000..af57733
+--- /dev/null
++++ b/flutter/android/app/src/steaddeskMerchant/res/values-zh/recovery_stop.xml
+@@ -0,0 +1,8 @@
++<resources>
++    <string name="recovery_user_force_stopped">商户已强行停止应用</string>
++    <string name="recovery_user_paused">商户已暂停远程支持</string>
++    <string name="recovery_stop_state_unavailable">无法读取停止状态</string>
++    <string name="recovery_skipped">已跳过</string>
++    <string name="recovery_previous_process_exit">上一次进程退出</string>
++    <string name="recovery_recorded">已记录</string>
++</resources>
+diff --git a/flutter/android/app/src/steaddeskMerchant/res/values/recovery_stop.xml b/flutter/android/app/src/steaddeskMerchant/res/values/recovery_stop.xml
+new file mode 100644
+index 0000000..3cdcb15
+--- /dev/null
++++ b/flutter/android/app/src/steaddeskMerchant/res/values/recovery_stop.xml
+@@ -0,0 +1,8 @@
++<resources>
++    <string name="recovery_user_force_stopped">Merchant force-stopped the app</string>
++    <string name="recovery_user_paused">Merchant paused remote support</string>
++    <string name="recovery_stop_state_unavailable">Stop status unavailable</string>
++    <string name="recovery_skipped">Skipped</string>
++    <string name="recovery_previous_process_exit">Previous process exit</string>
++    <string name="recovery_recorded">Recorded</string>
++</resources>
+diff --git a/flutter/android/app/src/steaddeskSupport/java/com/carriez/flutter_hbb/MerchantRecovery.java b/flutter/android/app/src/steaddeskSupport/java/com/carriez/flutter_hbb/MerchantRecovery.java
+index 528ca45..d5c488b 100644
+--- a/flutter/android/app/src/steaddeskSupport/java/com/carriez/flutter_hbb/MerchantRecovery.java
++++ b/flutter/android/app/src/steaddeskSupport/java/com/carriez/flutter_hbb/MerchantRecovery.java
+@@ -2,8 +2,13 @@ package com.carriez.flutter_hbb;
+ 
+ /** Shared MainService lifecycle hooks are inert in the support build. */
+ public final class MerchantRecovery {
++    public static boolean userPaused(android.content.Context context) { return false; }
++    public static boolean setUserPaused(android.content.Context context, boolean paused) { return false; }
++    public static boolean prepareServer(android.content.Context context) { return true; }
+     public static void start(MainService service) {}
+     public static void stop(MainService service) {}
+     public static String paused() { return ""; }
++    public static String peerUserStopped() { return ""; }
++
+     private MerchantRecovery() {}
+ }
+diff --git a/flutter/lib/models/server_model.dart b/flutter/lib/models/server_model.dart
+index aa28133..da03d79 100644
+--- a/flutter/lib/models/server_model.dart
++++ b/flutter/lib/models/server_model.dart
+@@ -434,15 +434,37 @@ class ServerModel with ChangeNotifier {
+     _isStart = true;
+     notifyListeners();
+     parent.target?.ffiModel.updateEventListener(parent.target!.sessionId, "");
+-    await parent.target?.invokeMethod("init_service");
+-    // ugly is here, because for desktop, below is useless
+-    await bind.mainStartService();
++    if (merchantEdition && isAndroid) {
++      // The native main thread serializes startup with the merchant's pause action.
++      if (await parent.target?.invokeMethod("init_service") != true) {
++        _isStart = false;
++        notifyListeners();
++        return;
++      }
++    } else {
++      await parent.target?.invokeMethod("init_service");
++      await bind.mainStartService();
++    }
+     updateClientState();
+     if (isAndroid) {
+       androidUpdatekeepScreenOn();
+     }
+   }
+ 
++  Future<bool> setMerchantRemotePaused(bool paused) async {
++    if (!merchantEdition || !isAndroid) return false;
++    final saved = await parent.target?.invokeMethod("merchant_set_remote_paused", paused);
++    if (paused) {
++      _isStart = false;
++      _mediaOk = false;
++      notifyListeners();
++      WakelockManager.disable(_wakelockKey);
++    } else if (saved == true) {
++      await startService();
++    }
++    return saved == true;
++  }
++
+   /// Stop the screen sharing service.
+   Future<void> stopService() async {
+     _isStart = false;
+diff --git a/flutter/lib/steaddesk/merchant_panel.dart b/flutter/lib/steaddesk/merchant_panel.dart
+index 51f4a85..a8f8b15 100644
+--- a/flutter/lib/steaddesk/merchant_panel.dart
++++ b/flutter/lib/steaddesk/merchant_panel.dart
+@@ -10,6 +10,7 @@ import '../desktop/pages/desktop_home_page.dart' show setPasswordDialog;
+ import '../models/platform_model.dart';
+ import '../models/server_model.dart';
+ import 'merchant_build.dart';
++import 'merchant_pause_button.dart';
+ import 'merchant_window_stub.dart'
+     if (dart.library.io) 'merchant_window_io.dart';
+ 
+@@ -37,6 +38,9 @@ class _MerchantPanelState extends State<MerchantPanel>
+   Timer? refresh;
+   bool? configured, notifications, battery;
+   bool busy = false;
++  bool? remotePaused;
++  bool changingPause = false;
++  int pauseRevision = 0;
+   String device = '', id = '';
+   String? caption;
+   String language = '';
+@@ -136,6 +140,14 @@ class _MerchantPanelState extends State<MerchantPanel>
+           changed();
+         }
+       } else if (merchantAndroid) {
++        final revision = pauseRevision;
++        final paused = await gFFI.invokeMethod('merchant_remote_paused');
++        if (mounted &&
++            !changingPause &&
++            revision == pauseRevision &&
++            remotePaused != paused) {
++          setState(() => remotePaused = paused);
++        }
+         await syncNativeLanguage();
+       }
+       final raw = await bind.mainGetMyId();
+@@ -206,6 +218,34 @@ class _MerchantPanelState extends State<MerchantPanel>
+     super.dispose();
+   }
+ 
++  Future<void> changePause(bool pause) async {
++    if (changingPause) return;
++    setState(() => changingPause = true);
++    try {
++      pauseRevision++;
++      final saved = await model.setMerchantRemotePaused(pause);
++      final paused = await gFFI.invokeMethod('merchant_remote_paused');
++      if (!mounted) return;
++      setState(() => remotePaused = paused);
++      if (!saved) {
++        showToast(translate('Could not change the remote support setting.'));
++      }
++    } catch (_) {
++      if (mounted) {
++        showToast(translate('Could not change the remote support setting.'));
++      }
++    } finally {
++      if (mounted) setState(() => changingPause = false);
++    }
++  }
++
++  Widget pauseButton() => MerchantPauseButton(
++        paused: remotePaused,
++        busy: changingPause,
++        label: translate,
++        change: changePause,
++      );
++
+   Widget setup() {
+     Widget permission(String label, bool? granted, VoidCallback? request) =>
+         ListTile(
+@@ -234,6 +274,7 @@ class _MerchantPanelState extends State<MerchantPanel>
+           battery,
+           () => AndroidPermissionManager.request(
+               kRequestIgnoreBatteryOptimizations)),
++      pauseButton(),
+       TextButton(
+         onPressed: () => setPasswordDialog(notEmptyCallback: () {
+           if (mounted) setState(() => configured = true);
+@@ -374,6 +415,17 @@ class _MerchantPanelState extends State<MerchantPanel>
+       ]);
+ 
+   Widget content() {
++    if (merchantAndroid && remotePaused == true) {
++      return ListView(padding: const EdgeInsets.all(24), children: [
++        brand(),
++        const SizedBox(height: 26),
++        Text(translate('Remote support is paused'),
++            style:
++                const TextStyle(color: _warning, fontWeight: FontWeight.w600)),
++        const SizedBox(height: 12),
++        pauseButton(),
++      ]);
++    }
+     if (merchantAndroid && configured != true) {
+       final page = configured == null
+           ? const Center(child: CircularProgressIndicator())
+@@ -418,7 +470,9 @@ class _MerchantPanelState extends State<MerchantPanel>
+           const SizedBox(height: 26),
+           status(),
+           const SizedBox(height: 22),
+-          identity()
++          identity(),
++          const SizedBox(height: 16),
++          pauseButton(),
+         ]);
+     return LayoutBuilder(builder: (context, size) {
+       if (size.maxWidth < 640)
+diff --git a/flutter/lib/steaddesk/merchant_pause_button.dart b/flutter/lib/steaddesk/merchant_pause_button.dart
+new file mode 100644
+index 0000000..fd2223a
+--- /dev/null
++++ b/flutter/lib/steaddesk/merchant_pause_button.dart
+@@ -0,0 +1,66 @@
++import 'package:flutter/material.dart';
++
++class MerchantPauseButton extends StatefulWidget {
++  final bool? paused;
++  final bool busy;
++  final String Function(String) label;
++  final Future<void> Function(bool) change;
++
++  const MerchantPauseButton({
++    super.key,
++    required this.paused,
++    required this.busy,
++    required this.label,
++    required this.change,
++  });
++
++  @override
++  State<MerchantPauseButton> createState() => _MerchantPauseButtonState();
++}
++
++class _MerchantPauseButtonState extends State<MerchantPauseButton> {
++  bool confirming = false;
++
++  Future<void> press() async {
++    if (confirming || widget.paused == null || widget.busy) return;
++    if (widget.paused == true) {
++      await widget.change(false);
++      return;
++    }
++    setState(() => confirming = true);
++    try {
++      final confirmed = await showDialog<bool>(
++        context: context,
++        builder: (context) => AlertDialog(
++          title: Text(widget.label('Pause remote support')),
++          content: Text(widget
++              .label('This will end remote support until you resume it.')),
++          actions: [
++            TextButton(
++              onPressed: () => Navigator.pop(context, false),
++              child: Text(widget.label('Cancel')),
++            ),
++            FilledButton(
++              onPressed: () => Navigator.pop(context, true),
++              child: Text(widget.label('Pause remote support')),
++            ),
++          ],
++        ),
++      );
++      if (mounted && confirmed == true && widget.paused == false) {
++        await widget.change(true);
++      }
++    } finally {
++      if (mounted) setState(() => confirming = false);
++    }
++  }
++
++  @override
++  Widget build(BuildContext context) => OutlinedButton(
++        onPressed:
++            confirming || widget.busy || widget.paused == null ? null : press,
++        child: Text(widget.label(widget.paused == true
++            ? 'Resume remote support'
++            : 'Pause remote support')),
++      );
++}
+diff --git a/flutter/test/steaddesk/merchant_pause_test.dart b/flutter/test/steaddesk/merchant_pause_test.dart
+new file mode 100644
+index 0000000..23258be
+--- /dev/null
++++ b/flutter/test/steaddesk/merchant_pause_test.dart
+@@ -0,0 +1,46 @@
++import 'package:flutter/material.dart';
++import 'package:flutter_test/flutter_test.dart';
++import 'package:flutter_hbb/steaddesk/merchant_pause_button.dart';
++
++void main() {
++  testWidgets('cancel, confirm pause, and explicitly resume', (tester) async {
++    final writes = <bool>[];
++    bool? paused;
++    final widget = MaterialApp(
++      home: Scaffold(body: StatefulBuilder(builder: (context, setState) {
++        return MerchantPauseButton(
++          paused: paused,
++          busy: false,
++          label: (s) => s,
++          change: (value) async {
++            writes.add(value);
++            setState(() => paused = value);
++          },
++        );
++      })),
++    );
++    await tester.pumpWidget(widget);
++    expect(tester.widget<OutlinedButton>(find.byType(OutlinedButton)).onPressed,
++        isNull);
++
++    paused = false;
++    await tester.pumpWidget(const SizedBox());
++    await tester.pumpWidget(widget);
++    await tester.tap(find.byType(OutlinedButton));
++    await tester.pumpAndSettle();
++    expect(writes, isEmpty);
++    await tester.tap(find.text('Cancel'));
++    await tester.pumpAndSettle();
++    expect(writes, isEmpty);
++
++    await tester.tap(find.byType(OutlinedButton));
++    await tester.pumpAndSettle();
++    await tester.tap(find.byType(FilledButton));
++    await tester.pumpAndSettle();
++    expect(writes, [true]);
++    expect(find.text('Resume remote support'), findsOneWidget);
++    await tester.tap(find.byType(OutlinedButton));
++    await tester.pumpAndSettle();
++    expect(writes, [true, false]);
++  });
++}
+diff --git a/src/flutter_ffi.rs b/src/flutter_ffi.rs
+index 8e87fd5..6a38995 100644
+--- a/src/flutter_ffi.rs
++++ b/src/flutter_ffi.rs
+@@ -3045,6 +3045,19 @@ pub mod server_side {
+         JNIEnv,
+     };
+ 
++    #[cfg(steaddesk_merchant)]
++    #[no_mangle]
++    pub extern "system" fn Java_com_carriez_flutter_1hbb_MerchantRecovery_setNativePaused(
++        _env: JNIEnv,
++        _class: JClass,
++        paused: jboolean,
++    ) {
++        crate::server::set_merchant_remote_paused(paused != 0);
++        if paused != 0 {
++            super::main_stop_service();
++        }
++    }
++
+     /// 2 = an authorized incoming session, 0 = idle, 3 = unknown. Never expose identities.
+     #[cfg(steaddesk_merchant)]
+     #[no_mangle]
+@@ -3081,6 +3094,19 @@ pub mod server_side {
+                 crate::read_custom_client(&custom_client_config);
+             }
+         }
++        // MainService can be recreated after a manual pause while the native
++        // mediator keeps running in this process. Restart registration through
++        // startService; create a thread only when no mediator is still alive.
++        #[cfg(steaddesk_merchant)]
++        {
++            static MEDIATOR: std::sync::Mutex<Option<std::thread::JoinHandle<()>>> =
++                std::sync::Mutex::new(None);
++            let mut mediator = MEDIATOR.lock().unwrap();
++            if mediator.as_ref().map_or(true, |thread| thread.is_finished()) {
++                *mediator = Some(std::thread::spawn(move || start_server(true)));
++            }
++        }
++        #[cfg(not(steaddesk_merchant))]
+         std::thread::spawn(move || start_server(true));
+     }
+ 
+diff --git a/src/hbbs_http/sync.rs b/src/hbbs_http/sync.rs
+index a1b5a6f..78e11f7 100644
+--- a/src/hbbs_http/sync.rs
++++ b/src/hbbs_http/sync.rs
+@@ -243,9 +243,15 @@ async fn start_hbbs_sync_async() {
+                 let modified_at = LocalConfig::get_option("strategy_timestamp").parse::<i64>().unwrap_or(0);
+                 v["modified_at"] = json!(modified_at);
+                 #[cfg(all(target_os = "android", steaddesk_merchant))]
+-                if let Ok(value) = scrap::android::call_main_service_get_by_name("steaddesk_self_heal_paused") {
+-                    if let Ok(paused) = value.parse::<bool>() {
+-                        v["selfHealPaused"] = json!(paused);
++                for (key, field) in [
++                    ("steaddesk_self_heal_paused", "selfHealPaused"),
++                    ("steaddesk_peer_user_stopped", "peerUserStopped"),
++                    ("steaddesk_remote_paused", "remotePaused"),
++                ] {
++                    if let Ok(value) = scrap::android::call_main_service_get_by_name(key) {
++                        if let Ok(flag) = value.parse::<bool>() {
++                            v[field] = json!(flag);
++                        }
+                     }
+                 }
+                 let response = crate::post_request(url.clone(), v.to_string(), "").await;
+diff --git a/src/lang/cn.rs b/src/lang/cn.rs
+index 10667a6..1866fc5 100644
+--- a/src/lang/cn.rs
++++ b/src/lang/cn.rs
+@@ -1,6 +1,16 @@
+ lazy_static::lazy_static! {
+ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
+     [
++        ("Merchant force-stopped the app", "商户已强行停止应用"),
++        ("Merchant paused remote support", "商户已暂停远程支持"),
++        ("Stop status unavailable", "无法读取停止状态"),
++        ("Previous process exit", "上一次进程退出"),
++        ("Recorded", "已记录"),
++        ("Pause remote support", "暂停远程支持"),
++        ("Resume remote support", "恢复"),
++        ("Remote support is paused", "远程支持已暂停"),
++        ("This will end remote support until you resume it.", "暂停将结束当前远程支持，直到您手动恢复。"),
++        ("Could not change the remote support setting.", "无法更改远程支持设置。"),
+         ("Allow incoming connections", "允许连入"),
+         ("Status", "状态"),
+         ("Permanent Password", "固定密码"),
+diff --git a/src/lang/en.rs b/src/lang/en.rs
+index 2fb5e07..a3303fe 100644
+--- a/src/lang/en.rs
++++ b/src/lang/en.rs
+@@ -1,6 +1,17 @@
+ lazy_static::lazy_static! {
+ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
+     [
++        ("Merchant force-stopped the app", "Merchant force-stopped the app"),
++        ("Merchant paused remote support", "Merchant paused remote support"),
++        ("Stop status unavailable", "Stop status unavailable"),
++        ("Skipped", "Skipped"),
++        ("Previous process exit", "Previous process exit"),
++        ("Recorded", "Recorded"),
++        ("Pause remote support", "Pause remote support"),
++        ("Resume remote support", "Resume"),
++        ("Remote support is paused", "Remote support is paused"),
++        ("This will end remote support until you resume it.", "This will end remote support until you resume it."),
++        ("Could not change the remote support setting.", "Could not change the remote support setting."),
+         ("Allow incoming connections", "Allow incoming connections"),
+         ("desk_tip", "Your desktop can be accessed with this ID and password."),
+         ("connecting_status", "Connecting to the RustDesk network..."),
+diff --git a/src/lang/es.rs b/src/lang/es.rs
+index c1d5083..e7e6dd6 100644
+--- a/src/lang/es.rs
++++ b/src/lang/es.rs
+@@ -1,6 +1,16 @@
+ lazy_static::lazy_static! {
+ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
+     [
++        ("Merchant force-stopped the app", "El comercio forzó la detención de la aplicación"),
++        ("Merchant paused remote support", "El comercio pausó el soporte remoto"),
++        ("Stop status unavailable", "No se pudo consultar el estado de detención"),
++        ("Previous process exit", "Salida anterior del proceso"),
++        ("Recorded", "Registrado"),
++        ("Pause remote support", "Pausar el soporte remoto"),
++        ("Resume remote support", "Reanudar"),
++        ("Remote support is paused", "El soporte remoto está en pausa"),
++        ("This will end remote support until you resume it.", "La asistencia remota finalizará hasta que la reanude."),
++        ("Could not change the remote support setting.", "No se pudo cambiar la configuración del soporte remoto."),
+         ("Status", "Estado"),
+         ("Your Desktop", "Tu escritorio"),
+         ("desk_tip", "Puedes acceder a tu escritorio con esta ID y contraseña."),
+diff --git a/src/server/connection.rs b/src/server/connection.rs
+index ae1bb98..9480b25 100644
+--- a/src/server/connection.rs
++++ b/src/server/connection.rs
+@@ -183,6 +183,92 @@ async fn login_deadline(authorized: bool, started: Instant) {
+     time::sleep_until(started + LOGIN_GRACE).await
+ }
+ 
++// Register before sending the login challenge. Pause closes every registered channel,
++// including pending logins and tunnels, and rejects later arrivals under the same lock.
++#[cfg(all(target_os = "android", steaddesk_merchant))]
++mod merchant_pause {
++    use super::*;
++
++    struct State {
++        paused: bool,
++        next_token: u64,
++        connections: HashMap<u64, mpsc::UnboundedSender<ipc::Data>>,
++    }
++
++    lazy_static::lazy_static! {
++        // The Android service explicitly opens admission after checking the persisted choice.
++        static ref STATE: Mutex<State> = Mutex::new(State {
++            paused: true,
++            next_token: 0,
++            connections: HashMap::new(),
++        });
++    }
++
++    pub(super) struct Registration(u64);
++
++    impl Drop for Registration {
++        fn drop(&mut self) {
++            STATE.lock().unwrap().connections.remove(&self.0);
++        }
++    }
++
++    pub(super) fn admit(tx: &mpsc::UnboundedSender<ipc::Data>) -> Option<Registration> {
++        let mut state = STATE.lock().unwrap();
++        if state.paused {
++            return None;
++        }
++        // Protocol IDs are scoped to a Server. Use a process-wide token for teardown.
++        let token = state.next_token;
++        state.next_token = token.checked_add(1)?;
++        state.connections.insert(token, tx.clone());
++        Some(Registration(token))
++    }
++
++    pub fn set_paused(paused: bool) {
++        let mut state = STATE.lock().unwrap();
++        state.paused = paused;
++        if paused {
++            for tx in state.connections.values() {
++                let _ = tx.send(ipc::Data::Close);
++            }
++        }
++    }
++
++    #[cfg(test)]
++    mod tests {
++        use super::*;
++
++        #[test]
++        fn pause_closes_active_and_pending_connections_and_refuses_new_ones() {
++            let (active, mut active_rx) = mpsc::unbounded_channel();
++            let (pending, mut pending_rx) = mpsc::unbounded_channel();
++            // Separate servers can assign the same local protocol ID.
++            let first_server = (1, active);
++            let second_server = (1, pending);
++            assert_eq!(first_server.0, second_server.0);
++            assert!(admit(&first_server.1).is_none());
++            set_paused(false);
++            let active_registration = admit(&first_server.1).unwrap();
++            let pending_registration = admit(&second_server.1).unwrap();
++            set_paused(true);
++            assert!(matches!(active_rx.try_recv(), Ok(ipc::Data::Close)));
++            assert!(matches!(pending_rx.try_recv(), Ok(ipc::Data::Close)));
++            assert!(admit(&second_server.1).is_none());
++
++            drop(active_registration);
++            set_paused(false);
++            set_paused(true);
++            assert!(matches!(pending_rx.try_recv(), Ok(ipc::Data::Close)));
++            drop(pending_registration);
++            set_paused(false);
++            assert!(admit(&second_server.1).is_some());
++        }
++    }
++}
++
++#[cfg(all(target_os = "android", steaddesk_merchant))]
++pub use merchant_pause::set_paused as set_merchant_remote_paused;
++
+ lazy_static::lazy_static! {
+     // Connections between accept and authorization, oldest first; see admit_unauthorized.
+     static ref UNAUTHORIZED_CONNS: Mutex<Vec<(i32, IpAddr, Arc<UnauthorizedShared>)>> = Default::default();
+@@ -551,6 +637,10 @@ impl Connection {
+         let (tx_from_cm_holder, mut rx_from_cm) = mpsc::unbounded_channel::<ipc::Data>();
+         // holding tx_from_cm_holder to avoid cpu burning of rx_from_cm.recv when all sender closed
+         let tx_from_cm = tx_from_cm_holder.clone();
++        #[cfg(all(target_os = "android", steaddesk_merchant))]
++        let Some(_merchant_registration) = merchant_pause::admit(&tx_from_cm) else {
++            return;
++        };
+         let (tx_to_cm, rx_to_cm) = mpsc::unbounded_channel::<ipc::Data>();
+         let (tx, mut rx) = mpsc::unbounded_channel::<(Instant, Arc<Message>)>();
+         let (tx_video, mut rx_video) = mpsc::unbounded_channel::<(Instant, Arc<Message>)>();
+@@ -762,6 +852,8 @@ impl Connection {
+                             }
+                         }
+                         ipc::Data::Close => {
++                            #[cfg(all(target_os = "android", steaddesk_merchant))]
++                            conn.port_forward_socket.take(); // A pending tunnel must close too.
+                             conn.chat_unanswered = false; // seen
+                             conn.file_transferred = false; //seen
+                             conn.send_close_reason_no_retry("").await;

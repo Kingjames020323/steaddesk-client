@@ -1,0 +1,1720 @@
+Subject: [SteadDesk] Limit merchant Android peer file I/O to advertised directories
+
+Android supplies the primary volume for the calling user and its current AppOp.
+Check paths at dispatch, recursive access and transfer-job I/O. Advertise the
+scope to the desktop file manager; U-04's optional renderer uses the same menu.
+
+diff --git a/flutter/android/app/src/main/AndroidManifest.xml b/flutter/android/app/src/main/AndroidManifest.xml
+index 34e6e43..e1715e1 100644
+--- a/flutter/android/app/src/main/AndroidManifest.xml
++++ b/flutter/android/app/src/main/AndroidManifest.xml
+@@ -3,7 +3,7 @@
+     xmlns:tools="http://schemas.android.com/tools"
+     package="com.carriez.flutter_hbb">
+ 
+-    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" tools:node="remove" />
++    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
+     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" tools:node="remove" />
+     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" tools:node="remove" />
+     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+diff --git a/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MainService.kt b/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MainService.kt
+index 473fead..f67dcff 100644
+--- a/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MainService.kt
++++ b/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MainService.kt
+@@ -97,6 +97,11 @@ class MainService : Service() {
+     @Keep
+     fun rustGetByName(name: String): String {
+         return when (name) {
++            "steaddesk_file_scope" -> JSONObject().apply {
++                put("storage", Environment.getExternalStorageDirectory().absolutePath)
++                put("authorized", Build.VERSION.SDK_INT >= Build.VERSION_CODES.R &&
++                    Environment.isExternalStorageManager())
++            }.toString()
+             "screen_size" -> {
+                 JSONObject().apply {
+                     put("width",SCREEN_INFO.width)
+diff --git a/flutter/lib/desktop/pages/file_manager_page.dart b/flutter/lib/desktop/pages/file_manager_page.dart
+index 17674c2..3898935 100644
+--- a/flutter/lib/desktop/pages/file_manager_page.dart
++++ b/flutter/lib/desktop/pages/file_manager_page.dart
+@@ -417,18 +417,75 @@ class _FileManagerPageState extends State<FileManagerPage>
+   }
+ }
+ 
+-class FileManagerView extends StatefulWidget {
++class FileManagerView extends StatelessWidget {
++  final FileController controller;
++  final _FileManagerPane _pane;
++
++  FileManagerView(this.controller, FFI ffi, Rx<MouseFocusScope> mouseFocusScope)
++      : _pane = _FileManagerPane(controller, ffi, mouseFocusScope);
++
++  @override
++  Widget build(BuildContext context) {
++    if (controller.isLocal) return _pane;
++    return Obx(() {
++      final scope = controller.fileScope.value;
++      if (scope == null) return _pane;
++      const names = {
++        'download': 'Download',
++        'pictures': 'Pictures',
++        'dcim': 'DCIM',
++        'movies': 'Videos',
++        'logs': 'SteadDesk logs',
++      };
++      return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
++        PopupMenuButton<String>(
++          tooltip: translate('Common locations'),
++          onSelected: (key) {
++            final path = controller.fileScope.value?.availablePath(key);
++            if (path != null) controller.openDirectory(path);
++          },
++          itemBuilder: (_) => [
++            for (final place in names.entries)
++              PopupMenuItem<String>(
++                value: place.key,
++                enabled: scope.availablePath(place.key) != null,
++                child: Text([
++                  translate(place.value),
++                  if (scope.requiresGrant(place.key))
++                    translate('Device not authorized')
++                  else if (scope.availablePath(place.key) == null)
++                    translate('Unavailable'),
++                ].join(' · ')),
++              ),
++          ],
++          child: Padding(
++            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
++            child: Row(mainAxisSize: MainAxisSize.min, children: [
++              const Icon(Icons.folder_outlined, size: 18),
++              const SizedBox(width: 6),
++              Text(translate('Common locations')),
++              const Icon(Icons.arrow_drop_down),
++            ]),
++          ),
++        ),
++        Expanded(child: _pane),
++      ]);
++    });
++  }
++}
++
++class _FileManagerPane extends StatefulWidget {
+   final FileController controller;
+   final FFI _ffi;
+   final Rx<MouseFocusScope> _mouseFocusScope;
+ 
+-  FileManagerView(this.controller, this._ffi, this._mouseFocusScope);
++  _FileManagerPane(this.controller, this._ffi, this._mouseFocusScope);
+ 
+   @override
+   State<StatefulWidget> createState() => _FileManagerViewState();
+ }
+ 
+-class _FileManagerViewState extends State<FileManagerView> {
++class _FileManagerViewState extends State<_FileManagerPane> {
+   final _locationStatus = LocationStatus.bread.obs;
+   final _locationNode = FocusNode();
+   final _locationBarKey = GlobalKey();
+diff --git a/flutter/lib/models/file_model.dart b/flutter/lib/models/file_model.dart
+index 26396bc..d870fd2 100644
+--- a/flutter/lib/models/file_model.dart
++++ b/flutter/lib/models/file_model.dart
+@@ -13,6 +13,7 @@ import 'package:flutter_hbb/web/dummy.dart'
+ import '../consts.dart';
+ import 'model.dart';
+ import 'platform_model.dart';
++import 'remote_file_scope.dart';
+ 
+ enum SortBy {
+   name,
+@@ -49,6 +50,7 @@ typedef GetDialogManager = OverlayDialogManager? Function();
+ typedef ReadRemoteDirectory = Future<void> Function(
+     SessionID sessionId, String path, bool includeHidden);
+ 
++const _kDeniedFileLocation = 'This location is not allowed';
+ const _kRemoteReadDirTimeout = Duration(seconds: 30);
+ const _kRemoteSessionChangedError =
+     'Remote directory read cancelled because the session changed';
+@@ -89,7 +91,15 @@ class FileModel {
+     evtLoop = FileDialogEventLoop();
+   }
+ 
+-  Future<void> onReady() async {
++  Future<void> onReady({Object? platformAdditions}) async {
++    final scope = RemoteFileScope.fromPeerAdditions(platformAdditions);
++    if (scope != null || remoteController.fileScope.value != null) {
++      remoteController.history.clear();
++      remoteController.selectedItems.clear();
++      remoteController.directory.value = FileDirectory();
++      remoteController.homePath = scope?.initialDirectory ?? '';
++    }
++    remoteController.fileScope.value = scope;
+     fileFetcher.beginRemoteSession();
+     await evtLoop.onReady();
+     if (!isWeb) await localController.onReady();
+@@ -355,6 +365,7 @@ class FileController {
+ 
+   final FileFetcher fileFetcher;
+ 
++  final fileScope = Rxn<RemoteFileScope>();
+   final options = DirectoryOptions().obs;
+   final directory = FileDirectory().obs;
+ 
+@@ -422,12 +433,19 @@ class FileController {
+ 
+     await Future.delayed(Duration(milliseconds: 100));
+ 
++    final scope = fileScope.value;
++    if (scope != null) {
++      final start = scope.initialDirectory;
++      if (start != null) await _openDirectoryPath(start, isBack: true);
++      return;
++    }
++
+     var savedDir = (await bind.sessionGetPeerOption(
+         sessionId: sessionId, name: isLocal ? "local_dir" : "remote_dir"));
+     if (savedDir.isNotEmpty && !_isPathAllowed(savedDir)) {
+       savedDir = options.value.home;
+       await bind.sessionPeerOption(
+-        sessionId: sessionId, name: "local_dir", value: savedDir);
++          sessionId: sessionId, name: "local_dir", value: savedDir);
+     }
+     Future<bool> tryOpenReadyDirs() async {
+       final dirs = <String>{
+@@ -515,7 +533,8 @@ class FileController {
+     }
+     final requestGeneration = ++_directoryRequestGeneration;
+     try {
+-      final fd = await fileFetcher.fetchDirectory(path, isLocal, showHidden);
++      final fd = await fileFetcher.fetchDirectory(path, isLocal, showHidden,
++          serializeRemoteReads: fileScope.value != null);
+       if (requestGeneration != _directoryRequestGeneration) {
+         return true;
+       }
+@@ -540,6 +559,12 @@ class FileController {
+   }
+ 
+   void goToHomeDirectory() {
++    final scope = fileScope.value;
++    if (scope != null) {
++      final start = scope.initialDirectory;
++      if (start != null) openDirectory(start);
++      return;
++    }
+     if (isLocal) {
+       openDirectory(homePath);
+       return;
+@@ -597,7 +622,9 @@ class FileController {
+           debugPrint("update receive details: ${fd.path}");
+           jobController.jobTable.refresh();
+         }
+-      } else if (options.value.home.isEmpty && isHomeResponse) {
++      } else if (fileScope.value == null &&
++          options.value.home.isEmpty &&
++          isHomeResponse) {
+         options.value.home = fd.path;
+         debugPrint("init remote home: ${fd.path}");
+         if (_directoryRequestGeneration == 0) {
+@@ -1193,8 +1220,10 @@ class JobController {
+     } else {
+       unregisterTransferConflictJob(id);
+     }
+-    if (err == _kOneWayFileTransferError) {
+-      if (DateTime.now().millisecondsSinceEpoch - _lastTimeShowMsgbox > 3000) {
++    if (err == _kOneWayFileTransferError || err == _kDeniedFileLocation) {
++      final isDeniedNavigation = id == 0 && err == _kDeniedFileLocation;
++      if (isDeniedNavigation ||
++          DateTime.now().millisecondsSinceEpoch - _lastTimeShowMsgbox > 3000) {
+         final dm = alogManager;
+         if (dm != null) {
+           _lastTimeShowMsgbox = DateTime.now().millisecondsSinceEpoch;
+@@ -1596,7 +1625,8 @@ class FileFetcher {
+   }
+ 
+   Future<FileDirectory> fetchDirectory(
+-      String path, bool isLocal, bool showHidden) async {
++      String path, bool isLocal, bool showHidden,
++      {bool serializeRemoteReads = false}) async {
+     try {
+       if (isLocal) {
+         final res = await bind.sessionReadLocalDirSync(
+@@ -1605,16 +1635,23 @@ class FileFetcher {
+         return fd;
+       } else {
+         final remoteSessionGeneration = _remoteSessionGeneration;
+-        final pendingTask = _remoteReadTasks[path];
++        // Directory errors carry job ID zero and no path. Keep only one
++        // scoped request in flight so a denial resolves the right caller.
++        final pendingTask = _remoteReadTasks[path] ??
++            (serializeRemoteReads && _remoteReadTasks.isNotEmpty
++                ? _remoteReadTasks.values.first
++                : null);
+         if (pendingTask != null) {
+-          if (pendingTask.includeHidden == showHidden) {
++          if (_remoteReadTasks[path] == pendingTask &&
++              pendingTask.includeHidden == showHidden) {
+             return pendingTask.completer.future;
+           }
+           await pendingTask.released.future;
+           if (remoteSessionGeneration != _remoteSessionGeneration) {
+             throw StateError(_kRemoteSessionChangedError);
+           }
+-          return fetchDirectory(path, isLocal, showHidden);
++          return fetchDirectory(path, isLocal, showHidden,
++              serializeRemoteReads: serializeRemoteReads);
+         }
+         final task = _registerRemoteReadTask(path, showHidden);
+         unawaited(Future<void>.sync(
+@@ -1774,6 +1811,9 @@ class JobProgress {
+   }
+ 
+   String display() {
++    if (state == JobState.error && err == _kDeniedFileLocation) {
++      return translate(err);
++    }
+     if (type == JobType.transfer) {
+       if (state == JobState.done && err == "cancel") {
+         return translate("Cancel");
+diff --git a/flutter/lib/models/model.dart b/flutter/lib/models/model.dart
+index f1abb8e..9be7d02 100644
+--- a/flutter/lib/models/model.dart
++++ b/flutter/lib/models/model.dart
+@@ -1405,7 +1405,8 @@ class FfiModel with ChangeNotifier {
+       virtualMouseMode.loadOptions();
+     }
+     if (connType == ConnType.fileTransfer) {
+-      parent.target?.fileModel.onReady();
++      parent.target?.fileModel.onReady(
++          platformAdditions: isPeerAndroid ? evt['platform_additions'] : null);
+     } else if (connType == ConnType.terminal) {
+       // Call onReady on all registered terminal models
+       final models = parent.target?._terminalModels.values ?? [];
+diff --git a/flutter/lib/models/remote_file_scope.dart b/flutter/lib/models/remote_file_scope.dart
+new file mode 100644
+index 0000000..bbff34b
+--- /dev/null
++++ b/flutter/lib/models/remote_file_scope.dart
+@@ -0,0 +1,37 @@
++import 'dart:convert';
++
++/// Locations advertised by a merchant Android peer for this connection.
++class RemoteFileScope {
++  final bool authorized;
++  final Map<String, String> locations;
++
++  RemoteFileScope._(this.authorized, this.locations);
++
++  static RemoteFileScope? fromPeerAdditions(Object? encoded) {
++    if (encoded is! String || encoded.isEmpty) return null;
++    try {
++      final additions = jsonDecode(encoded);
++      if (additions is! Map) return null;
++      final scope = additions['steaddesk_file_scope'];
++      if (scope is! Map) return null;
++      final locations = <String, String>{};
++      for (final key in ['download', 'pictures', 'dcim', 'movies', 'logs']) {
++        final path = scope[key];
++        locations[key] = path is String && path.startsWith('/') ? path : '';
++      }
++      return RemoteFileScope._(scope['authorized'] == true, locations);
++    } on FormatException {
++      return null;
++    }
++  }
++
++  bool requiresGrant(String key) => key != 'logs' && !authorized;
++
++  String? availablePath(String key) {
++    final path = locations[key];
++    return requiresGrant(key) || path == null || path.isEmpty ? null : path;
++  }
++
++  String? get initialDirectory =>
++      availablePath('download') ?? availablePath('logs');
++}
+diff --git a/libs/base/src/fs.rs b/libs/base/src/fs.rs
+index 1adb590..9c6ee69 100644
+--- a/libs/base/src/fs.rs
++++ b/libs/base/src/fs.rs
+@@ -35,7 +35,27 @@ pub fn update_next_job_id(id: i32) {
+     NEXT_JOB_ID.store(id, Ordering::SeqCst);
+ }
+ 
++pub type PeerPathGuard = Option<fn(&Path) -> bool>;
++
++fn check_peer_path(path: &Path, guard: PeerPathGuard) -> ResultType<()> {
++    if let Some(allowed) = guard {
++        if !allowed(path) {
++            bail!("This location is not allowed");
++        }
++    }
++    Ok(())
++}
++
+ pub fn read_dir(path: &Path, include_hidden: bool) -> ResultType<FileDirectory> {
++    read_dir_with_guard(path, include_hidden, None)
++}
++
++pub fn read_dir_with_guard(
++    path: &Path,
++    include_hidden: bool,
++    guard: PeerPathGuard,
++) -> ResultType<FileDirectory> {
++    check_peer_path(path, guard)?;
+     let mut dir = FileDirectory {
+         path: get_string(path),
+         ..Default::default()
+@@ -60,6 +80,9 @@ pub fn read_dir(path: &Path, include_hidden: bool) -> ResultType<FileDirectory>
+     }
+     for entry in path.read_dir()?.flatten() {
+         let p = entry.path();
++        if check_peer_path(&p, guard).is_err() {
++            continue;
++        }
+         let name = p
+             .file_name()
+             .map(|p| p.to_str().unwrap_or(""))
+@@ -147,12 +170,14 @@ fn read_dir_recursive(
+     path: &Path,
+     prefix: &Path,
+     include_hidden: bool,
++    guard: PeerPathGuard,
+ ) -> ResultType<Vec<FileEntry>> {
++    check_peer_path(path, guard)?;
+     let mut files = Vec::new();
+     if path.is_dir() {
+         // to-do: symbol link handling, cp the link rather than the content
+         // to-do: file mode, for unix
+-        let fd = read_dir(path, include_hidden)?;
++        let fd = read_dir_with_guard(path, include_hidden, guard)?;
+         for entry in fd.entries.iter() {
+             match entry.entry_type.enum_value() {
+                 Ok(FileType::File) => {
+@@ -165,6 +190,7 @@ fn read_dir_recursive(
+                         &path.join(&entry.name),
+                         &prefix.join(&entry.name),
+                         include_hidden,
++                        guard,
+                     ) {
+                         for entry in tmp.drain(0..) {
+                             files.push(entry);
+@@ -203,19 +229,29 @@ fn read_dir_recursive(
+ }
+ 
+ pub fn get_recursive_files(path: &str, include_hidden: bool) -> ResultType<Vec<FileEntry>> {
+-    read_dir_recursive(&get_path(path), &get_path(""), include_hidden)
++    get_recursive_files_with_guard(path, include_hidden, None)
++}
++
++pub fn get_recursive_files_with_guard(
++    path: &str,
++    include_hidden: bool,
++    guard: PeerPathGuard,
++) -> ResultType<Vec<FileEntry>> {
++    read_dir_recursive(&get_path(path), &get_path(""), include_hidden, guard)
+ }
+ 
+ fn read_empty_dirs_recursive(
+     path: &Path,
+     prefix: &Path,
+     include_hidden: bool,
++    guard: PeerPathGuard,
+ ) -> ResultType<Vec<FileDirectory>> {
++    check_peer_path(path, guard)?;
+     let mut dirs = Vec::new();
+     if path.is_dir() {
+         // to-do: symbol link handling, cp the link rather than the content
+         // to-do: file mode, for unix
+-        let fd = read_dir(path, include_hidden)?;
++        let fd = read_dir_with_guard(path, include_hidden, guard)?;
+         if fd.entries.is_empty() {
+             dirs.push(fd);
+         } else {
+@@ -226,6 +262,7 @@ fn read_empty_dirs_recursive(
+                             &path.join(&entry.name),
+                             &prefix.join(&entry.name),
+                             include_hidden,
++                            guard,
+                         ) {
+                             for entry in tmp.drain(0..) {
+                                 dirs.push(entry);
+@@ -248,7 +285,15 @@ pub fn get_empty_dirs_recursive(
+     path: &str,
+     include_hidden: bool,
+ ) -> ResultType<Vec<FileDirectory>> {
+-    read_empty_dirs_recursive(&get_path(path), &get_path(""), include_hidden)
++    get_empty_dirs_recursive_with_guard(path, include_hidden, None)
++}
++
++pub fn get_empty_dirs_recursive_with_guard(
++    path: &str,
++    include_hidden: bool,
++    guard: PeerPathGuard,
++) -> ResultType<Vec<FileDirectory>> {
++    read_empty_dirs_recursive(&get_path(path), &get_path(""), include_hidden, guard)
+ }
+ 
+ #[inline]
+@@ -403,6 +448,9 @@ pub struct TransferJob {
+     #[serde(skip_serializing)]
+     files: Vec<FileEntry>,
+     pub conn_id: i32, // server only
++    #[cfg(target_os = "android")]
++    #[serde(skip_serializing)]
++    pub peer_path_guard: PeerPathGuard,
+ 
+     #[serde(skip_serializing)]
+     data_stream: Option<DataStream>,
+@@ -563,6 +611,17 @@ pub fn join_validated_path(base: &PathBuf, name: &str) -> ResultType<PathBuf> {
+     Ok(TransferJob::join(base, name))
+ }
+ 
++// Refuse a last-component symlink swap when opening files for a guarded peer.
++fn peer_open_options(_guard: PeerPathGuard) -> OpenOptions {
++    #[cfg(target_os = "android")]
++    if _guard.is_some() {
++        let mut options = OpenOptions::new();
++        options.custom_flags(libc::O_NOFOLLOW);
++        return options;
++    }
++    OpenOptions::new()
++}
++
+ impl TransferJob {
+     #[allow(clippy::too_many_arguments)]
+     pub fn new_write(
+@@ -605,12 +664,36 @@ impl TransferJob {
+         show_hidden: bool,
+         is_remote: bool,
+         enable_overwrite_detection: bool,
++    ) -> ResultType<Self> {
++        Self::new_read_with_guard(
++            id,
++            r#type,
++            remote,
++            data_source,
++            file_num,
++            show_hidden,
++            is_remote,
++            enable_overwrite_detection,
++            None,
++        )
++    }
++
++    pub fn new_read_with_guard(
++        id: i32,
++        r#type: JobType,
++        remote: String,
++        data_source: DataSource,
++        file_num: i32,
++        show_hidden: bool,
++        is_remote: bool,
++        enable_overwrite_detection: bool,
++        guard: PeerPathGuard,
+     ) -> ResultType<Self> {
+         log::info!("new read {}", data_source);
+         let (files, total_size) = match &data_source {
+             DataSource::FilePath(p) => {
+                 let p = p.to_str().ok_or(anyhow!("Invalid path"))?;
+-                let files = get_recursive_files(p, show_hidden)?;
++                let files = get_recursive_files_with_guard(p, show_hidden, guard)?;
+                 let total_size = files.iter().map(|x| x.size).sum();
+                 (files, total_size)
+             }
+@@ -626,11 +709,62 @@ impl TransferJob {
+             is_remote,
+             files,
+             total_size,
++            #[cfg(target_os = "android")]
++            peer_path_guard: guard,
+             enable_overwrite_detection,
+             ..Default::default()
+         })
+     }
+ 
++    fn peer_guard(&self) -> PeerPathGuard {
++        #[cfg(target_os = "android")]
++        {
++            self.peer_path_guard
++        }
++        #[cfg(not(target_os = "android"))]
++        {
++            None
++        }
++    }
++
++    fn check_peer_name(&self, base: &PathBuf, name: &str, sidecars: bool) -> ResultType<()> {
++        let guard = self.peer_guard();
++        if guard.is_none() {
++            return Ok(());
++        }
++        validate_file_name_no_traversal(name)
++            .map_err(|_| anyhow!("This location is not allowed"))?;
++        let path = Self::join(base, name);
++        check_peer_path(&path, guard)?;
++        validate_no_symlink_components(base, name)
++            .map_err(|_| anyhow!("This location is not allowed"))?;
++        if sidecars {
++            for suffix in [".download", ".digest"] {
++                let mut sidecar = path.as_os_str().to_owned();
++                sidecar.push(suffix);
++                let sidecar = Path::new(&sidecar);
++                check_peer_path(sidecar, guard)?;
++                if sidecar.symlink_metadata().map_or(false, |m| m.is_symlink()) {
++                    bail!("This location is not allowed");
++                }
++            }
++        }
++        Ok(())
++    }
++
++    pub fn check_peer_entry(&self, file_num: i32, sidecars: bool) -> ResultType<()> {
++        if self.peer_guard().is_some() {
++            let entry = self
++                .files
++                .get(file_num as usize)
++                .ok_or_else(|| anyhow!("Wrong file number"))?;
++            if let DataSource::FilePath(base) = &self.data_source {
++                self.check_peer_name(base, &entry.name, sidecars)?;
++            }
++        }
++        Ok(())
++    }
++
+     pub async fn get_buf_data(self) -> ResultType<Option<Vec<u8>>> {
+         match self.data_stream {
+             Some(DataStream::BufStream(mut bs)) => {
+@@ -648,9 +782,14 @@ impl TransferJob {
+ 
+     #[inline]
+     pub fn set_files(&mut self, files: Vec<FileEntry>) -> ResultType<()> {
+-        validate_transfer_file_names(&files)?;
++        let names = validate_transfer_file_names(&files);
++        if self.peer_guard().is_some() && names.is_err() {
++            bail!("This location is not allowed");
++        }
++        names?;
+         if let DataSource::FilePath(base) = &self.data_source {
+             for file in &files {
++                self.check_peer_name(base, &file.name, true)?;
+                 validate_no_symlink_components(base, &file.name)?;
+             }
+         }
+@@ -705,18 +844,49 @@ impl TransferJob {
+     }
+ 
+     pub fn modify_time(&self) {
++        let _ = self.modify_time_checked();
++    }
++
++    pub fn modify_time_checked(&self) -> ResultType<()> {
+         if self.r#type == JobType::Printer {
+-            return;
++            return Ok(());
+         }
+         if let DataSource::FilePath(p) = &self.data_source {
+             let file_num = self.file_num as usize;
+             if file_num < self.files.len() {
++                self.check_peer_entry(self.file_num, true)?;
+                 let entry = &self.files[file_num];
+                 let Some(path) = self.resolve_entry_path(p, &entry.name) else {
+-                    return;
++                    return Ok(());
+                 };
+                 let download_path = format!("{}.download", get_string(&path));
+                 let digest_path = format!("{}.digest", get_string(&path));
++                #[cfg(target_os = "android")]
++                if self.peer_guard().is_some() {
++                    // Never follow a replacement symlink to stamp a different file.
++                    let Some(DataStream::FileStream(file)) = self.data_stream.as_ref() else {
++                        return Ok(());
++                    };
++                    use std::os::fd::AsFd;
++                    let handle = std::fs::File::from(file.as_fd().try_clone_to_owned()?);
++                    use std::os::unix::fs::MetadataExt;
++                    let active = handle.metadata()?;
++                    let staged = std::fs::symlink_metadata(&download_path)?;
++                    if !staged.is_file() || active.dev() != staged.dev() || active.ino() != staged.ino() {
++                        bail!("This location is not allowed");
++                    }
++                    std::fs::rename(download_path, &path)?;
++                    filetime::set_file_handle_times(
++                        &handle,
++                        None,
++                        Some(filetime::FileTime::from_unix_time(
++                            entry.modified_time as _,
++                            0,
++                        )),
++                    )?;
++                    std::fs::remove_file(digest_path).ok();
++                    return Ok(());
++                }
+                 std::fs::remove_file(digest_path).ok();
+                 std::fs::rename(download_path, &path).ok();
+                 filetime::set_file_mtime(
+@@ -726,18 +896,24 @@ impl TransferJob {
+                 .ok();
+             }
+         }
++        Ok(())
+     }
+ 
+     pub fn remove_download_file(&self) {
++        let _ = self.remove_download_file_checked();
++    }
++
++    pub fn remove_download_file_checked(&self) -> ResultType<()> {
+         if self.r#type == JobType::Printer {
+-            return;
++            return Ok(());
+         }
+         if let DataSource::FilePath(p) = &self.data_source {
+             let file_num = self.file_num as usize;
+             if file_num < self.files.len() {
++                self.check_peer_entry(self.file_num, true)?;
+                 let entry = &self.files[file_num];
+                 let Some(path) = self.resolve_entry_path(p, &entry.name) else {
+-                    return;
++                    return Ok(());
+                 };
+                 let download_path = format!("{}.download", get_string(&path));
+                 let digest_path = format!("{}.digest", get_string(&path));
+@@ -745,6 +921,7 @@ impl TransferJob {
+                 std::fs::remove_file(digest_path).ok();
+             }
+         }
++        Ok(())
+     }
+ 
+     #[inline]
+@@ -770,11 +947,15 @@ impl TransferJob {
+                 if file_num >= self.files.len() {
+                     bail!("Wrong file number");
+                 }
++                self.check_peer_entry(block.file_num, true)?;
+                 if file_num != self.file_num as usize || self.data_stream.is_none() {
+-                    self.modify_time();
++                    self.modify_time_checked()?;
+                     if let Some(DataStream::FileStream(file)) = self.data_stream.as_mut() {
+                         file.sync_all().await?;
+                     }
++                    if self.peer_guard().is_some() {
++                        self.data_stream.take();
++                    }
+                     self.file_num = block.file_num;
+                     let entry = &self.files[file_num];
+                     let (path, digest_path) = if self.r#type == JobType::Printer {
+@@ -799,9 +980,25 @@ impl TransferJob {
+                             std::fs::remove_file(dp)?;
+                         }
+                     }
+-                    self.data_stream = Some(DataStream::FileStream(File::create(&path).await?));
++                    let file = peer_open_options(self.peer_guard())
++                        .write(true)
++                        .create(true)
++                        .truncate(true)
++                        .open(&path)
++                        .await?;
++                    self.data_stream = Some(DataStream::FileStream(file));
+                     if let Some(dp) = digest_path.as_ref() {
+-                        std::fs::write(dp, json!(self.digest).to_string()).ok();
++                        if self.peer_guard().is_some() {
++                            let mut f = peer_open_options(self.peer_guard())
++                                .write(true)
++                                .create_new(true)
++                                .open(dp)
++                                .await?;
++                            f.write_all(json!(self.digest).to_string().as_bytes())
++                                .await?;
++                        } else {
++                            std::fs::write(dp, json!(self.digest).to_string()).ok();
++                        }
+                     }
+                 }
+             }
+@@ -844,6 +1041,10 @@ impl TransferJob {
+     /// Returns Ok(true) if job is done, Ok(false) otherwise.
+     async fn open_data_stream(&mut self) -> ResultType<bool> {
+         let file_num = self.file_num as usize;
++        if file_num < self.files.len() {
++            self.check_peer_entry(self.file_num, false)?;
++        }
++        let guard = self.peer_guard();
+         match &mut self.data_source {
+             DataSource::FilePath(p) => {
+                 if file_num >= self.files.len() {
+@@ -852,7 +1053,8 @@ impl TransferJob {
+                     return Ok(true);
+                 };
+                 if self.data_stream.is_none() {
+-                    match File::open(Self::join(p, &self.files[file_num].name)).await {
++                    let path = Self::join(p, &self.files[file_num].name);
++                    match peer_open_options(guard).read(true).open(path).await {
+                         Ok(file) => {
+                             self.data_stream = Some(DataStream::FileStream(file));
+                             self.file_confirmed = false;
+@@ -943,6 +1145,7 @@ impl TransferJob {
+                     self.data_stream.take();
+                     return Ok(None);
+                 };
++                self.check_peer_entry(self.file_num, false)?;
+                 if self.files.len() == 1 && self.files[file_num].name.is_empty() {
+                     p.file_name()
+                         .map(|p| p.to_str().unwrap_or(""))
+@@ -1106,7 +1309,7 @@ impl TransferJob {
+     }
+ 
+     async fn set_stream_offset(&mut self, file_num: usize, offset: u64) {
+-        if file_num >= self.files.len() {
++        if file_num >= self.files.len() || self.check_peer_entry(file_num as i32, true).is_err() {
+             return;
+         }
+         if let DataSource::FilePath(p) = &self.data_source {
+@@ -1122,7 +1325,7 @@ impl TransferJob {
+                 // If both download and digest files exist, seek (writer) to the offset
+                 // NOTE: same as write path: best-effort symlink validation happened earlier,
+                 // but this reopen remains TOCTOU-prone by design for now.
+-                match OpenOptions::new()
++                match peer_open_options(self.peer_guard())
+                     .create(true)
+                     .write(true)
+                     .open(&download_path)
+@@ -1136,7 +1339,11 @@ impl TransferJob {
+                 }
+             } else if Path::new(&file_path).exists() {
+                 // If `file_path` exists, seek (reader) to the offset
+-                match File::open(&file_path).await {
++                match peer_open_options(self.peer_guard())
++                    .read(true)
++                    .open(&file_path)
++                    .await
++                {
+                     Ok(f) => f,
+                     Err(e) => {
+                         log::warn!("Failed to open file {}: {}", file_path, e);
+@@ -1160,6 +1367,10 @@ impl TransferJob {
+     }
+ 
+     pub async fn confirm(&mut self, r: &FileTransferSendConfirmRequest) -> bool {
++        let resuming = matches!(r.union, Some(file_transfer_send_confirm_request::Union::OffsetBlk(n)) if n > 0);
++        if self.check_peer_entry(r.file_num, resuming).is_err() {
++            return false;
++        }
+         if self.file_num() != r.file_num {
+             // This branch will always be hit if:
+             // 1. `confirm()` is called in `ui_cm_interface.rs`
+@@ -1388,11 +1599,17 @@ pub async fn handle_read_jobs(
+ }
+ 
+ pub fn remove_all_empty_dir(path: &Path) -> ResultType<()> {
+-    let fd = read_dir(path, true)?;
++    remove_all_empty_dir_with_guard(path, None)
++}
++
++pub fn remove_all_empty_dir_with_guard(path: &Path, guard: PeerPathGuard) -> ResultType<()> {
++    let fd = read_dir_with_guard(path, true, guard)?;
+     for entry in fd.entries.iter() {
++        let child = path.join(&entry.name);
++        check_peer_path(&child, guard)?;
+         match entry.entry_type.enum_value() {
+             Ok(FileType::Dir) => {
+-                remove_all_empty_dir(&path.join(&entry.name)).ok();
++                remove_all_empty_dir_with_guard(&child, guard).ok();
+             }
+             Ok(FileType::DirLink) | Ok(FileType::FileLink) => {
+                 std::fs::remove_file(path.join(&entry.name)).ok();
+@@ -1400,6 +1617,7 @@ pub fn remove_all_empty_dir(path: &Path) -> ResultType<()> {
+             _ => {}
+         }
+     }
++    check_peer_path(path, guard)?;
+     std::fs::remove_dir(path).ok();
+     Ok(())
+ }
+diff --git a/libs/hbb_common/src/config.rs b/libs/hbb_common/src/config.rs
+index e0e6373..f438adb 100644
+--- a/libs/hbb_common/src/config.rs
++++ b/libs/hbb_common/src/config.rs
+@@ -838,6 +838,11 @@ impl Config {
+         }
+     }
+ 
++    #[cfg(target_os = "android")]
++    pub fn android_log_dir() -> PathBuf {
++        Self::get_home().join(format!("{}/Logs", *APP_NAME.read().unwrap()))
++    }
++
+     /// Get the log directory path.
+     ///
+     /// # Security Note
+@@ -862,8 +867,7 @@ impl Config {
+         }
+         #[cfg(target_os = "android")]
+         {
+-            let mut path = Self::get_home();
+-            path.push(format!("{}/Logs", *APP_NAME.read().unwrap()));
++            let path = Self::android_log_dir();
+             std::fs::create_dir_all(&path).ok();
+             return path;
+         }
+diff --git a/src/common.rs b/src/common.rs
+index 1678d8b..0c94127 100644
+--- a/src/common.rs
++++ b/src/common.rs
+@@ -239,53 +239,41 @@ pub fn need_fs_cm_send_files() -> bool {
+     }
+ }
+ 
+-/// Android is scoped-storage only: the peer may never touch anything outside the app
+-/// workspace (`Config::get_home()`, i.e. the app-specific external files directory).
+-///
+-/// Every peer supplied path must be validated with this before it reaches the
+-/// filesystem, for reads, writes, renames, creations and deletions alike. The path is
+-/// resolved to its canonical form (of the deepest existing ancestor, so paths that are
+-/// about to be created are handled too) so symlinks cannot escape the workspace.
+-///
+-/// Only the `ReadDir` protocol action treats an empty path as the home directory.
+-/// Callers must opt in to that protocol-specific behavior with `allow_empty`.
+ #[cfg(target_os = "android")]
+-pub fn is_peer_path_allowed(path: &str, allow_empty: bool) -> bool {
+-    use std::path::{Component, Path, PathBuf};
++pub mod android_file_scope;
++#[cfg(target_os = "android")]
++pub mod android_peer_io;
+ 
+-    // Canonicalize the deepest existing ancestor and re-append the missing tail.
+-    fn resolve(path: &Path) -> Option<PathBuf> {
+-        let mut tail: Vec<std::ffi::OsString> = Vec::new();
+-        let mut base = path.to_path_buf();
+-        loop {
+-            if let Ok(mut resolved) = base.canonicalize() {
+-                while let Some(component) = tail.pop() {
+-                    resolved.push(component);
+-                }
+-                return Some(resolved);
+-            }
+-            tail.push(base.file_name()?.to_os_string());
+-            if !base.pop() {
+-                return None;
+-            }
+-        }
++#[cfg(target_os = "android")]
++pub fn android_scope() -> android_file_scope::Scope {
++    let state = scrap::android::call_main_service_get_by_name("steaddesk_file_scope")
++        .ok()
++        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
++        .unwrap_or(Value::Null);
++    android_file_scope::Scope {
++        storage: std::path::PathBuf::from(state["storage"].as_str().unwrap_or_default()),
++        authorized: state["authorized"].as_bool() == Some(true),
++        home: Config::get_home(),
++        logs: Config::android_log_dir(),
+     }
++}
+ 
+-    if path.is_empty() {
+-        return allow_empty;
+-    }
+-    let path = Path::new(path);
+-    // `..` is never needed by the protocol and would defeat the prefix check below.
+-    if !path.is_absolute() || path.components().any(|c| c == Component::ParentDir) {
+-        return false;
++pub fn peer_file_guard() -> Option<fn(&std::path::Path) -> bool> {
++    #[cfg(target_os = "android")]
++    if !config::SUPPORT_EDITION {
++        return Some(|p| android_scope().allows(p));
+     }
+-    let home = Config::get_home();
+-    let home = home.canonicalize().unwrap_or(home);
+-    if home.as_os_str().is_empty() {
+-        return false;
++    None
++}
++
++#[cfg(target_os = "android")]
++pub fn is_peer_path_allowed(path: &str, allow_empty: bool) -> bool {
++    let scope = android_scope();
++    if allow_empty && path.is_empty() {
++        scope.default_dir().is_some()
++    } else {
++        scope.allows(std::path::Path::new(path))
+     }
+-    // `Path::starts_with` compares whole components, and is true for equal paths.
+-    resolve(path).map_or(false, |target| target.starts_with(&home))
+ }
+ 
+ #[inline]
+diff --git a/src/common/android_file_scope.rs b/src/common/android_file_scope.rs
+new file mode 100644
+index 0000000..f97df91
+--- /dev/null
++++ b/src/common/android_file_scope.rs
+@@ -0,0 +1,280 @@
++//! Device-side allowlist. The two anchors come from Android and the local logger.
++use std::path::{Component, Path, PathBuf};
++
++pub const DENIED: &str = "This location is not allowed";
++pub const PUBLIC: [(&str, &str); 4] = [
++    ("download", "Download"),
++    ("pictures", "Pictures"),
++    ("dcim", "DCIM"),
++    ("movies", "Movies"),
++];
++
++pub struct Scope {
++    pub storage: PathBuf,
++    pub authorized: bool,
++    pub home: PathBuf,
++    pub logs: PathBuf,
++}
++
++// Resolve every existing component, including symlinks, in filesystem order.
++// Only a genuinely missing tail may be created. In particular a dangling link
++// is present according to symlink_metadata and must fail canonicalization.
++fn within(anchor: &Path, root: &Path, path: &Path) -> bool {
++    if !anchor.is_absolute() || anchor.parent().is_none() {
++        return false;
++    }
++    let Ok(subdir) = root.strip_prefix(anchor) else {
++        return false;
++    };
++    let Ok(tail) = path.strip_prefix(root) else {
++        return false;
++    };
++    if subdir.as_os_str().is_empty() {
++        return false;
++    }
++    let Ok(mut real) = anchor.canonicalize() else {
++        return false;
++    };
++    let mut missing = false;
++    let mut followed_link = false;
++    let mut descend = |at: &mut PathBuf, part: &std::ffi::OsStr| -> Option<bool> {
++        at.push(part);
++        if !missing {
++            match at.symlink_metadata() {
++                Ok(meta) if meta.is_symlink() => {
++                    *at = at.canonicalize().ok()?;
++                    return Some(true);
++                }
++                Ok(_) => (),
++                Err(err) if err.kind() == std::io::ErrorKind::NotFound => missing = true,
++                Err(_) => return None,
++            }
++        }
++        Some(false)
++    };
++    // A symlink replacing a configured allowlist root cannot redefine it.
++    for component in subdir.components() {
++        let Component::Normal(part) = component else {
++            return false;
++        };
++        if descend(&mut real, part) != Some(false) {
++            return false;
++        }
++    }
++    let expected = real.clone();
++    for component in tail.components() {
++        match component {
++            Component::Normal(part) => {
++                let Some(link) = descend(&mut real, part) else {
++                    return false;
++                };
++                followed_link |= link;
++            }
++            // A replaced link or missing intermediate must not change the meaning of "..".
++            Component::ParentDir if !followed_link && real.is_dir() => {
++                real.pop();
++            }
++            Component::CurDir => (),
++            _ => return false,
++        }
++        if !real.starts_with(&expected) {
++            return false;
++        }
++    }
++    true
++}
++
++impl Scope {
++    pub fn allows(&self, path: &Path) -> bool {
++        if !path.is_absolute() {
++            return false;
++        }
++        // Filter by the lexical root first. Operations such as unlink act on
++        // the link itself, even when it resolves to a permitted file.
++        (path.starts_with(&self.logs) && within(&self.home, &self.logs, path))
++            || (self.authorized
++                && PUBLIC.iter().any(|(_, name)| {
++                    let root = self.storage.join(name);
++                    path.starts_with(&root) && within(&self.storage, &root, path)
++                }))
++    }
++
++    pub fn rename_allowed(&self, source: &Path, name: &str) -> bool {
++        let mut parts = Path::new(name).components();
++        matches!(parts.next(), Some(Component::Normal(n)) if n == name)
++            && parts.next().is_none()
++            && self.allows(source)
++            && source.parent().is_some_and(|p| self.allows(&p.join(name)))
++    }
++
++    // Some Android images create the public media directories lazily. Only
++    // initialize an advertised root, never arbitrary paths from a read request.
++    pub fn prepare_directory(&self, path: &Path) -> std::io::Result<()> {
++        if !self.allows(path) {
++            return Err(std::io::Error::new(
++                std::io::ErrorKind::PermissionDenied,
++                DENIED,
++            ));
++        }
++        if path == self.logs || PUBLIC.iter().any(|(_, dir)| path == self.storage.join(dir)) {
++            std::fs::create_dir_all(path)?;
++        }
++        Ok(())
++    }
++
++    pub fn default_dir(&self) -> Option<PathBuf> {
++        [self.storage.join("Download"), self.logs.clone()]
++            .into_iter()
++            .find(|p| self.allows(p))
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use std::{
++        fs,
++        os::unix::fs::symlink,
++        sync::atomic::{AtomicUsize, Ordering},
++    };
++    struct Device(PathBuf, Scope);
++    impl Device {
++        fn new() -> Self {
++            static NEXT: AtomicUsize = AtomicUsize::new(0);
++            let temp = std::env::temp_dir().join(format!(
++                "sd-scope-{}-{}",
++                std::process::id(),
++                NEXT.fetch_add(1, Ordering::Relaxed)
++            ));
++            fs::create_dir(&temp).unwrap();
++            let storage = temp.join("emulated/12");
++            let home = storage.join("Android/data/test.app/files");
++            let logs = home.join("test/Logs");
++            fs::create_dir_all(&logs).unwrap();
++            for (_, dir) in PUBLIC {
++                fs::create_dir_all(storage.join(dir)).unwrap();
++            }
++            Self(
++                temp,
++                Scope {
++                    storage,
++                    home,
++                    logs,
++                    authorized: true,
++                },
++            )
++        }
++    }
++    impl Drop for Device {
++        fn drop(&mut self) {
++            let _ = fs::remove_dir_all(&self.0);
++        }
++    }
++
++    #[test]
++    fn exact_roots_and_non_owner_user() {
++        let dev = Device::new();
++        let s = &dev.1;
++        for (_, dir) in PUBLIC {
++            assert!(s.allows(&s.storage.join(dir).join("new/sub/file")));
++        }
++        for name in [
++            "",
++            "Download2/file",
++            "Android/data",
++            "Android/data/another/files",
++            "../0/Download",
++        ] {
++            assert!(!s.allows(&s.storage.join(name)));
++        }
++        assert!(!s.allows(Path::new("/system")));
++        assert!(!s.allows(Path::new("Download/file")));
++        assert!(!s.allows(&s.home));
++        assert!(s.allows(&s.logs.join("today.log")));
++    }
++    #[test]
++    fn normalize_before_membership() {
++        let dev = Device::new();
++        let s = &dev.1;
++        fs::create_dir(s.storage.join("Download/sub")).unwrap();
++        assert!(s.allows(&s.storage.join("Download/sub//./../out")));
++        assert!(!s.allows(&s.storage.join("Download/../Android/data")));
++        assert!(!s.allows(&s.storage.join("Download/missing/../../outside")));
++    }
++    #[test]
++    fn symlinks_missing_tails_and_sidecars() {
++        let dev = Device::new();
++        let s = &dev.1;
++        let dl = s.storage.join("Download");
++        symlink(&s.home, dl.join("escape")).unwrap();
++        symlink(s.home.join("missing"), dl.join("dangling")).unwrap();
++        symlink(s.home.join("private"), dl.join("job.download")).unwrap();
++        symlink(&s.home, dl.join("job.digest")).unwrap();
++        for name in [
++            "escape",
++            "escape/sub",
++            "escape/../file",
++            "dangling",
++            "dangling/new",
++            "job.download",
++            "job.digest",
++        ] {
++            assert!(!s.allows(&dl.join(name)), "{name}");
++        }
++        symlink(&dl, s.home.join("back")).unwrap();
++        assert!(!s.allows(&s.home.join("back/file")));
++        fs::remove_dir(s.storage.join("Pictures")).unwrap();
++        symlink(&s.home, s.storage.join("Pictures")).unwrap();
++        assert!(!s.allows(&s.storage.join("Pictures/private")));
++    }
++    #[test]
++    fn parent_after_symlink_cannot_change_meaning_on_replacement() {
++        let dev = Device::new();
++        let scope = &dev.1;
++        let root = scope.storage.join("Download");
++        fs::create_dir_all(root.join("one/two")).unwrap();
++        symlink(root.join("one/two"), root.join("alias")).unwrap();
++        assert!(scope.allows(&root.join("alias/inside")));
++        assert!(!scope.allows(&root.join("alias/../../secret")));
++    }
++
++    #[test]
++    fn rename_checks_both_endpoints() {
++        let dev = Device::new();
++        let s = &dev.1;
++        let dl = s.storage.join("Download");
++        symlink(&s.home, dl.join("outside")).unwrap();
++        assert!(s.rename_allowed(&dl.join("old"), "new"));
++        for name in ["../Android/data", "/system", "outside", "", ".", ".."] {
++            assert!(!s.rename_allowed(&dl.join("old"), name));
++        }
++        assert!(!s.rename_allowed(&dl.join("outside"), "new"));
++    }
++    #[test]
++    fn fresh_device_can_open_download_without_creating_arbitrary_directories() {
++        let mut dev = Device::new();
++        let scope = &mut dev.1;
++        let download = scope.storage.join("Download");
++        fs::remove_dir(&download).unwrap();
++        assert_eq!(scope.default_dir().as_ref(), Some(&download));
++        scope.prepare_directory(&download).unwrap();
++        assert!(download.is_dir());
++        let unknown = download.join("missing");
++        scope.prepare_directory(&unknown).unwrap();
++        assert!(!unknown.exists());
++        scope.authorized = false;
++        assert!(scope.prepare_directory(&download).is_err());
++    }
++
++    #[test]
++    fn revoke_grant_keeps_only_logs() {
++        let mut dev = Device::new();
++        let s = &mut dev.1;
++        assert_eq!(s.default_dir(), Some(s.storage.join("Download")));
++        s.authorized = false;
++        assert!(!s.allows(&s.storage.join("DCIM/image")));
++        assert_eq!(s.default_dir(), Some(s.logs.clone()));
++        s.logs = PathBuf::new();
++        assert_eq!(s.default_dir(), None);
++    }
++}
+diff --git a/src/common/android_peer_io.rs b/src/common/android_peer_io.rs
+new file mode 100644
+index 0000000..03ee12a
+--- /dev/null
++++ b/src/common/android_peer_io.rs
+@@ -0,0 +1,7 @@
++//! Coordinate namespace changes across the Android connection and CM threads.
++//! Ordinary peer operations may overlap. Renames and removals can replace a
++//! subtree or unlink a symlink, so exclude them during path checks and I/O
++//! in every peer session.
++use hbb_common::tokio::sync::RwLock;
++
++pub static PEER_IO: RwLock<()> = RwLock::const_new(());
+diff --git a/src/lang/cn.rs b/src/lang/cn.rs
+index bd2f320..6fff4a5 100644
+--- a/src/lang/cn.rs
++++ b/src/lang/cn.rs
+@@ -19,6 +19,14 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
+         ("Copy ID", "复制设备 ID"),
+         ("This device ID", "本机设备 ID"),
+         ("Notifications", "通知"),
++        ("Pictures", "图片"),
++        ("DCIM", "相机（DCIM）"),
++        ("Videos", "视频"),
++        ("SteadDesk logs", "SteadDesk 日志"),
++        ("Common locations", "常用位置"),
++        ("Device not authorized", "设备未授权"),
++        ("Unavailable", "不可用"),
++        ("This location is not allowed", "此位置不允许访问"),
+         ("Your Desktop", "你的桌面"),
+         ("desk_tip", "你的桌面可以通过下面的 ID 和密码访问。"),
+         ("Password", "密码"),
+diff --git a/src/server/connection.rs b/src/server/connection.rs
+index 78f84a4..ae1bb98 100644
+--- a/src/server/connection.rs
++++ b/src/server/connection.rs
+@@ -1052,7 +1052,12 @@ impl Connection {
+                 _ = conn.file_timer.tick() => {
+                     if !conn.read_jobs.is_empty() {
+                         conn.send_to_cm(ipc::Data::FileTransferLog(("transfer".to_string(), fs::serialize_transfer_jobs(&conn.read_jobs))));
+-                        match fs::handle_read_jobs(&mut conn.read_jobs, &mut conn.stream).await {
++                        let result = {
++                            #[cfg(target_os = "android")]
++                            let _peer_io = crate::common::android_peer_io::PEER_IO.read().await;
++                            fs::handle_read_jobs(&mut conn.read_jobs, &mut conn.stream).await
++                        };
++                        match result {
+                             Ok(log) => {
+                                 if !log.is_empty() {
+                                     conn.send_to_cm(ipc::Data::FileTransferLog(("transfer".to_string(), log)));
+@@ -1958,6 +1963,21 @@ impl Connection {
+         {
+             pi.hostname = DEVICE_NAME.lock().unwrap().clone();
+             pi.platform = "Android".into();
++            if self.file_transfer.is_some() && !hbb_common::config::SUPPORT_EDITION {
++                let scope = crate::common::android_scope();
++                let mut locations = json!({
++                    "authorized": scope.authorized && scope.storage.is_absolute(),
++                    "logs": if scope.allows(&scope.logs) { scope.logs.to_str().unwrap_or("") } else { "" }
++                });
++                for (key, dir) in crate::common::android_file_scope::PUBLIC {
++                    locations[key] = if scope.storage.is_absolute() {
++                        json!(scope.storage.join(dir))
++                    } else {
++                        json!("")
++                    };
++                }
++                pi.platform_additions = json!({"steaddesk_file_scope": locations}).to_string();
++            }
+         }
+         #[cfg(all(target_os = "macos", not(feature = "unix-file-copy-paste")))]
+         let mut platform_additions = serde_json::Map::new();
+@@ -2180,17 +2200,25 @@ impl Connection {
+         self.update_scoped_login_options().await;
+         if let Some((dir, show_hidden)) = self.file_transfer.clone() {
+             self.keyboard = false;
+-            let is_existing_dir = !dir.is_empty() && std::path::Path::new(&dir).is_dir();
+-            let is_allowed_dir =
+-                is_existing_dir && crate::common::is_peer_path_allowed(&dir, false);
+             #[cfg(target_os = "android")]
+-            if is_existing_dir && !is_allowed_dir {
+-                log::warn!(
+-                    "Use the app workspace because the initial file-transfer directory is outside it: {}",
+-                    dir
+-                );
+-            }
+-            let dir = if is_allowed_dir { &dir } else { "" };
++            let dir = {
++                if !dir.is_empty() && !crate::common::is_peer_path_allowed(&dir, false) {
++                    self.send(fs::new_error(
++                        0,
++                        crate::common::android_file_scope::DENIED,
++                        -1,
++                    ))
++                    .await;
++                }
++                // Resolve the current default in the filesystem handler, including on reconnect.
++                ""
++            };
++            #[cfg(not(target_os = "android"))]
++            let dir = if !dir.is_empty() && std::path::Path::new(&dir).is_dir() {
++                &dir
++            } else {
++                ""
++            };
+             if !wait_session_id_confirm {
+                 self.read_dir(dir, show_hidden);
+             } else {
+@@ -3489,6 +3517,10 @@ impl Connection {
+                         }
+                     }
+                     if handle_fa {
++                        // Direct reads and confirmations run here. send_fs only queues
++                        // CM work and never waits for the CM's separate lock acquisition.
++                        #[cfg(target_os = "android")]
++                        let _peer_io = crate::common::android_peer_io::PEER_IO.read().await;
+                         if self.delayed_read_dir.is_some() {
+                             if let Some(file_action::Union::ReadDir(rd)) = fa.union {
+                                 self.delayed_read_dir = Some((rd.path, rd.include_hidden));
+@@ -3521,8 +3553,7 @@ impl Connection {
+                                 return true;
+                             }
+                         }
+-                        // Android is scoped-storage only: reject any peer supplied path that
+-                        // escapes the app workspace before it reaches the filesystem.
++                        // Reject peer paths before dispatch; CM also checks at the filesystem boundary.
+                         #[cfg(target_os = "android")]
+                         {
+                             // (path, job id, allow empty) of the peer supplied path this action
+@@ -3564,34 +3595,25 @@ impl Connection {
+                             };
+                             if let Some((path, job_id, allow_empty)) = checked {
+                                 if !crate::common::is_peer_path_allowed(path, allow_empty) {
+-                                    log::warn!(
+-                                        "Reject file action outside the app workspace: {}",
+-                                        path
+-                                    );
+-                                    if job_id >= 0 {
+-                                        self.send(fs::new_error(job_id, "Permission denied", -1))
+-                                            .await;
+-                                    }
++                                    self.send(fs::new_error(
++                                        job_id,
++                                        crate::common::android_file_scope::DENIED,
++                                        -1,
++                                    ))
++                                    .await;
+                                     return true;
+                                 }
+                             }
+                             if let Some(file_action::Union::Rename(r)) = &fa.union {
+-                                let destination = std::path::Path::new(&r.path)
+-                                    .parent()
+-                                    .map(|parent| parent.join(&r.new_name));
+-                                let allowed = destination
+-                                    .as_deref()
+-                                    .and_then(std::path::Path::to_str)
+-                                    .map_or(false, |path| {
+-                                        crate::common::is_peer_path_allowed(path, false)
+-                                    });
+-                                if !allowed {
+-                                    log::warn!(
+-                                        "Reject rename destination outside the app workspace: {:?}",
+-                                        destination
+-                                    );
+-                                    self.send(fs::new_error(r.id, "Permission denied", -1))
+-                                        .await;
++                                if !crate::common::android_scope()
++                                    .rename_allowed(std::path::Path::new(&r.path), &r.new_name)
++                                {
++                                    self.send(fs::new_error(
++                                        r.id,
++                                        crate::common::android_file_scope::DENIED,
++                                        -1,
++                                    ))
++                                    .await;
+                                     return true;
+                                 }
+                             }
+@@ -3612,7 +3634,11 @@ impl Connection {
+                                         conn_id: self.inner.id(),
+                                     });
+                                 } else {
+-                                    match fs::get_recursive_files(&f.path, f.include_hidden) {
++                                    match fs::get_recursive_files_with_guard(
++                                        &f.path,
++                                        f.include_hidden,
++                                        crate::common::peer_file_guard(),
++                                    ) {
+                                         Err(err) => {
+                                             log::error!(
+                                                 "Failed to get recursive files for {}: {}",
+@@ -3780,6 +3806,10 @@ impl Connection {
+                             }
+                             Some(file_action::Union::SendConfirm(r)) => {
+                                 if let Some(job) = fs::get_job(r.id, &mut self.read_jobs) {
++                                    if let Err(err) = job.check_peer_entry(r.file_num, true) {
++                                        self.send(fs::new_error(r.id, err, r.file_num)).await;
++                                        return true;
++                                    }
+                                     job.confirm(&r).await;
+                                 } else if self.cm_read_job_ids.contains(&r.id) {
+                                     // Forward to CM for CM-read jobs
+@@ -5557,7 +5587,7 @@ impl Connection {
+         path: String,
+         check_file_limit: bool,
+     ) {
+-        match fs::TransferJob::new_read(
++        match fs::TransferJob::new_read_with_guard(
+             id,
+             job_type,
+             "".to_string(),
+@@ -5566,6 +5596,11 @@ impl Connection {
+             include_hidden,
+             false,
+             overwrite_detection,
++            if job_type == fs::JobType::Generic {
++                crate::common::peer_file_guard()
++            } else {
++                None
++            },
+         ) {
+             Err(err) => {
+                 self.send(fs::new_error(id, err, 0)).await;
+diff --git a/src/ui_cm_interface.rs b/src/ui_cm_interface.rs
+index ee64eaa..99c7718 100644
+--- a/src/ui_cm_interface.rs
++++ b/src/ui_cm_interface.rs
+@@ -979,9 +979,21 @@ async fn handle_fs(
+     tx_log: Option<&UnboundedSender<String>>,
+     _conn_id: i32,
+ ) {
+-    // Android is scoped-storage only, so every peer supplied path has to stay inside the
+-    // app workspace. This is the filesystem boundary, keep it enforced here even though
+-    // `Connection` rejects out-of-workspace requests earlier as well.
++    // The connection only enqueues this message. Hold the guard in the CM
++    // until the actual operation (including spawn_blocking work) finishes.
++    #[cfg(target_os = "android")]
++    let (_namespace_change, _ordinary) = {
++        use crate::common::android_peer_io::PEER_IO;
++        if matches!(
++            &fs,
++            ipc::FS::Rename { .. } | ipc::FS::RemoveFile { .. } | ipc::FS::RemoveDir { .. }
++        ) {
++            (Some(PEER_IO.write().await), None)
++        } else {
++            (None, Some(PEER_IO.read().await))
++        }
++    };
++    // Validate again on the device when each queued filesystem request is consumed.
+     #[cfg(target_os = "android")]
+     {
+         // (path, job id, file num, allow empty) of the peer supplied path this message
+@@ -1007,29 +1019,20 @@ async fn handle_fs(
+         };
+         if let Some((path, id, file_num, allow_empty)) = checked {
+             if !crate::common::is_peer_path_allowed(path, allow_empty) {
+-                log::warn!("Reject file operation outside the app workspace: {}", path);
+-                if id >= 0 {
+-                    send_raw(fs::new_error(id, "Permission denied", file_num), tx);
+-                }
++                send_raw(
++                    fs::new_error(id, crate::common::android_file_scope::DENIED, file_num),
++                    tx,
++                );
+                 return;
+             }
+         }
+         if let ipc::FS::Rename { path, new_name, id } = &fs {
+-            let destination = std::path::Path::new(path)
+-                .parent()
+-                .map(|parent| parent.join(new_name));
+-            let allowed = destination
+-                .as_deref()
+-                .and_then(std::path::Path::to_str)
+-                .map_or(false, |path| {
+-                    crate::common::is_peer_path_allowed(path, false)
+-                });
+-            if !allowed {
+-                log::warn!(
+-                    "Reject rename destination outside the app workspace: {:?}",
+-                    destination
++            if !crate::common::android_scope().rename_allowed(std::path::Path::new(path), new_name)
++            {
++                send_raw(
++                    fs::new_error(*id, crate::common::android_file_scope::DENIED, 0),
++                    tx,
+                 );
+-                send_raw(fs::new_error(*id, "Permission denied", 0), tx);
+                 return;
+             }
+         }
+@@ -1091,6 +1094,10 @@ async fn handle_fs(
+                 false,
+                 overwrite_detection,
+             );
++            #[cfg(target_os = "android")]
++            {
++                job.peer_path_guard = crate::common::peer_file_guard();
++            }
+             if let Err(e) = job.set_files(file_entries) {
+                 log::warn!("Reject unsafe transfer file list for {}: {}", path, e);
+                 send_raw(fs::new_error(id, e, file_num), tx);
+@@ -1102,7 +1109,10 @@ async fn handle_fs(
+         }
+         ipc::FS::CancelWrite { id } => {
+             if let Some(job) = fs::remove_job(id, write_jobs) {
+-                job.remove_download_file();
++                if let Err(err) = job.remove_download_file_checked() {
++                    send_raw(fs::new_error(id, err, job.file_num()), tx);
++                    return;
++                }
+                 if let Some(tx) = tx_log {
+                     if let Err(e) = tx.send(serialize_transfer_job(&job, false, true, "")) {
+                         log::error!("error sending transfer job log via IPC: {}", e);
+@@ -1112,7 +1122,10 @@ async fn handle_fs(
+         }
+         ipc::FS::WriteDone { id, file_num } => {
+             if let Some(job) = fs::remove_job(id, write_jobs) {
+-                job.modify_time();
++                if let Err(err) = job.modify_time_checked() {
++                    send_raw(fs::new_error(id, err, file_num), tx);
++                    return;
++                }
+                 send_raw(fs::new_done(id, file_num), tx);
+                 tx_log.map(|tx| tx.send(serialize_transfer_job(&job, true, false, "")));
+             }
+@@ -1153,6 +1166,10 @@ async fn handle_fs(
+             is_resume,
+         } => {
+             if let Some(job) = fs::get_job(id, write_jobs) {
++                if let Err(err) = job.check_peer_entry(file_num, true) {
++                    send_raw(fs::new_error(id, err, file_num), tx);
++                    return;
++                }
+                 let mut req = FileTransferSendConfirmRequest {
+                     id,
+                     file_num,
+@@ -1204,6 +1221,10 @@ async fn handle_fs(
+         ipc::FS::SendConfirm(bytes) => {
+             if let Ok(r) = FileTransferSendConfirmRequest::parse_from_bytes(&bytes) {
+                 if let Some(job) = fs::get_job(r.id, write_jobs) {
++                    if let Err(err) = job.check_peer_entry(r.file_num, true) {
++                        send_raw(fs::new_error(r.id, err, r.file_num), tx);
++                        return;
++                    }
+                     job.confirm(&r).await;
+                 }
+             }
+@@ -1306,7 +1327,7 @@ async fn start_read_job(
+     let path_clone = path.clone();
+     let result = spawn_blocking(move || -> ResultType<fs::TransferJob> {
+         let data_source = fs::DataSource::FilePath(PathBuf::from(&path));
+-        fs::TransferJob::new_read(
++        fs::TransferJob::new_read_with_guard(
+             id,
+             fs::JobType::Generic,
+             "".to_string(),
+@@ -1315,6 +1336,7 @@ async fn start_read_job(
+             include_hidden,
+             true,
+             overwrite_detection,
++            crate::common::peer_file_guard(),
+         )
+     })
+     .await;
+@@ -1541,7 +1563,10 @@ async fn read_all_files(
+     tx: &UnboundedSender<Data>,
+ ) {
+     let path_clone = path.clone();
+-    let result = spawn_blocking(move || fs::get_recursive_files(&path, include_hidden)).await;
++    let result = spawn_blocking(move || {
++        fs::get_recursive_files_with_guard(&path, include_hidden, crate::common::peer_file_guard())
++    })
++    .await;
+ 
+     let result = match result {
+         Ok(Ok(files)) => {
+@@ -1579,31 +1604,64 @@ async fn read_empty_dirs(dir: &str, include_hidden: bool, tx: &UnboundedSender<D
+     let path = dir.to_owned();
+     let path_clone = dir.to_owned();
+ 
+-    if let Ok(Ok(fds)) =
+-        spawn_blocking(move || fs::get_empty_dirs_recursive(&path, include_hidden)).await
++    let result = spawn_blocking(move || {
++        fs::get_empty_dirs_recursive_with_guard(
++            &path,
++            include_hidden,
++            crate::common::peer_file_guard(),
++        )
++    })
++    .await;
++    let fds = match result
++        .map_err(|e| e.to_string())
++        .and_then(|r| r.map_err(|e| e.to_string()))
+     {
+-        let mut msg_out = Message::new();
+-        let mut file_response = FileResponse::new();
+-        file_response.set_empty_dirs(ReadEmptyDirsResponse {
+-            path: path_clone,
+-            empty_dirs: fds,
+-            ..Default::default()
+-        });
+-        msg_out.set_file_response(file_response);
+-        send_raw(msg_out, tx);
+-    }
++        Ok(dirs) => dirs,
++        Err(error) => {
++            if crate::common::peer_file_guard().is_some() {
++                send_raw(fs::new_error(-1, error, -1), tx);
++            }
++            return;
++        }
++    };
++    let mut msg_out = Message::new();
++    let mut file_response = FileResponse::new();
++    file_response.set_empty_dirs(ReadEmptyDirsResponse {
++        path: path_clone,
++        empty_dirs: fds,
++        ..Default::default()
++    });
++    msg_out.set_file_response(file_response);
++    send_raw(msg_out, tx);
+ }
+ 
+ #[cfg(not(any(target_os = "ios")))]
+ async fn read_dir(dir: &str, include_hidden: bool, tx: &UnboundedSender<Data>) {
+     let path = {
+         if dir.is_empty() {
++            #[cfg(target_os = "android")]
++            {
++                let Some(path) = crate::common::android_scope().default_dir() else {
++                    send_raw(
++                        fs::new_error(0, crate::common::android_file_scope::DENIED, -1),
++                        tx,
++                    );
++                    return;
++                };
++                path
++            }
++            #[cfg(not(target_os = "android"))]
+             Config::get_home()
+         } else {
+             fs::get_path(dir)
+         }
+     };
+-    let result = spawn_blocking(move || fs::read_dir(&path, include_hidden)).await;
++    let result = spawn_blocking(move || {
++        #[cfg(target_os = "android")]
++        crate::common::android_scope().prepare_directory(&path)?;
++        fs::read_dir_with_guard(&path, include_hidden, crate::common::peer_file_guard())
++    })
++    .await;
+     let msg_out = match result {
+         Ok(Ok(fd)) => {
+             let mut msg_out = Message::new();
+@@ -1677,7 +1735,7 @@ async fn remove_dir(path: String, id: i32, recursive: bool, tx: &UnboundedSender
+     handle_result(
+         spawn_blocking(move || {
+             if recursive {
+-                fs::remove_all_empty_dir(&path)
++                fs::remove_all_empty_dir_with_guard(&path, crate::common::peer_file_guard())
+             } else {
+                 std::fs::remove_dir(&path).map_err(|err| err.into())
+             }
+diff --git a/flutter/lib/steaddesk/file_transfer.dart b/flutter/lib/steaddesk/file_transfer.dart
+--- a/flutter/lib/steaddesk/file_transfer.dart
++++ b/flutter/lib/steaddesk/file_transfer.dart
+@@ -826,11 +826,13 @@
+                     decoration: InputDecoration(
+                         isDense: true, hintText: translate('Search'))),
+               Expanded(
+-                  child: Row(children: [
+-                SizedBox(width: 78, child: _places()),
+-                const VerticalDivider(width: 1, color: _ftLine),
+-                Expanded(child: _table()),
+-              ])),
++                  child: Obx(() => Row(children: [
++                        if (c.fileScope.value == null) ...[
++                          SizedBox(width: 78, child: _places()),
++                          const VerticalDivider(width: 1, color: _ftLine),
++                        ],
++                        Expanded(child: _table()),
++                      ]))),
+             ])),
+       ),
+     );

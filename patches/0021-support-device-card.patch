@@ -1,0 +1,792 @@
+diff --git a/flutter/lib/models/model.dart b/flutter/lib/models/model.dart
+index 47fb75b..a5ba9e6 100644
+--- a/flutter/lib/models/model.dart
++++ b/flutter/lib/models/model.dart
+@@ -1,4 +1,6 @@
+ import 'dart:async';
++import '../steaddesk/device_sessions.dart';
++import '../steaddesk/merchant_build.dart' show merchantEdition;
+ import 'dart:convert';
+ import 'dart:math';
+ import 'dart:typed_data';
+@@ -1383,6 +1385,12 @@ class FfiModel with ChangeNotifier {
+     }
+ 
+     final connType = parent.target?.connType;
++    if (isWindows && !merchantEdition && !isCache && connType == ConnType.defaultConn) {
++      final connection = bind.sessionGetConnSessionId(sessionId: sessionId);
++      if (connection.isNotEmpty) {
++        DeviceSessions.established(peerId, connection, _pi.version);
++      }
++    }
+     if (isPeerAndroid) {
+       _touchMode = true;
+     } else {
+diff --git a/flutter/lib/steaddesk/device_card.dart b/flutter/lib/steaddesk/device_card.dart
+new file mode 100644
+index 0000000..c41dabf
+--- /dev/null
++++ b/flutter/lib/steaddesk/device_card.dart
+@@ -0,0 +1,357 @@
++part of 'support_home.dart';
++
++enum _DeviceTab {
++  overview('Overview', true),
++  peripherals('Peripherals and network',
++      bool.fromEnvironment('STEADDESK_DEVICE_PERIPHERALS')),
++  reports(
++      'Historical reports', bool.fromEnvironment('STEADDESK_DEVICE_REPORTS'));
++
++  final String label;
++  final bool enabled;
++  const _DeviceTab(this.label, this.enabled);
++}
++
++abstract interface class DeviceNoteStore {
++  String read();
++  bool get editable;
++  bool get local;
++  Future<bool> save(String value);
++}
++
++class _EntryNotes implements DeviceNoteStore {
++  final String account, id;
++  final BaseAb? book;
++  _EntryNotes(this.account, this.id, this.book);
++  String get localKey =>
++      'support-device-note/${Uri.encodeComponent(account)}/${Uri.encodeComponent(id)}';
++  @override
++  bool get local => book == null || book!.isLegacy();
++  bool get _valid =>
++      account == gFFI.userModel.userName.value &&
++      (book == null ||
++          identical(book, gFFI.abModel.addressbooks[book!.name()]));
++  @override
++  bool get editable => _valid && (local || book!.canWrite());
++
++  @override
++  String read() => local
++      ? bind.getLocalFlutterOption(k: localKey)
++      : (book!.peers.firstWhereOrNull((p) => p.id == id)?.note ?? '');
++
++  @override
++  Future<bool> save(String value) async {
++    if (!editable) return false;
++    if (local) {
++      await bind.setLocalFlutterOption(k: localKey, v: value);
++      return true;
++    }
++    final ok = await book!.changeNote(id: id, note: value);
++    if (ok && _valid) {
++      final peer = book!.peers.firstWhereOrNull((p) => p.id == id);
++      if (peer != null) peer.note = value;
++      book!.peers.refresh();
++    }
++    return ok;
++  }
++}
++
++class _DeviceCard extends StatefulWidget {
++  final _Entry row;
++  final _DirectoryState directory;
++  final VoidCallback close;
++  const _DeviceCard(
++      {required super.key,
++      required this.row,
++      required this.directory,
++      required this.close});
++  @override
++  State<_DeviceCard> createState() => _DeviceCardState();
++}
++
++class _DeviceCardState extends State<_DeviceCard> {
++  final focus = FocusNode();
++  late final String account = gFFI.userModel.userName.value;
++  late final DeviceNoteStore notes =
++      _EntryNotes(account, widget.row.device.id, widget.row.source.book);
++  late String saved = notes.read();
++  late final editor = TextEditingController(text: saved);
++  static Future<void> _writes = Future.value();
++  String? queued;
++  _DeviceTab tab = _DeviceTab.overview;
++  late Future<List<String>> groups;
++
++  @override
++  void initState() {
++    super.initState();
++    groups = _groups();
++    _PersonalGroups.changes.addListener(_reloadGroups);
++    focus.addListener(_blur);
++  }
++
++  @override
++  void didUpdateWidget(_DeviceCard oldWidget) {
++    super.didUpdateWidget(oldWidget);
++    if (!focus.hasFocus && queued == null && editor.text == saved) {
++      final current = notes.read();
++      if (current != saved) editor.text = saved = current;
++    }
++  }
++
++  Future<List<String>> _groups() =>
++      _PersonalGroups.forDevice(account, widget.row.device.id);
++  void _reloadGroups() => setState(() => groups = _groups());
++  void _blur() {
++    if (!focus.hasFocus) _save();
++  }
++
++  void _save() {
++    final value = editor.text;
++    if (value == (queued ?? saved) || !notes.editable) return;
++    queued = value;
++    final store = notes;
++    _writes = _writes.then((_) async {
++      try {
++        if (!await store.save(value)) throw StateError('save');
++        saved = value;
++      } catch (_) {
++        showToast(translate('Could not save device note'));
++      } finally {
++        if (queued == value) queued = null;
++      }
++    });
++  }
++
++  @override
++  void dispose() {
++    _save();
++    focus.removeListener(_blur);
++    focus.dispose();
++    editor.dispose();
++    _PersonalGroups.changes.removeListener(_reloadGroups);
++    super.dispose();
++  }
++
++  bool get canRename => widget.row.source.book?.canWrite() ?? true;
++
++  Future<void> _rename() async {
++    final row = widget.row, book = row.source.book;
++    var name = row.device.alias;
++    final result = await showDialog<String>(
++        context: context,
++        builder: (ctx) => AlertDialog(
++                title: Text(translate('Display Name')),
++                content: TextFormField(
++                    initialValue: name,
++                    autofocus: true,
++                    maxLength: 100,
++                    onChanged: (s) => name = s,
++                    onFieldSubmitted: (s) => Navigator.pop(ctx, s.trim())),
++                actions: [
++                  TextButton(
++                      onPressed: () => Navigator.pop(ctx),
++                      child: Text(translate('Cancel'))),
++                  TextButton(
++                      onPressed: () => Navigator.pop(ctx, name.trim()),
++                      child: Text(translate('Save')))
++                ]));
++    if (!mounted ||
++        result == null ||
++        result == row.device.alias ||
++        !canRename ||
++        account != gFFI.userModel.userName.value) return;
++    try {
++      if (book != null &&
++          (!identical(gFFI.abModel.addressbooks[book.name()], book) ||
++              !await book.changeAlias(id: row.device.id, alias: result))) {
++        showToast(translate('Operation failed'));
++        return;
++      }
++      await bind.mainSetPeerAlias(id: row.device.id, alias: result);
++      row.source.peer.alias = result;
++      if (book != null) book.peers.refresh();
++      await bind.mainLoadRecentPeers();
++      await bind.mainLoadFavPeers();
++      if (mounted) widget.directory._refreshCard();
++    } catch (_) {
++      showToast(translate('Operation failed'));
++    }
++  }
++
++  Widget _info(String label, String value, {VoidCallback? tap}) => Padding(
++      padding: const EdgeInsets.symmetric(vertical: 5),
++      child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
++        SizedBox(
++            width: 94,
++            child: Text(translate(label),
++                style: const TextStyle(color: Color(0xff4b5563)))),
++        Expanded(
++            child: tap == null
++                ? SelectableText(value)
++                : InkWell(
++                    onTap: tap,
++                    child: Text(value, style: const TextStyle(color: _blue))))
++      ]));
++
++  @override
++  Widget build(BuildContext context) {
++    final row = widget.row, d = row.device, dir = widget.directory;
++    final book = row.source.book;
++    final sessions = DeviceSessions.read(d.id);
++    final status =
++        d.online == null ? null : translate(d.online! ? 'Online' : 'Offline');
++    final shared = book != null &&
++        !book.isPersonal() &&
++        (row.source.peer.password.isNotEmpty ||
++            gFFI.abModel.getdefaultSharedPassword(book) != null);
++    final tabs = _DeviceTab.values.where((t) => t.enabled).toList();
++    final name = d.alias.isNotEmpty
++        ? d.alias
++        : d.name.isNotEmpty
++            ? d.name
++            : d.id;
++    return Material(
++        color: Colors.white,
++        child: Column(children: [
++          ListTile(
++              leading: Icon(
++                  d.platform.toLowerCase() == 'android'
++                      ? Icons.tablet_android
++                      : Icons.devices,
++                  color: _blue),
++              title: Row(children: [
++                Flexible(
++                    child: Text(name,
++                        maxLines: 2, overflow: TextOverflow.ellipsis)),
++                if (canRename)
++                  IconButton(
++                      iconSize: 16,
++                      tooltip: translate('Rename'),
++                      onPressed: _rename,
++                      icon: const Icon(Icons.edit_outlined))
++              ]),
++              subtitle: status == null ? null : Text(status),
++              trailing: IconButton(
++                  onPressed: widget.close,
++                  tooltip: translate('Close'),
++                  icon: const Icon(Icons.close))),
++          if (tabs.length > 1)
++            Wrap(children: [
++              for (final t in tabs)
++                TextButton(
++                    onPressed: () => setState(() => tab = t),
++                    child: Text(translate(t.label),
++                        style: TextStyle(
++                            fontWeight: tab == t
++                                ? FontWeight.bold
++                                : FontWeight.normal)))
++            ]),
++          const Divider(height: 1),
++          Expanded(
++              child: tab != _DeviceTab.overview
++                  ? const SizedBox.shrink()
++                  : ListView(padding: const EdgeInsets.all(16), children: [
++                      Text(translate('Device ID')),
++                      Row(children: [
++                        Expanded(
++                            child: SelectableText(d.id,
++                                style: const TextStyle(
++                                    fontSize: 22,
++                                    fontWeight: FontWeight.w600))),
++                        IconButton(
++                            tooltip: translate('Copy ID'),
++                            onPressed: () =>
++                                Clipboard.setData(ClipboardData(text: d.id)),
++                            icon: const Icon(Icons.copy_outlined))
++                      ]),
++                      TextButtonTheme(
++                          data: TextButtonThemeData(
++                              style: TextButton.styleFrom(
++                                  foregroundColor: _blue,
++                                  minimumSize: const Size(0, 40),
++                                  padding: const EdgeInsets.symmetric(
++                                      horizontal: 6))),
++                          child: Wrap(
++                              crossAxisAlignment: WrapCrossAlignment.center,
++                              children: [
++                                TextButton(
++                                    onPressed: () => dir._connect(row),
++                                    child: Text(translate('Connect'))),
++                                TextButton(
++                                    onPressed: () => connectInPeerTab(context,
++                                        row.source.peer, row.source.tab,
++                                        addressBook: book,
++                                        isFileTransfer: true),
++                                    child: Text(translate('Transfer file'))),
++                                TextButton(
++                                    onPressed: () => dir._details(row),
++                                    child: Text(translate('Device status'))),
++                                if (const bool.fromEnvironment(
++                                    'STEADDESK_DEVICE_SNAPSHOT'))
++                                  TextButton(
++                                      onPressed: null,
++                                      child: Text(translate('Snapshot'))),
++                                _DeviceMenu(
++                                    row: row,
++                                    directory: dir,
++                                    openOnTap: true,
++                                    child:
++                                        const Icon(Icons.more_horiz, size: 20)),
++                              ])),
++                      const Divider(),
++                      if (d.name.isNotEmpty) _info('Device name', d.name),
++                      if (d.platform.isNotEmpty || d.model.isNotEmpty)
++                        _info(
++                            'Model',
++                            [d.model, d.platform]
++                                .where((s) => s.isNotEmpty)
++                                .join(' · ')),
++                      if (d.merchant != null)
++                        _info(
++                            'Merchant / store',
++                            [
++                              if (d.groupName.isNotEmpty) d.groupName,
++                              d.merchant!,
++                              d.store!
++                            ].join(' › '),
++                            tap: () =>
++                                dir.selectScope('${d.merchant}/${d.store}')),
++                      FutureBuilder<List<String>>(
++                          future: groups,
++                          builder: (_, snap) => (snap.data ?? []).isEmpty
++                              ? const SizedBox.shrink()
++                              : _info('My groups', snap.data!.join(' · '))),
++                      if (shared)
++                        _info(
++                            'Access password',
++                            translate(
++                                'Shared password · managed by the system')),
++                      if (sessions.isNotEmpty &&
++                          sessions.first.version.isNotEmpty)
++                        _info('Version', sessions.first.version),
++                      if (notes.editable || saved.isNotEmpty) ...[
++                        const Divider(),
++                        Text(translate(
++                            notes.local ? 'Local device note' : 'Note')),
++                        TextField(
++                            controller: editor,
++                            focusNode: focus,
++                            readOnly: !notes.editable,
++                            minLines: 2,
++                            maxLines: 5,
++                            decoration: const InputDecoration(
++                                border: OutlineInputBorder())),
++                      ],
++                      if (sessions.isNotEmpty) ...[
++                        const Divider(),
++                        Text(translate('Recent sessions')),
++                        for (final item in sessions)
++                          Padding(
++                              padding: const EdgeInsets.symmetric(vertical: 4),
++                              child: Text(
++                                  '${MaterialLocalizations.of(context).formatMediumDate(item.time)} · ${MaterialLocalizations.of(context).formatTimeOfDay(TimeOfDay.fromDateTime(item.time))}')),
++                      ],
++                    ])),
++        ]));
++  }
++}
+diff --git a/flutter/lib/steaddesk/device_sessions.dart b/flutter/lib/steaddesk/device_sessions.dart
+new file mode 100644
+index 0000000..784e043
+--- /dev/null
++++ b/flutter/lib/steaddesk/device_sessions.dart
+@@ -0,0 +1,46 @@
++import 'dart:convert';
++
++import '../models/platform_model.dart';
++
++// Upstream recent peers contain one entry per ID, without individual session
++// times. Record only live peer-info handshakes; never serialize the Peer.
++class DeviceSessions {
++  static const _key = 'steaddesk-recent-handshakes';
++
++  static List<({String session, DateTime time, String version})> read(
++      String id) {
++    final raw = bind.mainGetPeerOptionSync(id: id, key: _key);
++    if (raw.isEmpty) return [];
++    try {
++      final rows = jsonDecode(raw);
++      if (rows is! List) return [];
++      return [
++        for (final row in rows)
++          if (row
++              case {'session': String s, 'time': String t, 'version': String v})
++            if (DateTime.tryParse(t) case final time?)
++              (session: s, time: time.toLocal(), version: v),
++      ].take(3).toList();
++    } on FormatException {
++      return [];
++    }
++  }
++
++  static void established(String id, String session, String version) {
++    final rows = read(id);
++    if (rows.any((r) => r.session == session)) return;
++    final now = DateTime.now().toUtc().toIso8601String();
++    bind.mainSetPeerOptionSync(
++        id: id,
++        key: _key,
++        value: jsonEncode([
++          {'session': session, 'time': now, 'version': version},
++          for (final r in rows.take(2))
++            {
++              'session': r.session,
++              'time': r.time.toUtc().toIso8601String(),
++              'version': r.version
++            },
++        ]));
++  }
++}
+diff --git a/flutter/lib/steaddesk/support_device_menu.dart b/flutter/lib/steaddesk/support_device_menu.dart
+index f940487..ce8207b 100644
+--- a/flutter/lib/steaddesk/support_device_menu.dart
++++ b/flutter/lib/steaddesk/support_device_menu.dart
+@@ -26,6 +26,16 @@ class _PersonalGroups {
+ 
+   static Future<List<String>> names(String account) async =>
+       _groups(await _read(await _file()), account).keys.toList()..sort();
++  static final changes = ValueNotifier(0);
++  static Future<List<String>> forDevice(String account, String id) async {
++    if (account.isEmpty) return [];
++    final groups = _groups(await _read(await _file()), account);
++    return groups.keys
++        .where((name) => (groups[name] as List).contains(id))
++        .toList()
++      ..sort();
++  }
++
+   static Future<void> _pending = Future.value();
+   static Future<void> add(String account, String name, String id) {
+     final next = _pending.then((_) => _write(account, name, id));
+@@ -47,6 +57,7 @@ class _PersonalGroups {
+       final next = File('${file.path}.tmp');
+       await next.writeAsString(jsonEncode(doc), flush: true);
+       await next.rename(file.path);
++      changes.value++;
+     } finally {
+       await lock.close();
+     }
+@@ -58,11 +69,13 @@ class _DeviceMenu extends StatefulWidget {
+   final _DirectoryState directory;
+   final Widget child;
+   final ValueChanged<bool>? onOpenChanged;
++  final bool openOnTap;
+   const _DeviceMenu(
+       {required this.row,
+       required this.directory,
+       required this.child,
+-      this.onOpenChanged});
++      this.onOpenChanged,
++      this.openOnTap = false});
+   @override
+   State<_DeviceMenu> createState() => _DeviceMenuState();
+ }
+@@ -76,10 +89,9 @@ class _DeviceMenuState extends State<_DeviceMenu> {
+   int opening = 0;
+   String get account => gFFI.userModel.userName.value;
+   void _error() => showToast(translate('Operation failed'));
+-  Future<void> _open(TapDownDetails tap) async {
++  Future<void> _open(Offset position) async {
+     final serial = ++opening;
+     final id = widget.row.device.id, user = account;
+-    final position = tap.localPosition;
+     try {
+       final favs = await bind.mainGetFav();
+       List<String> groups = [];
+@@ -211,10 +223,15 @@ class _DeviceMenuState extends State<_DeviceMenu> {
+               () => _favorite(id, !favorite)),
+           _button('Copy ID', () => Clipboard.setData(ClipboardData(text: id))),
+         ],
+-        child: GestureDetector(
+-            behavior: HitTestBehavior.translucent,
+-            onSecondaryTapDown: _open,
+-            child: widget.child));
++        child: widget.openOnTap
++            ? IconButton(
++                tooltip: translate('More'),
++                icon: widget.child,
++                onPressed: () => _open(Offset.zero))
++            : GestureDetector(
++                behavior: HitTestBehavior.translucent,
++                onSecondaryTapDown: (tap) => _open(tap.localPosition),
++                child: widget.child));
+   }
+ 
+   List<String> _managedStores(_DirectoryState dir) {
+diff --git a/flutter/lib/steaddesk/support_directory.dart b/flutter/lib/steaddesk/support_directory.dart
+index e5be28e..2ede8e3 100644
+--- a/flutter/lib/steaddesk/support_directory.dart
++++ b/flutter/lib/steaddesk/support_directory.dart
+@@ -17,11 +17,32 @@ class _DirectoryState extends State<_Directory> {
+   final presenceChanges = ValueNotifier(0);
+   final presence = <String, bool>{};
+   final lastReport = <String, DateTime>{};
+-  final loadedBooks = <BaseAb>{};
+   final closed = <String>{};
+   Set<String> ids = {};
+   String scope = '';
++  String get _cardKey =>
++      'support-device-card/${Uri.encodeComponent(gFFI.userModel.userName.value)}';
++  final localAliases = <String, String>{};
++  void _refreshCard() => setState(localAliases.clear);
++  String? selectedDevice;
++  String cardOwnerKey = '';
+   var filter = DeviceFilter.all;
++
++  void _openCard(_Entry row) {
++    if (widget.page != SupportPage.devices) {
++      _details(row);
++      return;
++    }
++    setState(() => selectedDevice = row.device.id);
++    bind.setLocalFlutterOption(k: _cardKey, v: row.device.id);
++  }
++
++  void _closeCard() {
++    if (selectedDevice == null) return;
++    setState(() => selectedDevice = null);
++    bind.setLocalFlutterOption(k: _cardKey, v: '');
++  }
++
+   late final Timer timer;
+ 
+   @override
+@@ -90,17 +111,6 @@ class _DirectoryState extends State<_Directory> {
+     WidgetsBinding.instance.addPostFrameCallback((_) => _query());
+   }
+ 
+-  void _loadBook(BaseAb book) {
+-    if (book.initialized || !loadedBooks.add(book)) return;
+-    WidgetsBinding.instance.addPostFrameCallback((_) {
+-      if (mounted &&
+-          gFFI.userModel.isLogin &&
+-          gFFI.abModel.addressbooks[book.name()] == book &&
+-          !book.initialized &&
+-          !book.abPulling) book.pullAb(quiet: true);
+-    });
+-  }
+-
+   @override
+   void dispose() {
+     timer.cancel();
+@@ -140,10 +150,6 @@ class _DirectoryState extends State<_Directory> {
+       // Prefer the active book when an ID is shared across multiple books.
+       for (final book in {ab.current, ...ab.addressbooks.values}) {
+         if (!ab.addressbooks.containsKey(book.name())) continue;
+-        if (!searchIndex &&
+-            directory &&
+-            !book.isPersonal() &&
+-            book != ab.current) _loadBook(book);
+         for (final p in book.peers) {
+           if (directory || all.containsKey(p.id)) add(p, PeerTabIndex.ab, book);
+         }
+@@ -171,10 +177,17 @@ class _DirectoryState extends State<_Directory> {
+       final peers = entry.value.map((s) => s.peer);
+       String first(String Function(Peer) read) =>
+           peers.map(read).firstWhere((s) => s.isNotEmpty, orElse: () => '');
++      final alias = first((p) => p.alias);
+       return (
+         device: SupportDevice(
+             id: entry.key,
+-            alias: first((p) => p.alias),
++            alias:
++                alias.isNotEmpty || entry.value.first.tab != PeerTabIndex.group
++                    ? alias
++                    : localAliases.putIfAbsent(
++                        entry.key,
++                        () => bind.mainGetPeerOptionSync(
++                            id: entry.key, key: 'alias')),
+             hostnames: peers.map((p) => p.hostname).toList(),
+             platform: first((p) => p.platform),
+             groupName: first((p) => p.device_group_name),
+@@ -253,6 +266,13 @@ class _DirectoryState extends State<_Directory> {
+           Listenable.merge([gFFI.recentPeersModel, gFFI.favoritePeersModel]),
+       builder: (_, __) => Obx(() {
+             final entries = _entries();
++            if (cardOwnerKey != _cardKey) {
++              cardOwnerKey = _cardKey;
++              selectedDevice = bind.getLocalFlutterOption(k: cardOwnerKey);
++            }
++            final card = widget.page == SupportPage.devices
++                ? entries.firstWhereOrNull((e) => e.device.id == selectedDevice)
++                : null;
+             final devices = entries.map((e) => e.device);
+             final byScope = <String, (int, int)>{};
+             final stores = <String, Set<String>>{};
+@@ -274,8 +294,10 @@ class _DirectoryState extends State<_Directory> {
+             return LayoutBuilder(builder: (context, size) {
+               final treeWidth = size.maxWidth >= 850 ? 212.0 : 158.0;
+               // Keep columns usable at very small desktop window sizes.
+-              final width =
+-                  math.max(size.maxWidth, grouped ? treeWidth + 430 : 430.0);
++              final width = math.max(
++                  size.maxWidth,
++                  (grouped ? treeWidth + 430 : 430.0) +
++                      (card == null ? 0 : 361));
+               return SingleChildScrollView(
+                   scrollDirection: Axis.horizontal,
+                   child: SizedBox(
+@@ -345,7 +367,21 @@ class _DirectoryState extends State<_Directory> {
+                                                   color: Color(0xffeef0f2)),
+                                           itemBuilder: (_, i) =>
+                                               _row(rows[i]))),
+-                            ]))
++                            ])),
++                        if (card != null) ...[
++                          const VerticalDivider(width: 1),
++                          SizedBox(
++                              width: 360,
++                              child: _DeviceCard(
++                                  key: ValueKey((
++                                    cardOwnerKey,
++                                    card.device.id,
++                                    card.source.book
++                                  )),
++                                  row: card,
++                                  directory: this,
++                                  close: _closeCard)),
++                        ]
+                       ])));
+             });
+           }));
+@@ -455,7 +491,7 @@ class _DirectoryState extends State<_Directory> {
+         directory: this,
+         child: InkWell(
+             onDoubleTap: () => _connect(row),
+-            onTap: () => _details(row),
++            onTap: () => _openCard(row),
+             hoverColor: const Color(0xfff3f4f6),
+             child: _columns(
+                 Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+@@ -489,7 +525,7 @@ class _DirectoryState extends State<_Directory> {
+                         style: TextButton.styleFrom(
+                             padding: const EdgeInsets.symmetric(horizontal: 8)),
+                         onPressed: () =>
+-                            d.online == true ? _connect(row) : _details(row),
++                            d.online == true ? _connect(row) : _openCard(row),
+                         child: FittedBox(
+                             fit: BoxFit.scaleDown,
+                             child: Text(
+diff --git a/flutter/lib/steaddesk/support_home.dart b/flutter/lib/steaddesk/support_home.dart
+index d99cb82..63371dd 100644
+--- a/flutter/lib/steaddesk/support_home.dart
++++ b/flutter/lib/steaddesk/support_home.dart
+@@ -23,7 +23,10 @@ import '../consts.dart';
+ 
+ import '../models/platform_model.dart';
+ 
++import 'device_sessions.dart';
++
+ part 'support_directory.dart';
++part 'device_card.dart';
+ part 'support_search.dart';
+ part 'support_device_menu.dart';
+ part 'support_home_bar.dart';
+@@ -87,6 +90,53 @@ class _SupportHomeState extends State<SupportHome> {
+       p: GlobalKey<_DirectoryState>(),
+   };
+   final searchFocus = FocusNode();
++  final Set<BaseAb> _indexedBooks = {};
++  late final _indexListener = 'support-search-index-${identityHashCode(this)}';
++  late final Worker _loginListener;
++  bool _loadingBooks = false;
++  bool _rescanBooks = false;
++
++  Future<void> _startIndex() async {
++    if (!mounted || !gFFI.userModel.isLogin) return;
++    // Profiles may arrive after initState (cache, sign-in, or another pull).
++    // AbModel notifies _indexSharedBooks when its list/current pull completes.
++    await gFFI.abModel.pullAb(force: null, quiet: true);
++    await _indexSharedBooks();
++  }
++
++  Future<void> _indexSharedBooks() async {
++    final ab = gFFI.abModel;
++    if (!mounted || !gFFI.userModel.isLogin || !ab.listInitialized) return;
++    if (_loadingBooks) {
++      _rescanBooks = true;
++      return;
++    }
++    _loadingBooks = true;
++    try {
++      do {
++        _rescanBooks = false;
++        final account = gFFI.userModel.userName.value;
++        final books = ab.addressbooks.values.toList();
++        _indexedBooks.retainAll(books);
++        for (final book in books) {
++          if (!mounted || gFFI.userModel.userName.value != account) break;
++          if (!book.isPersonal() &&
++              identical(ab.addressbooks[book.name()], book)) {
++            await _loadBook(book);
++          }
++        }
++      } while (mounted && _rescanBooks);
++      final directory = directoryKeys[page]?.currentState;
++      if (mounted && directory != null) directory.presenceChanges.value++;
++    } finally {
++      _loadingBooks = false;
++    }
++  }
++
++  Future<void> _loadBook(BaseAb book) async {
++    if (book.initialized || book.abPulling || !_indexedBooks.add(book)) return;
++    await book.pullAb(quiet: true);
++  }
+ 
+   void _search(String value) => setState(() {
+         if (value.isNotEmpty) page = SupportPage.devices;
+@@ -100,6 +150,8 @@ class _SupportHomeState extends State<SupportHome> {
+   @override
+   void dispose() {
+     WidgetsBinding.instance.removeTimingsCallback(_measureGlass);
++    _loginListener.dispose();
++    gFFI.abModel.removePeerUpdateListener(_indexListener);
+     search.dispose();
+     searchFocus.dispose();
+     super.dispose();
+@@ -109,6 +161,12 @@ class _SupportHomeState extends State<SupportHome> {
+   void initState() {
+     super.initState();
+     WidgetsBinding.instance.addTimingsCallback(_measureGlass);
++    gFFI.abModel.addPeerUpdateListener(_indexListener, _indexSharedBooks);
++    _loginListener = ever<String>(gFFI.userModel.userName, (_) {
++      _indexedBooks.clear();
++      _startIndex();
++    });
++    WidgetsBinding.instance.addPostFrameCallback((_) => _startIndex());
+     bind.mainLoadRecentPeers();
+     bind.mainLoadFavPeers();
+     final saved = bind.getLocalFlutterOption(k: _modeKey);
+@@ -213,6 +271,9 @@ class _SupportHomeState extends State<SupportHome> {
+                         borderRadius: BorderRadius.circular(6))))),
+         child: CallbackShortcuts(
+             bindings: {
++              if (page == SupportPage.devices)
++                const SingleActivator(LogicalKeyboardKey.escape): () =>
++                    directoryKeys[page]?.currentState?._closeCard(),
+               const SingleActivator(LogicalKeyboardKey.keyK, control: true):
+                   searchFocus.requestFocus,
+               const SingleActivator(LogicalKeyboardKey.keyB, control: true):
+diff --git a/src/lang/cn.rs b/src/lang/cn.rs
+index da436b6..28c670b 100644
+--- a/src/lang/cn.rs
++++ b/src/lang/cn.rs
+@@ -16,6 +16,17 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
+         ("Need help?", "需要帮助？"),
+         ("Give your device ID to support.", "请把本机设备 ID 告知客服。"),
+         ("Support phone", "客服电话"),
++        ("Overview", "概览"),
++        ("Peripherals and network", "外设与网络"),
++        ("Historical reports", "历史报告"),
++        ("Snapshot", "快照"),
++        ("Device name", "设备名"),
++        ("Device ID", "设备 ID"),
++        ("Merchant / store", "商户 / 门店"),
++        ("Access password", "访问密码"),
++        ("Shared password · managed by the system", "分组共享密码 · 由系统保管"),
++        ("Local device note", "本机备注"),
++        ("Could not save device note", "设备备注保存失败"),
+         ("Copy ID", "复制设备 ID"),
+         ("This device ID", "本机设备 ID"),
+         ("Notifications", "通知"),

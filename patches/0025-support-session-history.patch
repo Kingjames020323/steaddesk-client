@@ -1,0 +1,2482 @@
+Subject: Show local case history and keep session notes through closure
+
+diff --git a/flutter/lib/desktop/pages/desktop_home_page.dart b/flutter/lib/desktop/pages/desktop_home_page.dart
+index 31cee54..f6905ad 100644
+--- a/flutter/lib/desktop/pages/desktop_home_page.dart
++++ b/flutter/lib/desktop/pages/desktop_home_page.dart
+@@ -24,10 +24,11 @@ import 'package:url_launcher/url_launcher.dart';
+ import 'package:window_manager/window_manager.dart';
+ import 'package:window_size/window_size.dart' as window_size;
+ import '../widgets/button.dart';
++import '../widgets/tabbar_widget.dart' show DesktopTabController;
+ 
+ import '../../steaddesk/merchant_build.dart' show casesEnabled;
+ import '../../steaddesk/case_session_api.dart';
+-import '../../steaddesk/case_inbox_api.dart' show caseEnded;
++import '../../steaddesk/case_inbox_api.dart' show caseEnded, readCaseHistory;
+ import '../../steaddesk/incoming_switch.dart';
+ import '../../steaddesk/support_home.dart';
+ 
+@@ -65,7 +66,7 @@ class _DesktopHomePageState extends State<DesktopHomePage>
+   Widget build(BuildContext context) {
+     super.build(context);
+     if (bind.mainGetAppNameSync() == 'SteadDesk Support') {
+-      return _buildBlock(child: const SupportHome());
++      return _buildBlock(child: casesEnabled ? SupportHome(key: caseHomeKey) : const SupportHome());
+     }
+     final isIncomingOnly = bind.isIncomingOnly();
+     return _buildBlock(
+@@ -788,6 +789,25 @@ class _DesktopHomePageState extends State<DesktopHomePage>
+       if (casesEnabled && call.method == 'steaddesk.case.lifecycle') {
+         return await CaseSession.route(call.arguments as String, caseEnded);
+       }
++      if (call.method == 'steaddesk.case.history') {
++        if (!casesEnabled) return null;
++        return await CaseSession.routeHistory(call.arguments as String,
++            (session, action, data) async {
++          final String account = session['agent'], id = session['device_id'];
++          if (action == 'editDevice') {
++            await windowOnTop(null);
++            if (gFFI.userModel.userName.value != account) return {'ok': false};
++            Get.find<DesktopTabController>().jumpToByKey(kTabLabelHomePage);
++            await WidgetsBinding.instance.endOfFrame;
++            return {'ok': await openCaseDeviceCard(account, id)};
++          }
++          final result = await readCaseHistory(session, action, data);
++          if (action == 'history' && gFFI.userModel.userName.value == account) {
++            result['device_note'] = caseDeviceNotes(account, id).read();
++          }
++          return result;
++        });
++      }
+       if (!isChattyMethod(call.method)) {
+         debugPrint(
+           "[Main] call ${call.method} with args ${call.arguments} from window $fromWindowId");
+diff --git a/flutter/lib/desktop/pages/remote_page.dart b/flutter/lib/desktop/pages/remote_page.dart
+index 7fd7c3f..e36f7ae 100644
+--- a/flutter/lib/desktop/pages/remote_page.dart
++++ b/flutter/lib/desktop/pages/remote_page.dart
+@@ -275,8 +275,18 @@ class _RemotePageState extends State<RemotePage>
+ 
+   // Every Windows requestFocus() must pass this, or a blocking dialog or an
+   // inactive tab could hand remote input to this page.
++  bool _localCaseInput = false;
++
++  void _caseFocus(bool local) {
++    _localCaseInput = local;
++    if (local && _rawKeyFocusNode.hasFocus) {
++      _ffi.inputModel.enterOrLeave(false);
++      _rawKeyFocusNode.unfocus();
++    }
++  }
++
+   bool get _windowsCanFocusRemoteInput =>
+-      _isSelectedTab && _blockableOverlayState.middleBlocked.isFalse;
++      !_localCaseInput && _isSelectedTab && _blockableOverlayState.middleBlocked.isFalse;
+ 
+   bool get _isMacOSKeyboardContextActive {
+     return stateGlobal.isFocused.value && !_isWindowBlur && _isSelectedTab;
+@@ -730,7 +740,7 @@ class _RemotePageState extends State<RemotePage>
+                     "onFocusChange(window active:${!_isWindowBlur}) $imageFocused");
+                 // See [onWindowBlur].
+                 if (isWindows) {
+-                  if (_isWindowBlur) {
++                  if (_isWindowBlur || _localCaseInput) {
+                     imageFocused = false;
+                     Future.delayed(Duration.zero, () {
+                       _rawKeyFocusNode.unfocus();
+@@ -755,6 +765,7 @@ class _RemotePageState extends State<RemotePage>
+             ffi: _ffi,
+             state: widget.toolbarState,
+             ready: ready,
++            onLocalInput: _caseFocus,
+             setRemoteState: setState,
+             canvas: canvas);
+         return ready
+@@ -954,7 +965,10 @@ class _RemotePageState extends State<RemotePage>
+           stateGlobal.getInputSource(force: true);
+           _syncMacOSKeyboardGrab(
+               reassert: !isInputSourceFlutter, allowInactiveLifecycle: true);
+-        } else if (!_rawKeyFocusNode.hasFocus) {
++        } else if (_rawKeyFocusNode.canRequestFocus && !_rawKeyFocusNode.hasFocus) {
++          // A deliberate click leaves the local note. An open drawer excludes
++          // keyboard focus from the canvas while the image still renders.
++          _localCaseInput = false;
+           _rawKeyFocusNode.requestFocus();
+         }
+       },
+diff --git a/flutter/lib/desktop/pages/remote_tab_page.dart b/flutter/lib/desktop/pages/remote_tab_page.dart
+index 0b94a49..fc18887 100644
+--- a/flutter/lib/desktop/pages/remote_tab_page.dart
++++ b/flutter/lib/desktop/pages/remote_tab_page.dart
+@@ -22,6 +22,8 @@ import 'package:bot_toast/bot_toast.dart';
+ 
+ import '../../common/widgets/dialog.dart';
+ import '../../models/platform_model.dart';
++import '../../steaddesk/merchant_build.dart' show casesEnabled;
++import '../../steaddesk/case_session_api.dart';
+ 
+ class _MenuTheme {
+   static const Color blueColor = MyTheme.button;
+@@ -421,6 +423,11 @@ class _ConnectionTabPageState extends State<ConnectionTabPage> {
+       RemoteCountState.find().value = tabController.length;
+ 
+   Future<dynamic> _remoteMethodHandler(call, fromWindowId) async {
++    if (casesEnabled && call.method == 'steaddesk.case.pendingNotes') {
++      return fromWindowId == kMainWindowId
++          ? CaseSession.pendingNotes(call.arguments as String?)
++          : null;
++    }
+     debugPrint(
+         "[Remote Page] call ${call.method} with args ${call.arguments} from window $fromWindowId");
+ 
+diff --git a/flutter/lib/desktop/widgets/remote_toolbar.dart b/flutter/lib/desktop/widgets/remote_toolbar.dart
+index 032718e..74da12c 100644
+--- a/flutter/lib/desktop/widgets/remote_toolbar.dart
++++ b/flutter/lib/desktop/widgets/remote_toolbar.dart
+@@ -27,6 +27,9 @@ import './kb_layout_type_chooser.dart';
+ import 'package:flutter_hbb/utils/scale.dart';
+ import 'package:flutter_hbb/common/widgets/custom_scale_base.dart';
+ 
++import '../../steaddesk/history_host_api.dart';
++import '../../steaddesk/merchant_build.dart' show casesEnabled;
++
+ part '../../steaddesk/session_surface.dart';
+ 
+ enum _ToolbarEdge { top, right, bottom, left }
+diff --git a/flutter/lib/steaddesk/cases/case_dialog.dart b/flutter/lib/steaddesk/cases/case_dialog.dart
+index d81aa8d..dc3f898 100644
+--- a/flutter/lib/steaddesk/cases/case_dialog.dart
++++ b/flutter/lib/steaddesk/cases/case_dialog.dart
+@@ -4,7 +4,7 @@ import 'package:flutter/services.dart';
+ import '../theme.dart';
+ import 'case_store.dart';
+ 
+-const _categories = {
++const caseCategoryLabels = {
+   'menu': '菜单',
+   'pos_operation': '收银操作',
+   'printer': '打印机',
+@@ -14,7 +14,7 @@ const _categories = {
+   'hardware': '硬件',
+   'other': '其他',
+ };
+-const _results = {
++const caseResultLabels = {
+   'resolved': '已解决',
+   'unresolved': '未解决',
+   'onsite': '需上门',
+@@ -83,8 +83,8 @@ class _CaseCloseDialogState extends State<_CaseCloseDialog> {
+   late DateTime? due =
+       DateTime.tryParse(widget.record['follow_up']?['due'] as String? ?? '');
+ 
+-  final categoryNodes = {for (final key in _categories.keys) key: FocusNode()};
+-  final resultNodes = {for (final key in _results.keys) key: FocusNode()};
++  final categoryNodes = {for (final key in caseCategoryLabels.keys) key: FocusNode()};
++  final resultNodes = {for (final key in caseResultLabels.keys) key: FocusNode()};
+   final ownerNode = FocusNode(),
+       dateNode = FocusNode(),
+       colleagueNode = FocusNode(),
+@@ -107,7 +107,7 @@ class _CaseCloseDialogState extends State<_CaseCloseDialog> {
+     // The category chips form one Tab stop. Number keys can reach every chip.
+     for (final entry in categoryNodes.entries) {
+       entry.value.skipTraversal =
+-          entry.key != (category ?? _categories.keys.first);
++          entry.key != (category ?? caseCategoryLabels.keys.first);
+     }
+   }
+ 
+@@ -181,8 +181,8 @@ class _CaseCloseDialogState extends State<_CaseCloseDialog> {
+     final index = key.keyId - LogicalKeyboardKey.digit1.keyId;
+     final pad = key.keyId - LogicalKeyboardKey.numpad1.keyId;
+     final digit = index >= 0 && index < 8 ? index : pad;
+-    if (digit < 0 || digit >= _categories.length) return KeyEventResult.ignored;
+-    selectCategory(_categories.keys.elementAt(digit));
++    if (digit < 0 || digit >= caseCategoryLabels.length) return KeyEventResult.ignored;
++    selectCategory(caseCategoryLabels.keys.elementAt(digit));
+     return KeyEventResult.handled;
+   }
+ 
+@@ -490,7 +490,7 @@ class _CaseCloseDialogState extends State<_CaseCloseDialog> {
+       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+         _heading('问题类型', requiredField: true, hint: '按 1–8 选择'),
+         Wrap(spacing: 8, runSpacing: 8, children: [
+-          for (final (i, entry) in _categories.entries.indexed)
++          for (final (i, entry) in caseCategoryLabels.entries.indexed)
+             _choice('${i + 1} ${entry.value}', category == entry.key,
+                 lockedFields ? null : () => selectCategory(entry.key),
+                 focus: categoryNodes[entry.key],
+@@ -499,7 +499,7 @@ class _CaseCloseDialogState extends State<_CaseCloseDialog> {
+         const SizedBox(height: 16),
+         _heading('结果', requiredField: true),
+         Wrap(spacing: 8, runSpacing: 8, children: [
+-          for (final entry in _results.entries)
++          for (final entry in caseResultLabels.entries)
+             _choice(
+                 entry.value,
+                 result == entry.key,
+diff --git a/flutter/lib/steaddesk/cases/case_history.dart b/flutter/lib/steaddesk/cases/case_history.dart
+new file mode 100644
+index 0000000..badaf4a
+--- /dev/null
++++ b/flutter/lib/steaddesk/cases/case_history.dart
+@@ -0,0 +1,113 @@
++import 'case_store.dart';
++
++/// The main engine supplies the signed-in account and established session's
++/// device identity. Only the operation, view and append fields come from IPC.
++Future<Map<String, dynamic>> caseHistoryRequest({
++  required CaseStore store,
++  required String account,
++  required String deviceId,
++  String? merchantCode,
++  String? storeCode,
++  required Map<String, dynamic> request,
++  DateTime Function()? clock,
++}) async {
++  if (account.trim().isEmpty || deviceId.trim().isEmpty) {
++    throw StateError('Signed-in session required');
++  }
++  final scope = CaseHistoryScope(deviceId, merchantCode, storeCode);
++  final view = request['scope'];
++  final storeWide = view == 'store';
++  if ((view != null && view != 'device' && !storeWide) ||
++      (storeWide && !scope.canStore)) {
++    throw const FormatException('history scope');
++  }
++  final op = request['op'];
++  if (op == 'append') {
++    final id = request['id'];
++    final text = request['text'];
++    final at = DateTime.tryParse(request['at']?.toString() ?? '');
++    if (view == null ||
++        id is! String ||
++        text is! String ||
++        at == null ||
++        !at.isUtc) {
++      throw const FormatException('history append');
++    }
++    await store.append(account, id, text,
++        scope: scope, storeWide: storeWide, addedAt: at);
++    return {'ok': true};
++  }
++  if (op != 'summary' && op != 'history') {
++    throw const FormatException('history operation');
++  }
++  final includeStore = op == 'history' && scope.canStore && view != 'device';
++  final rows = await store.history(account, scope, includeStore: includeStore);
++  final device = rows.where((row) => scope.contains(row, storeWide: false));
++  final now = (clock ?? DateTime.now)().toUtc();
++  return {
++    'can_store': scope.canStore,
++    'summary': _summary(device, now),
++    if (op == 'history') ...{
++      'device': storeWide ? [] : device.map(_timelineRow).toList(),
++      'store': includeStore
++          ? rows
++              .where((row) => scope.contains(row, storeWide: true))
++              .map(_timelineRow)
++              .toList()
++          : [],
++    }
++  };
++}
++
++Map<String, dynamic> _timelineRow(CaseRecord row) => {
++      for (final key in [
++        'id',
++        'device_id',
++        'display_name',
++        'started_at',
++        'ended_at',
++        'agent',
++        'category',
++        'result',
++        'note',
++        'appends'
++      ])
++        key: row[key],
++    };
++
++Map<String, dynamic> _summary(Iterable<CaseRecord> device, DateTime now) {
++  final cutoff = now.subtract(const Duration(days: 30));
++  final categories = <String, int>{};
++  var total = 0;
++  for (final row in device) {
++    final ended = DateTime.parse(row['ended_at']);
++    if (ended.isBefore(cutoff)) break;
++    if (ended.isAfter(now)) continue;
++    total++;
++    final category = row['category'];
++    if (category is String) {
++      categories.update(category, (n) => n + 1, ifAbsent: () => 1);
++    }
++  }
++  // On equal frequencies the first category encountered (most recent) wins.
++  String? repeated;
++  var count = 0;
++  for (final entry in categories.entries) {
++    if (entry.value >= 3 && entry.value > count) {
++      repeated = entry.key;
++      count = entry.value;
++    }
++  }
++  final latest = device.firstOrNull;
++  return {
++    'latest': latest == null
++        ? null
++        : {
++            for (final key in ['ended_at', 'category', 'result'])
++              key: latest[key]
++          },
++    'count_30d': total,
++    'repeat_category': repeated,
++    'repeat_count': count,
++  };
++}
+diff --git a/flutter/lib/steaddesk/cases/case_inbox.dart b/flutter/lib/steaddesk/cases/case_inbox.dart
+index 632d2d7..933e518 100644
+--- a/flutter/lib/steaddesk/cases/case_inbox.dart
++++ b/flutter/lib/steaddesk/cases/case_inbox.dart
+@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
+ import 'package:path_provider/path_provider.dart';
+ 
+ import 'case_dialog.dart';
++import 'case_history.dart';
+ import 'case_store.dart';
+ 
+ /// The main window is the single owner of persistence and of the modal queue.
+@@ -51,6 +52,12 @@ final _inbox = CaseInbox(LocalCaseStore(
+ void _reportRecovery() => _inbox.reportRecovery();
+ Future<bool> caseEnded(Map<String, dynamic> event) => _inbox.ended(event);
+ 
++Future<Map<String, dynamic>> readCaseHistory(Map<String, dynamic> session,
++    String action, Map<String, dynamic> data) =>
++    caseHistoryRequest(store: _inbox.store, account: session['agent'],
++        deviceId: session['device_id'], merchantCode: session['merchant_code'],
++        storeCode: session['store_code'], request: {...data, 'op': action});
++
+ class PendingCasesBar extends StatefulWidget {
+   const PendingCasesBar({
+     super.key,
+diff --git a/flutter/lib/steaddesk/cases/case_inbox_off.dart b/flutter/lib/steaddesk/cases/case_inbox_off.dart
+index 47987f6..09c33ba 100644
+--- a/flutter/lib/steaddesk/cases/case_inbox_off.dart
++++ b/flutter/lib/steaddesk/cases/case_inbox_off.dart
+@@ -2,6 +2,9 @@ import 'package:flutter/widgets.dart';
+ 
+ Future<bool> caseEnded(Map<String, dynamic> event) async => false;
+ 
++Future<Map<String, dynamic>> readCaseHistory(Map<String, dynamic> session,
++    String action, Map<String, dynamic> data) async => {};
++
+ class PendingCasesBar extends StatelessWidget {
+   const PendingCasesBar({
+     super.key,
+diff --git a/flutter/lib/steaddesk/cases/case_session.dart b/flutter/lib/steaddesk/cases/case_session.dart
+index d6db6e5..e6fcb76 100644
+--- a/flutter/lib/steaddesk/cases/case_session.dart
++++ b/flutter/lib/steaddesk/cases/case_session.dart
+@@ -8,18 +8,22 @@ import 'package:uuid/uuid.dart';
+ import '../../common.dart' show gFFI;
+ import '../../consts.dart' show kMainWindowId;
+ import '../../models/platform_model.dart' show bind;
++import '../../utils/multi_window_manager.dart' show rustDeskWinManager;
+ import '../support_device.dart';
+ import 'case_session_ledger.dart';
++import 'case_session_sender.dart';
+ 
+ class CaseSession {
+   static const _uuid = Uuid();
+-  static final _ledger = CaseSessionLedger(_snapshot);
+-  static final _sending = <String, Future<void>>{};
++  static final _ledger =
++      CaseSessionLedger(_snapshot, collectPendingNotes: _collect);
++  static final _sender = CaseSessionSender();
++  static String get _account => gFFI.userModel.userName.value.trim();
+ 
+   static CaseData? _snapshot(CaseData event) {
+     // The main engine owns login and address-book state. Child engines do not
+     // load the active account. Snapshot here rather than attributing on close.
+-    final account = gFFI.userModel.userName.value.trim();
++    final account = _account;
+     if (account.isEmpty) return null;
+     final id = event['device_id'] as String;
+     final ab = gFFI.abModel;
+@@ -60,8 +64,11 @@ class CaseSession {
+   }
+ 
+   static Future<bool> route(
+-          String message, Future<bool> Function(CaseData) ended) =>
+-      _ledger.receive(jsonDecode(message) as CaseData, ended);
++      String message, Future<bool> Function(CaseData) ended) {
++    final event = jsonDecode(message) as CaseData;
++    _applyPending(event['pending_notes'], event['connection'] as String);
++    return _ledger.receive(event, ended);
++  }
+ 
+   static Future<void> shutdown(Future<bool> Function(CaseData) ended) =>
+       _ledger.shutdown(DateTime.now().toUtc(), ended);
+@@ -80,35 +87,133 @@ class CaseSession {
+ 
+   static Future<void> closed(String connection) => _send(connection, 'closed');
+ 
+-  static Future<void> _send(String connection, String kind, [CaseData? data]) {
+-    if (connection.isEmpty) return Future.value();
+-    final message = jsonEncode({
++  static Future<void> _send(String connection, String kind,
++      [CaseData? data]) async {
++    if (connection.isEmpty) return;
++    final event = {
+       'connection': connection,
+       'kind': kind,
+       'at': DateTime.now().toUtc().toIso8601String(),
+       'event_id': _uuid.v4(),
+       ...?data
++    };
++    await _sender.ordered(connection, () async {
++      final ending = kind != 'established';
++      if (ending) event['pending_notes'] = _sender.pending(connection);
++      final ack = await _invoke('steaddesk.case.lifecycle', jsonEncode(event));
++      if (ack == true && ending) _sender.forget(connection);
+     });
+-    final next = (_sending[connection] ?? Future<void>.value()).then((_) async {
+-      for (var attempt = 0; attempt < 3; attempt++) {
+-        if (attempt > 0) {
+-          await Future<void>.delayed(Duration(milliseconds: 200 * attempt));
+-        }
+-        try {
+-          final ack = await DesktopMultiWindow.invokeMethod(
+-                  kMainWindowId, 'steaddesk.case.lifecycle', message)
+-              .timeout(const Duration(seconds: 3));
+-          if (ack == true) return;
+-        } catch (_) {
+-          // Same event ID and timestamp on retry, including a lost reply.
++  }
++
++  static Future<dynamic> _invoke(String method, String message) async {
++    for (var attempt = 0; attempt < 3; attempt++) {
++      if (attempt > 0) {
++        await Future<void>.delayed(Duration(milliseconds: 200 * attempt));
++      }
++      try {
++        final ack = await DesktopMultiWindow.invokeMethod(
++                kMainWindowId, method, message)
++            .timeout(const Duration(seconds: 3));
++        if (ack == true ||
++            (ack == null && method == 'steaddesk.case.history')) {
++          return ack;
+         }
++      } catch (_) {
++        // A lost reply retries the same event and timestamp.
+       }
+-      debugPrint(
+-          'Case lifecycle event $kind was not acknowledged by the main window');
+-    });
+-    _sending[connection] = next;
+-    return next.whenComplete(() {
+-      if (identical(_sending[connection], next)) _sending.remove(connection);
++    }
++    debugPrint('Case IPC was not acknowledged by the main window');
++    return false;
++  }
++
++  static Future<bool> updateNote(
++      String connection, String caseId, String note) {
++    if (connection.isEmpty || caseId.isEmpty) return Future.value(false);
++    final edit = {
++      'connection': connection,
++      'case_id': caseId,
++      'note': note,
++      'at': DateTime.now().toUtc().toIso8601String(),
++    };
++    return _sender.note(edit, (value) async {
++      final ack = await _invoke(
++          'steaddesk.case.history', jsonEncode({'action': 'note', ...value}));
++      return ack as bool?;
+     });
+   }
++
++  // These replies contain only edits that have not yet reached main. Reading
++  // the snapshot synchronously also works if another monitor is awaiting its
++  // own terminal acknowledgement from the same main-engine queue.
++  static String pendingNotes(String? connection) =>
++      jsonEncode(_sender.pending(connection));
++
++  static Future<void> _collect(String? connection) async {
++    await Future.wait(
++        rustDeskWinManager.remoteCaseWindowIds.map((window) async {
++      try {
++        final payload = await DesktopMultiWindow.invokeMethod(
++                window, 'steaddesk.case.pendingNotes', connection)
++            .timeout(const Duration(seconds: 2));
++        if (payload is String) _applyPending(jsonDecode(payload), connection);
++      } catch (_) {
++        // A monitor can already have been closed. Acknowledged edits live in main.
++      }
++    }));
++  }
++
++  static void _applyPending(dynamic edits, String? connection) {
++    if (edits is! List) return;
++    for (final edit in edits.whereType<CaseData>()) {
++      if (connection == null || edit['connection'] == connection) {
++        _ledger.updateNote(edit, _account);
++      }
++    }
++  }
++
++  static Future<CaseData?> historyRequest(String connection, String action,
++      {String? caseId, CaseData data = const {}}) async {
++    if (connection.isEmpty) return null;
++    try {
++      final reply = await DesktopMultiWindow.invokeMethod(
++          kMainWindowId,
++          'steaddesk.case.history',
++          jsonEncode({
++            'connection': connection,
++            'action': action,
++            'case_id': caseId,
++            'data': data
++          })).timeout(const Duration(seconds: 10));
++      return reply is String ? jsonDecode(reply) as CaseData : null;
++    } catch (_) {
++      // An append may already have committed when its reply is lost.
++      return null;
++    }
++  }
++
++  static Future<dynamic> routeHistory(
++      String message,
++      Future<CaseData?> Function(CaseData session, String action, CaseData data)
++          handle) async {
++    final event = jsonDecode(message) as CaseData;
++    final connection = event['connection'];
++    final action = event['action'];
++    final caseId = event['case_id'];
++    if (connection is! String || action is! String) return null;
++    if (action == 'note') {
++      return _ledger.updateNote(event, _account) ? true : null;
++    }
++    if (action != 'bind' && (caseId is! String || caseId.isEmpty)) return null;
++    final session = _ledger.live(connection, _account, caseId: caseId);
++    if (session == null) return null;
++    if (action == 'bind') return jsonEncode(session);
++    if (!const {'summary', 'history', 'append', 'editDevice'}
++        .contains(action)) {
++      return null;
++    }
++    final result = await handle(session, action, event['data'] as CaseData);
++    if (result == null ||
++        _ledger.live(connection, _account, caseId: caseId) == null) return null;
++    return jsonEncode(result);
++  }
+ }
+diff --git a/flutter/lib/steaddesk/cases/case_session_ledger.dart b/flutter/lib/steaddesk/cases/case_session_ledger.dart
+index bc41d38..c23a7dc 100644
+--- a/flutter/lib/steaddesk/cases/case_session_ledger.dart
++++ b/flutter/lib/steaddesk/cases/case_session_ledger.dart
+@@ -34,12 +34,41 @@ String? caseEndKind(String type, String title, String text) {
+ class CaseSessionLedger {
+   final CaseData? Function(CaseData event) snapshot;
+   final _active = <String, CaseData>{};
++  final Future<void> Function(String? connection)? collectPendingNotes;
++  final _noteAt = <String, DateTime>{};
+   final _endedAt = <String, DateTime>{};
+   final _unacknowledged = <String, CaseData>{};
+   Future<void> _queue = Future.value();
+   DateTime? _lastShutdown;
+ 
+-  CaseSessionLedger(this.snapshot);
++  CaseSessionLedger(this.snapshot, {this.collectPendingNotes});
++
++  CaseData? live(String connection, String account, {String? caseId}) {
++    final current = _active[connection];
++    if (account.isEmpty ||
++        current == null ||
++        current['agent'] != account ||
++        (caseId != null && current['id'] != caseId)) return null;
++    return Map.of(current);
++  }
++
++  bool updateNote(CaseData edit, String account) {
++    final connection = edit['connection'];
++    final id = edit['case_id'];
++    final note = edit['note'];
++    final at = DateTime.tryParse(edit['at']?.toString() ?? '');
++    if (connection is! String ||
++        id is! String ||
++        note is! String ||
++        at == null ||
++        live(connection, account, caseId: id) == null) return false;
++    final previous = _noteAt[connection];
++    if (previous == null || !at.isBefore(previous)) {
++      _active[connection]!['note'] = note;
++      _noteAt[connection] = at;
++    }
++    return true;
++  }
+ 
+   Future<bool> receive(CaseData event, Future<bool> Function(CaseData) save) {
+     final next = _queue.then((_) => _receive(event, save));
+@@ -72,6 +101,9 @@ class CaseSessionLedger {
+       }
+       return true;
+     }
++    if (current?['id'] != null && collectPendingNotes != null) {
++      await collectPendingNotes!(connection);
++    }
+     if (!_finish(connection, at, event['kind'] as String, key)) return true;
+     return _persist(key, save);
+   }
+@@ -83,6 +115,7 @@ class CaseSessionLedger {
+     }
+     _endedAt[connection] = at;
+     _active.remove(connection);
++    _noteAt.remove(connection);
+     if (kind == 'discard' ||
+         current == null ||
+         current['agent'] == null ||
+@@ -109,6 +142,9 @@ class CaseSessionLedger {
+   /// Drain the same main-engine queue, keeping failed writes retryable by ID.
+   Future<void> shutdown(DateTime at, Future<bool> Function(CaseData) save) {
+     final next = _queue.then((_) async {
++      if (_active.isNotEmpty && collectPendingNotes != null) {
++        await collectPendingNotes!(null);
++      }
+       for (final connection in _active.keys.toList()) {
+         _finish(connection, at.toUtc(), 'interrupted',
+             'shutdown-${_active[connection]!['id']}');
+diff --git a/flutter/lib/steaddesk/cases/case_session_off.dart b/flutter/lib/steaddesk/cases/case_session_off.dart
+index f614883..b1e518f 100644
+--- a/flutter/lib/steaddesk/cases/case_session_off.dart
++++ b/flutter/lib/steaddesk/cases/case_session_off.dart
+@@ -9,4 +9,18 @@ class CaseSession {
+   static void message(
+       String connection, String type, String title, String text) {}
+   static Future<void> closed(String connection) async {}
++  static Future<bool> updateNote(
++          String connection, String caseId, String note) async =>
++      false;
++  static Future<Map<String, dynamic>?> historyRequest(
++          String connection, String action,
++          {String? caseId, Map<String, dynamic> data = const {}}) async =>
++      null;
++  static Future<dynamic> routeHistory(
++          String message,
++          Future<Map<String, dynamic>?> Function(
++                  Map<String, dynamic>, String, Map<String, dynamic>)
++              handle) async =>
++      null;
++  static String pendingNotes(String? connection) => '[]';
+ }
+diff --git a/flutter/lib/steaddesk/cases/case_session_sender.dart b/flutter/lib/steaddesk/cases/case_session_sender.dart
+new file mode 100644
+index 0000000..2981c04
+--- /dev/null
++++ b/flutter/lib/steaddesk/cases/case_session_sender.dart
+@@ -0,0 +1,55 @@
++import 'case_session_ledger.dart';
++
++/// A remote engine's lifecycle and note messages share one FIFO per transport.
++/// While IPC is in flight, only the newest full text for a case needs sending.
++class CaseSessionSender {
++  final _sending = <String, Future<void>>{};
++  final _notes = <String, CaseData>{};
++  final _writing = <String, Future<bool>>{};
++
++  Future<T> ordered<T>(String connection, Future<T> Function() action) {
++    final previous = _sending[connection] ?? Future<void>.value();
++    final result = previous.then((_) => action());
++    final next = result.then<void>((_) {}, onError: (Object _) {});
++    _sending[connection] = next;
++    next.whenComplete(() {
++      if (identical(_sending[connection], next)) _sending.remove(connection);
++    });
++    return result;
++  }
++
++  Future<bool> note(CaseData edit, Future<bool?> Function(CaseData) send) {
++    final id = edit['case_id'] as String;
++    final connection = edit['connection'] as String;
++    _notes[id] = edit;
++    final sending = _writing[id];
++    if (sending != null) return sending;
++    final result = ordered(connection, () async {
++      try {
++        while (true) {
++          final latest = _notes[id]!;
++          final accepted = await send(latest);
++          if (identical(_notes[id], latest)) {
++            // null means an expired round/account; false is a transport
++            // failure. Keep only the latter for the terminal or shutdown flush.
++            if (accepted != false) _notes.remove(id);
++            return accepted == true;
++          }
++        }
++      } finally {
++        _writing.remove(id);
++      }
++    });
++    _writing[id] = result;
++    return result;
++  }
++
++  List<CaseData> pending(String? connection) => _notes.values
++      .where((e) => connection == null || e['connection'] == connection)
++      .toList();
++
++  void forget(String connection) {
++    _notes.removeWhere((id, edit) =>
++        edit['connection'] == connection && !_writing.containsKey(id));
++  }
++}
+diff --git a/flutter/lib/steaddesk/cases/case_store.dart b/flutter/lib/steaddesk/cases/case_store.dart
+index 79d436b..88b6e99 100644
+--- a/flutter/lib/steaddesk/cases/case_store.dart
++++ b/flutter/lib/steaddesk/cases/case_store.dart
+@@ -29,7 +29,28 @@ class CaseEditWindowExpired implements Exception {
+   const CaseEditWindowExpired();
+ }
+ 
++class CaseHistoryScope {
++  final String deviceId;
++  final String? merchantCode;
++  final String? storeCode;
++  const CaseHistoryScope(this.deviceId, this.merchantCode, this.storeCode);
++
++  bool get canStore =>
++      (merchantCode?.trim().isNotEmpty ?? false) &&
++      (storeCode?.trim().isNotEmpty ?? false);
++
++  bool contains(CaseRecord row, {required bool storeWide}) =>
++      row['status'] == 'saved' &&
++      (storeWide
++          ? canStore &&
++              row['merchant_code'] == merchantCode &&
++              row['store_code'] == storeCode
++          : row['device_id'] == deviceId);
++}
++
+ abstract class CaseStore {
++  Future<List<CaseRecord>> history(String account, CaseHistoryScope scope,
++      {bool includeStore = false});
+   Future<List<CaseRecord>> pending(String account);
+   Future<bool> addDraft(String account, CaseRecord record);
+   Future<bool> isAppendOnly(String account, String id);
+@@ -42,7 +63,8 @@ abstract class CaseStore {
+       String? transferredTo,
+       required String note,
+       bool? expectedAppendOnly});
+-  Future<void> append(String account, String id, String text);
++  Future<void> append(String account, String id, String text,
++      {CaseHistoryScope? scope, bool storeWide = false, DateTime? addedAt});
+ }
+ 
+ class LocalCaseStore implements CaseStore {
+@@ -194,6 +216,23 @@ class LocalCaseStore implements CaseStore {
+             ...?accounts[account]?.where((row) => row['status'] == 'draft')
+           ]..sort(_newestFirst));
+ 
++  @override
++  Future<List<CaseRecord>> history(String account, CaseHistoryScope scope,
++          {bool includeStore = false}) =>
++      _locked((_, accounts) async {
++        final rows = (accounts[account] ?? const <CaseRecord>[])
++            .where((row) =>
++                scope.contains(row, storeWide: false) ||
++                (includeStore && scope.contains(row, storeWide: true)))
++            .toList();
++        rows.sort((a, b) {
++          final byTime =
++              _timestamp(b['ended_at']).compareTo(_timestamp(a['ended_at']));
++          return byTime != 0 ? byTime : (a['id'] as String).compareTo(b['id']);
++        });
++        return rows;
++      });
++
+   @override
+   Future<bool> addDraft(String account, CaseRecord record) =>
+       _locked((target, accounts) async {
+@@ -322,9 +361,21 @@ class LocalCaseStore implements CaseStore {
+       }, expectedAppendOnly: expectedAppendOnly);
+ 
+   @override
+-  Future<void> append(String account, String id, String text) =>
++  Future<void> append(String account, String id, String text,
++          {CaseHistoryScope? scope,
++          bool storeWide = false,
++          DateTime? addedAt}) =>
+       _edit(account, id, (row, now, _) {
++        if (scope != null && !scope.contains(row, storeWide: storeWide)) {
++          throw StateError('Case outside history scope');
++        }
+         if (!_present(text)) throw const FormatException('append text');
+-        _note(row, now, text, true);
++        final additions = row['appends'] as List;
++        if (addedAt != null &&
++            additions.any((item) =>
++                item['at'] == addedAt.toIso8601String() &&
++                item['by'] == account &&
++                item['text'] == text)) return;
++        _note(row, addedAt ?? now, text, true);
+       });
+ }
+diff --git a/flutter/lib/steaddesk/cases/history_host.dart b/flutter/lib/steaddesk/cases/history_host.dart
+new file mode 100644
+index 0000000..899bb5d
+--- /dev/null
++++ b/flutter/lib/steaddesk/cases/history_host.dart
+@@ -0,0 +1,224 @@
++import 'dart:async';
++
++import 'package:flutter/material.dart';
++import 'package:flutter/services.dart';
++import 'package:window_manager/window_manager.dart';
++
++import 'case_session.dart';
++import 'history_ui.dart';
++
++/// Keeps per-window view state. The main window owns identity, drafts and disk.
++class CaseHistoryHost extends StatefulWidget {
++  const CaseHistoryHost(
++      {super.key,
++      required this.connection,
++      required this.builder,
++      required this.onLocalInput});
++  final String connection;
++  final Widget Function(Widget? sidebar, Widget? drawer) builder;
++  final ValueChanged<bool> onLocalInput;
++
++  @override
++  State<CaseHistoryHost> createState() => _CaseHistoryHostState();
++}
++
++class _CaseHistoryHostState extends State<CaseHistoryHost> with WindowListener {
++  Map<String, dynamic> data = {};
++  String? id;
++  bool open = false, checking = false, sidebarFocus = false;
++  int request = 0, edit = 0;
++  String? pending;
++  // A write may succeed before its IPC acknowledgement arrives. Reuse its timestamp
++  // for a manual retry of the same operation during this session.
++  final appendRequests = <(String, String, String), String>{};
++  final drawerFocus = FocusScopeNode(debugLabel: 'Case history');
++  late final Timer timer;
++
++  @override
++  void initState() {
++    super.initState();
++    windowManager.addListener(this);
++    timer = Timer.periodic(const Duration(seconds: 2), (_) => _bind());
++    _bind();
++  }
++
++  @override
++  void didUpdateWidget(CaseHistoryHost old) {
++    super.didUpdateWidget(old);
++    if (old.connection != widget.connection) {
++      _reset();
++      _bind();
++    }
++  }
++
++  void _reset() {
++    request++;
++    appendRequests.clear();
++    edit++;
++    pending = id = null;
++    open = sidebarFocus = false;
++    widget.onLocalInput(false);
++    data = {};
++  }
++
++  Future<void> _bind() async {
++    final connection = widget.connection;
++    if (checking || connection.isEmpty) return;
++    checking = true;
++    final generation = edit;
++    try {
++      final info = await CaseSession.historyRequest(connection, 'bind');
++      if (!mounted || connection != widget.connection) return;
++      final next = info?['id'] as String?;
++      if (id != next) {
++        setState(() {
++          _reset();
++          id = next;
++          if (id != null) data = {...info!, 'session': id};
++        });
++      } else if (id != null &&
++          pending == null &&
++          edit == generation &&
++          info?['note'] != data['note']) {
++        setState(() => data = {...data, 'note': info?['note']});
++      }
++      if (next != null && !data.containsKey('summary')) await _load();
++    } finally {
++      checking = false;
++    }
++  }
++
++  void _error(String text) {
++    if (mounted) {
++      ScaffoldMessenger.maybeOf(context)
++          ?.showSnackBar(SnackBar(content: Text(text)));
++    }
++  }
++
++  Future<void> _load() async {
++    final round = id;
++    if (round == null) return;
++    final ticket = ++request;
++    final result = await CaseSession.historyRequest(
++        widget.connection, open ? 'history' : 'summary',
++        caseId: round);
++    if (!mounted || ticket != request || round != id) return;
++    if (result == null) {
++      if (open) {
++        _close();
++        _error('历史报告读取失败，请重试。');
++      }
++      return;
++    }
++    setState(() => data = {...data, ...result});
++  }
++
++  void _close() {
++    setState(() => open = false);
++    request++;
++    widget.onLocalInput(sidebarFocus);
++  }
++
++  void _show() {
++    setState(() => open = true);
++    widget.onLocalInput(true);
++    WidgetsBinding.instance.addPostFrameCallback((_) {
++      if (mounted && open) drawerFocus.requestFocus();
++    });
++    _load();
++  }
++
++  void _note(String text) async {
++    final round = id;
++    if (round == null) return;
++    final revision = ++edit;
++    pending = text;
++    data = {...data, 'note': text};
++    final ok = await CaseSession.updateNote(widget.connection, round, text);
++    if (!mounted || edit != revision || id != round) return;
++    if (ok) {
++      pending = null;
++    } else {
++      _error('随手记尚未同步，请保留文本并重试。');
++    }
++  }
++
++  Future<void> _append(String scope, String record, String text) async {
++    final round = id;
++    if (round == null) throw StateError('Session ended');
++    final key = (scope, record, text);
++    final token = appendRequests.putIfAbsent(
++        key, () => DateTime.now().toUtc().toIso8601String());
++    final result = await CaseSession.historyRequest(widget.connection, 'append',
++        caseId: round,
++        data: {'scope': scope, 'id': record, 'text': text, 'at': token});
++    if (result?['ok'] != true) throw StateError('Append failed');
++    if (id == round) appendRequests.remove(key);
++    if (mounted && id == round && open) await _load();
++  }
++
++  Future<void> _editDevice() async {
++    final round = id;
++    if (round == null) return;
++    final result = await CaseSession.historyRequest(
++        widget.connection, 'editDevice',
++        caseId: round);
++    if (mounted && id == round && result?['ok'] != true) _error('设备卡未打开，请重试。');
++  }
++
++  @override
++  void onWindowFocus() {
++    if (open) _load();
++    _bind();
++  }
++
++  @override
++  void dispose() {
++    timer.cancel();
++    drawerFocus.dispose();
++    windowManager.removeListener(this);
++    widget.onLocalInput(false);
++    super.dispose();
++  }
++
++  @override
++  Widget build(BuildContext context) {
++    final body = widget.builder(
++      id == null
++          ? null
++          : Focus(
++              canRequestFocus: false,
++              onFocusChange: (focused) {
++                sidebarFocus = focused;
++                widget.onLocalInput(open || focused);
++              },
++              child: CaseHistorySidebar(
++                  key: ValueKey(id),
++                  data: data,
++                  onOpen: _show,
++                  onNoteChanged: _note)),
++      open
++          ? FocusScope(
++              node: drawerFocus,
++              child: CaseHistoryDrawer(
++                  key: ValueKey(id),
++                  data: data,
++                  onClose: _close,
++                  onEditDevice: _editDevice,
++                  onAppend: _append))
++          : null,
++    );
++    return Focus(
++        canRequestFocus: false,
++        onKeyEvent: (_, event) {
++          if (open &&
++              event is KeyDownEvent &&
++              event.logicalKey == LogicalKeyboardKey.escape) {
++            _close();
++            return KeyEventResult.handled;
++          }
++          return KeyEventResult.ignored;
++        },
++        child: body);
++  }
++}
+diff --git a/flutter/lib/steaddesk/cases/history_host_off.dart b/flutter/lib/steaddesk/cases/history_host_off.dart
+new file mode 100644
+index 0000000..d603bab
+--- /dev/null
++++ b/flutter/lib/steaddesk/cases/history_host_off.dart
+@@ -0,0 +1,13 @@
++import 'package:flutter/widgets.dart';
++
++class CaseHistoryHost extends StatelessWidget {
++  const CaseHistoryHost(
++      {super.key,
++      required String connection,
++      required this.builder,
++      required ValueChanged<bool> onLocalInput});
++  final Widget Function(Widget? sidebar, Widget? drawer) builder;
++
++  @override
++  Widget build(BuildContext context) => builder(null, null);
++}
+diff --git a/flutter/lib/steaddesk/cases/history_ui.dart b/flutter/lib/steaddesk/cases/history_ui.dart
+new file mode 100644
+index 0000000..c1cb44d
+--- /dev/null
++++ b/flutter/lib/steaddesk/cases/history_ui.dart
+@@ -0,0 +1,481 @@
++import 'package:flutter/material.dart';
++import 'package:flutter/services.dart';
++
++import '../theme.dart';
++import 'case_dialog.dart' show caseCategoryLabels, caseResultLabels;
++
++const _caption = TextStyle(fontSize: 12, color: SteadDeskTheme.secondaryText);
++const _label = TextStyle(
++    fontSize: 13, fontWeight: FontWeight.w600, color: SteadDeskTheme.heading);
++const _text = TextStyle(fontSize: 13, color: SteadDeskTheme.body);
++
++String _daysAgo(String ended, DateTime now) {
++  final local = DateTime.parse(ended).toLocal();
++  final today = now.toLocal();
++  // Count local calendar dates, including days with daylight-saving changes.
++  final days = DateTime.utc(today.year, today.month, today.day)
++      .difference(DateTime.utc(local.year, local.month, local.day))
++      .inDays;
++  return days <= 0 ? '今天' : '$days 天前';
++}
++
++String _localTime(String utc) {
++  final t = DateTime.parse(utc).toLocal();
++  String pad(int n) => n.toString().padLeft(2, '0');
++  return '${t.year}-${pad(t.month)}-${pad(t.day)} ${pad(t.hour)}:${pad(t.minute)}';
++}
++
++class CaseHistorySidebar extends StatefulWidget {
++  const CaseHistorySidebar(
++      {super.key,
++      required this.data,
++      required this.onOpen,
++      required this.onNoteChanged,
++      this.clock});
++  final Map<String, dynamic> data;
++  final VoidCallback onOpen;
++  final ValueChanged<String> onNoteChanged;
++  final DateTime Function()? clock;
++
++  @override
++  State<CaseHistorySidebar> createState() => _CaseHistorySidebarState();
++}
++
++class _CaseHistorySidebarState extends State<CaseHistorySidebar> {
++  late final note =
++      TextEditingController(text: widget.data['note'] as String? ?? '');
++
++  @override
++  void didUpdateWidget(CaseHistorySidebar oldWidget) {
++    super.didUpdateWidget(oldWidget);
++    final incoming = widget.data['note'] as String? ?? '';
++    if ((oldWidget.data['session'] != widget.data['session'] ||
++            oldWidget.data['note'] != widget.data['note']) &&
++        note.text != incoming) {
++      note.value = TextEditingValue(
++          text: incoming,
++          selection: TextSelection.collapsed(offset: incoming.length));
++    }
++  }
++
++  @override
++  void dispose() {
++    note.dispose();
++    super.dispose();
++  }
++
++  @override
++  Widget build(BuildContext context) {
++    final summary = widget.data['summary'] as Map? ?? const {};
++    final latest = summary['latest'] as Map?;
++    final repeat = caseCategoryLabels[summary['repeat_category']];
++    final alert = repeat != null && (summary['repeat_count'] as int? ?? 0) >= 3;
++    return Padding(
++        padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
++        child:
++            Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
++          const Divider(),
++          OutlinedButton(
++              style: OutlinedButton.styleFrom(
++                  alignment: Alignment.centerLeft,
++                  foregroundColor: SteadDeskTheme.heading,
++                  backgroundColor: Colors.white.withOpacity(.72),
++                  padding: const EdgeInsets.symmetric(horizontal: 10),
++                  side: const BorderSide(color: Color(0xff9ec5d7)),
++                  shape: RoundedRectangleBorder(
++                      borderRadius: BorderRadius.circular(10))),
++              onPressed: widget.onOpen,
++              child: const Row(children: [
++                Expanded(child: Text('历史报告', style: _label)),
++                Icon(Icons.chevron_right,
++                    size: 18, color: SteadDeskTheme.action)
++              ])),
++          const SizedBox(height: 4),
++          Text(
++              latest == null
++                  ? '暂无记录'
++                  : '上次：${caseCategoryLabels[latest['category']] ?? '未填写'} · ${caseResultLabels[latest['result']] ?? '未填写'} · ${_daysAgo(latest['ended_at'], widget.clock?.call() ?? DateTime.now())}',
++              style: _caption),
++          if (latest != null)
++            Text(
++                alert
++                    ? '$repeat问题 30 天 ${summary['repeat_count']} 次'
++                    : '近 30 天 ${summary['count_30d'] ?? 0} 次',
++                style: alert
++                    ? _caption.copyWith(
++                        color: SteadDeskTheme.attentionText,
++                        fontWeight: FontWeight.w600)
++                    : _caption),
++          const Divider(height: 22),
++          const Text('随手记', style: _label),
++          const SizedBox(height: 6),
++          TextField(
++              controller: note,
++              onChanged: widget.onNoteChanged,
++              minLines: 4,
++              maxLines: 7,
++              keyboardType: TextInputType.multiline,
++              style: _text,
++              decoration: InputDecoration(
++                  hintText: '记录处理过程…',
++                  hintStyle: _caption,
++                  filled: true,
++                  fillColor: Colors.white.withOpacity(.72),
++                  isDense: true,
++                  contentPadding: const EdgeInsets.all(10),
++                  border: OutlineInputBorder(
++                      borderRadius: BorderRadius.circular(9)))),
++          const SizedBox(height: 4),
++          const Text('结案时自动填进备注', style: _caption),
++        ]));
++  }
++}
++
++/// Mount beside the session sidebar, above the existing remote canvas in its Stack.
++class CaseHistoryDrawer extends StatefulWidget {
++  const CaseHistoryDrawer(
++      {super.key,
++      required this.data,
++      required this.onClose,
++      required this.onEditDevice,
++      required this.onAppend,
++      this.clock});
++  final Map<String, dynamic> data;
++  final VoidCallback onClose, onEditDevice;
++  final Future<void> Function(String scope, String id, String text) onAppend;
++  final DateTime Function()? clock;
++
++  @override
++  State<CaseHistoryDrawer> createState() => _CaseHistoryDrawerState();
++}
++
++class _CaseHistoryDrawerState extends State<CaseHistoryDrawer> {
++  bool store = false, unresolved = false;
++  String? category;
++
++  @override
++  Widget build(BuildContext context) {
++    final canStore = widget.data['can_store'] == true;
++    final scope = canStore && store ? 'store' : 'device';
++    final rows = (widget.data[scope] as List? ?? const []).cast<Map>();
++    final visible = rows
++        .where((record) =>
++            (category == null || category == record['category']) &&
++            (!unresolved || record['result'] == 'unresolved'))
++        .toList();
++    final note = widget.data['device_note'] as String? ?? '';
++    final now = (widget.clock?.call() ?? DateTime.now()).toUtc();
++    final from = now.subtract(const Duration(days: 30));
++    final recent = rows.where((row) {
++      final end = DateTime.parse(row['ended_at']);
++      return !end.isBefore(from) && !end.isAfter(now);
++    }).toList();
++    final totalSeconds = recent.fold<int>(
++        0,
++        (sum, row) =>
++            sum +
++            DateTime.parse(row['ended_at'])
++                .difference(DateTime.parse(row['started_at']))
++                .inSeconds);
++    final avg = recent.isEmpty
++        ? ''
++        : ' · 平均 ${(totalSeconds / recent.length / 60).round()} 分钟';
++    final stats =
++        '近 30 天 ${recent.length} 次 · 未解决 ${recent.where((row) => row['result'] == 'unresolved').length}$avg';
++    final header = Padding(
++        padding: const EdgeInsets.fromLTRB(18, 8, 18, 0),
++        child:
++            Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
++          Row(children: [
++            const Expanded(
++                child: Text('历史报告',
++                    style: TextStyle(
++                        fontSize: 18,
++                        fontWeight: FontWeight.w700,
++                        color: SteadDeskTheme.heading))),
++            IconButton(
++                tooltip: '关闭历史报告',
++                onPressed: widget.onClose,
++                icon: const Icon(Icons.close, size: 19))
++          ]),
++          Text(stats, style: _text),
++          const SizedBox(height: 4),
++          const Text('只显示本机记录，团队共享记录上线后自动合并', style: _caption),
++          Wrap(children: [
++            _tab('本设备', scope == 'device', () => setState(() => store = false)),
++            _tab('本门店', scope == 'store',
++                canStore ? () => setState(() => store = true) : null),
++          ]),
++          Container(
++              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
++              decoration: BoxDecoration(
++                  color: const Color(0xfffff7e6),
++                  border: Border.all(color: const Color(0xfffcd9a5)),
++                  borderRadius: BorderRadius.circular(8)),
++              child: Column(
++                  crossAxisAlignment: CrossAxisAlignment.stretch,
++                  children: [
++                    Row(children: [
++                      const Expanded(
++                          child: Text('设备备注（置顶）',
++                              style: TextStyle(
++                                  color: SteadDeskTheme.attentionText,
++                                  fontSize: 12,
++                                  fontWeight: FontWeight.w600))),
++                      TextButton(
++                          style: _linkStyle,
++                          onPressed: widget.onEditDevice,
++                          child: const Text('编辑'))
++                    ]),
++                    ConstrainedBox(
++                        constraints: const BoxConstraints(maxHeight: 68),
++                        child: SingleChildScrollView(
++                            child: Text(note.isEmpty ? '暂无设备备注' : note,
++                                style: _text))),
++                  ])),
++          Wrap(
++              alignment: WrapAlignment.spaceBetween,
++              crossAxisAlignment: WrapCrossAlignment.center,
++              children: [
++                DropdownButton<String>(
++                    value: category ?? '',
++                    style: Theme.of(context).textTheme.bodyMedium?.merge(_text),
++                    underline: const SizedBox.shrink(),
++                    items: [
++                      const DropdownMenuItem(value: '', child: Text('全部类型')),
++                      for (final item in caseCategoryLabels.entries)
++                        DropdownMenuItem(
++                            value: item.key, child: Text(item.value))
++                    ],
++                    onChanged: (v) =>
++                        setState(() => category = v == '' ? null : v)),
++                TextButton.icon(
++                    style: _linkStyle,
++                    onPressed: () => setState(() => unresolved = !unresolved),
++                    icon: Icon(
++                        unresolved
++                            ? Icons.check_box
++                            : Icons.check_box_outline_blank,
++                        size: 16),
++                    label: const Text('只看未解决')),
++              ])
++        ]));
++    final timeline = SliverPadding(
++        padding: const EdgeInsets.symmetric(horizontal: 18),
++        sliver: visible.isEmpty
++            ? const SliverToBoxAdapter(
++                child: Padding(
++                    padding: EdgeInsets.all(16),
++                    child: Center(child: Text('暂无记录', style: _caption))))
++            : SliverList(
++                delegate: SliverChildBuilderDelegate((context, i) {
++                final row = visible[i];
++                return _Entry(
++                    key: ValueKey('$scope/${row['id']}'),
++                    row: row,
++                    showDevice: scope == 'store',
++                    onAppend: (text) =>
++                        widget.onAppend(scope, row['id'], text));
++              }, childCount: visible.length)));
++    return Focus(
++        autofocus: true,
++        onKeyEvent: (_, event) {
++          if (event is KeyDownEvent &&
++              event.logicalKey == LogicalKeyboardKey.escape) {
++            widget.onClose();
++            return KeyEventResult.handled;
++          }
++          return KeyEventResult.ignored;
++        },
++        child: ClipRect(
++            child: TweenAnimationBuilder<double>(
++                tween: Tween(begin: -1, end: 0),
++                duration: MediaQuery.disableAnimationsOf(context)
++                    ? Duration.zero
++                    : const Duration(milliseconds: 180),
++                curve: Curves.easeOut,
++                builder: (context, x, child) => FractionalTranslation(
++                    translation: Offset(x, 0), child: child),
++                child: Material(
++                    elevation: 8,
++                    color: Colors.white,
++                    child: LayoutBuilder(builder: (context, box) {
++                      // Keep the pinned note visible at desktop height. Short viewports and
++                      // large accessibility text can scroll the header along with the list.
++                      final fixed = box.maxHeight >= 490 &&
++                          box.maxWidth >= 320 &&
++                          MediaQuery.textScalerOf(context).scale(14) <= 18;
++                      return Column(children: [
++                        if (fixed) header,
++                        Expanded(
++                            child: CustomScrollView(
++                                key: PageStorageKey('history-$scope'),
++                                slivers: [
++                              if (!fixed) SliverToBoxAdapter(child: header),
++                              timeline
++                            ])),
++                      ]);
++                    })))));
++  }
++
++  Widget _tab(String label, bool selected, VoidCallback? press) => Semantics(
++      selected: selected,
++      child: TextButton(
++          onPressed: press,
++          style: TextButton.styleFrom(
++              foregroundColor:
++                  selected ? SteadDeskTheme.action : SteadDeskTheme.body),
++          child: Text(label,
++              style: TextStyle(
++                  fontSize: 13,
++                  fontWeight: selected ? FontWeight.w700 : FontWeight.normal,
++                  decoration: selected ? TextDecoration.underline : null))));
++}
++
++final _linkStyle = TextButton.styleFrom(
++    foregroundColor: SteadDeskTheme.action,
++    minimumSize: const Size(0, 32),
++    padding: const EdgeInsets.symmetric(horizontal: 4),
++    tapTargetSize: MaterialTapTargetSize.shrinkWrap);
++
++class _Entry extends StatefulWidget {
++  const _Entry(
++      {super.key,
++      required this.row,
++      required this.showDevice,
++      required this.onAppend});
++  final Map row;
++  final bool showDevice;
++  final Future<void> Function(String text) onAppend;
++  @override
++  State<_Entry> createState() => _EntryState();
++}
++
++class _EntryState extends State<_Entry> {
++  final addition = TextEditingController();
++  bool writing = false, saving = false;
++  String? error;
++  @override
++  void dispose() {
++    addition.dispose();
++    super.dispose();
++  }
++
++  Future<void> save() async {
++    final text = addition.text.trim();
++    if (saving || text.isEmpty) return;
++    setState(() {
++      saving = true;
++      error = null;
++    });
++    try {
++      await widget.onAppend(text);
++      if (!mounted) return;
++      addition.clear();
++      setState(() => writing = false);
++    } catch (_) {
++      if (mounted) setState(() => error = '追加失败，请重试');
++    } finally {
++      if (mounted) setState(() => saving = false);
++    }
++  }
++
++  @override
++  Widget build(BuildContext context) {
++    final row = widget.row;
++    final note = row['note'] as String? ?? '';
++    final elapsed = DateTime.parse(row['ended_at'])
++        .difference(DateTime.parse(row['started_at']));
++    final result = row['result'];
++    final resultColor = result == 'resolved'
++        ? SteadDeskTheme.badgeText
++        : result == 'unresolved' || result == 'onsite'
++            ? SteadDeskTheme.attentionText
++            : SteadDeskTheme.secondaryText;
++    return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
++      const Divider(height: 1),
++      Padding(
++          padding: const EdgeInsets.symmetric(vertical: 10),
++          child:
++              Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
++            Row(children: [
++              Expanded(
++                  child: Text(
++                      '${_localTime(row['ended_at'])} · ${row['agent']}',
++                      style: _caption)),
++              Text('${elapsed.inMinutes} 分钟', style: _caption)
++            ]),
++            if (widget.showDevice)
++              Text(row['display_name'] ?? row['device_id'], style: _caption),
++            const SizedBox(height: 6),
++            Wrap(spacing: 10, children: [
++              Text(caseCategoryLabels[row['category']] ?? '未填写', style: _label),
++              Text(caseResultLabels[result] ?? '未填写',
++                  style: _text.copyWith(color: resultColor))
++            ]),
++            if (note.isNotEmpty)
++              Padding(
++                  padding: const EdgeInsets.only(top: 4),
++                  child: Text(note,
++                      maxLines: 2,
++                      overflow: TextOverflow.ellipsis,
++                      style: _text)),
++            for (final append in row['appends'] ?? const [])
++              Container(
++                  margin: const EdgeInsets.only(top: 6),
++                  padding: const EdgeInsets.only(left: 8),
++                  decoration: const BoxDecoration(
++                      border: Border(
++                          left: BorderSide(
++                              color: SteadDeskTheme.divider, width: 2))),
++                  child: Text(
++                      '追加 · ${_localTime(append['at'])} · ${append['by']}\n${append['text']}',
++                      style: _caption)),
++            Wrap(spacing: 8, children: [
++              TextButton(
++                  style: _linkStyle,
++                  onPressed: note.isEmpty
++                      ? null
++                      : () => Clipboard.setData(ClipboardData(text: note)),
++                  child: const Text('复制处理步骤')),
++              TextButton(
++                  style: _linkStyle,
++                  onPressed:
++                      writing ? null : () => setState(() => writing = true),
++                  child: const Text('追加说明')),
++            ]),
++            if (writing) ...[
++              TextField(
++                  controller: addition,
++                  enabled: !saving,
++                  autofocus: true,
++                  minLines: 2,
++                  maxLines: 5,
++                  decoration: InputDecoration(
++                      labelText: '追加内容',
++                      errorText: error,
++                      border: const OutlineInputBorder())),
++              Row(mainAxisAlignment: MainAxisAlignment.end, children: [
++                TextButton(
++                    style: _linkStyle,
++                    onPressed: saving
++                        ? null
++                        : () => setState(() {
++                              writing = false;
++                              addition.clear();
++                              error = null;
++                            }),
++                    child: const Text('取消')),
++                ValueListenableBuilder<TextEditingValue>(
++                    valueListenable: addition,
++                    builder: (_, value, __) => TextButton(
++                        style: _linkStyle,
++                        onPressed:
++                            saving || value.text.trim().isEmpty ? null : save,
++                        child: const Text('保存追加'))),
++              ]),
++            ]
++          ])),
++    ]);
++  }
++}
+diff --git a/flutter/lib/steaddesk/device_card.dart b/flutter/lib/steaddesk/device_card.dart
+index 09c9a50..0520d9d 100644
+--- a/flutter/lib/steaddesk/device_card.dart
++++ b/flutter/lib/steaddesk/device_card.dart
+@@ -19,6 +19,17 @@ abstract interface class DeviceNoteStore {
+   Future<bool> save(String value);
+ }
+ 
++DeviceNoteStore caseDeviceNotes(String account, String id) {
++  final ab = gFFI.abModel;
++  for (final book in {ab.current, ...ab.addressbooks.values}) {
++    if (identical(ab.addressbooks[book.name()], book) &&
++        book.peers.any((peer) => peer.id == id)) {
++      return _EntryNotes(account, id, book);
++    }
++  }
++  return _EntryNotes(account, id, null);
++}
++
+ class _EntryNotes implements DeviceNoteStore {
+   final String account, id;
+   final BaseAb? book;
+diff --git a/flutter/lib/steaddesk/session_surface.dart b/flutter/lib/steaddesk/session_surface.dart
+index 0a9f580..96dad5a 100644
+--- a/flutter/lib/steaddesk/session_surface.dart
++++ b/flutter/lib/steaddesk/session_surface.dart
+@@ -15,6 +15,7 @@ class SessionSurface extends StatefulWidget {
+   final ToolbarState state;
+   final Widget canvas;
+   final bool ready;
++  final ValueChanged<bool> onLocalInput;
+   final Function(VoidCallback) setRemoteState;
+   const SessionSurface(
+       {super.key,
+@@ -23,6 +24,7 @@ class SessionSurface extends StatefulWidget {
+       required this.state,
+       required this.canvas,
+       required this.ready,
++      required this.onLocalInput,
+       required this.setRemoteState});
+ 
+   @override
+@@ -50,7 +52,7 @@ class _SessionSurfaceState extends State<SessionSurface> {
+     final model = Provider.of<FfiModel>(context);
+     final ffi = widget.ffi;
+     final android = widget.ready && model.isPeerAndroid;
+-    return Obx(() {
++    Widget layout(Widget? history, Widget? drawer) => Obx(() {
+       final grabbed = ffi.inputModel.relativeMouseMode.value;
+       return ColoredBox(
+           color: _surface,
+@@ -77,13 +79,14 @@ class _SessionSurfaceState extends State<SessionSurface> {
+                 IgnorePointer(
+                     ignoring: grabbed,
+                     child: _DevicePanel(
+-                        ffi: ffi, mode: panel, change: changePanel)),
++                        ffi: ffi, mode: panel, change: changePanel, history: history)),
+               Expanded(child: LayoutBuilder(builder: (context, bounds) {
+                 final barHeight =
+                     android ? math.min(36.0, bounds.maxHeight / 3) : 0.0;
+                 return Stack(fit: StackFit.expand, children: [
+                   Positioned.fill(
+-                      bottom: barHeight, child: ClipRect(child: widget.canvas)),
++                      bottom: barHeight, child: ClipRect(child: ExcludeFocus(
++                          excluding: drawer != null, child: widget.canvas))),
+                   if (android)
+                     AnimatedBuilder(
+                         animation: ffi.canvasModel,
+@@ -106,11 +109,18 @@ class _SessionSurfaceState extends State<SessionSurface> {
+                                   ignoring: grabbed,
+                                   child: _AndroidKeys(ffi: ffi)));
+                         }),
++                  if (drawer != null)
++                    Positioned(left: 0, top: 0, bottom: 0,
++                        width: math.min(420.0, bounds.maxWidth), child: drawer),
+                 ]);
+               })),
+             ]))
+           ]));
+     });
++    if (!casesEnabled || !isWindows) return layout(null, null);
++    return CaseHistoryHost(connection: widget.ready
++        ? bind.sessionGetConnSessionId(sessionId: ffi.sessionId) : '',
++        onLocalInput: widget.onLocalInput, builder: layout);
+   }
+ }
+ 
+@@ -389,9 +399,10 @@ class _AndroidKeys extends StatelessWidget {
+ class _DevicePanel extends StatelessWidget {
+   final FFI ffi;
+   final _PanelMode mode;
++  final Widget? history;
+   final ValueChanged<_PanelMode> change;
+   const _DevicePanel(
+-      {required this.ffi, required this.mode, required this.change});
++      {required this.ffi, required this.mode, required this.change, this.history});
+ 
+   Future<void> menu(BuildContext context, Offset point) async {
+     final box = Overlay.of(context).context.findRenderObject() as RenderBox;
+@@ -454,7 +465,7 @@ class _DevicePanel extends StatelessWidget {
+     final compact = mode == _PanelMode.compact;
+     final width = compact
+         ? 44.0
+-        : math.min(194.0, MediaQuery.sizeOf(context).width * .25);
++        : math.min(history == null ? 194.0 : 252.0, MediaQuery.sizeOf(context).width * .25);
+     return Align(
+         alignment: Alignment.topLeft,
+         widthFactor: 1,
+@@ -562,6 +573,7 @@ class _DevicePanel extends StatelessWidget {
+                                       }),
+                                       if (pi.version.isNotEmpty)
+                                         field('SteadDesk version', pi.version),
++                                      if (history != null) history!,
+                                       const SizedBox(height: 10),
+                                     ]))),
+                     ])))));
+diff --git a/flutter/lib/steaddesk/support_directory.dart b/flutter/lib/steaddesk/support_directory.dart
+index 6e3f3cc..f2461c2 100644
+--- a/flutter/lib/steaddesk/support_directory.dart
++++ b/flutter/lib/steaddesk/support_directory.dart
+@@ -66,6 +66,17 @@ class _DirectoryState extends State<_Directory> {
+     }
+   }
+ 
++  _Entry? sessionDevice;
++  void _openSessionDevice(String id) {
++    final known = _entries(searchIndex: true).firstWhereOrNull((e) => e.device.id == id);
++    // A direct-ID session can precede address-book or recent-peer indexing.
++    final entry = known ?? (device: SupportDevice(id: id, alias: '', hostnames: [],
++        platform: '', groupName: '', online: null),
++        source: (peer: Peer.fromJson({'id': id}), book: null, tab: PeerTabIndex.recent));
++    sessionDevice = entry;
++    _openCard(entry);
++  }
++
+   void _openCard(_Entry row) {
+     if (widget.page != SupportPage.devices) {
+       _details(row);
+@@ -321,11 +332,13 @@ class _DirectoryState extends State<_Directory> {
+       builder: (_, __) => Obx(() {
+             final entries = _entries();
+             if (cardOwnerKey != _cardKey) {
++              sessionDevice = null;
+               cardOwnerKey = _cardKey;
+               selectedDevice = bind.getLocalFlutterOption(k: cardOwnerKey);
+             }
+             final card = widget.page == SupportPage.devices
+-                ? entries.firstWhereOrNull((e) => e.device.id == selectedDevice)
++                ? entries.firstWhereOrNull((e) => e.device.id == selectedDevice) ??
++                    (sessionDevice?.device.id == selectedDevice ? sessionDevice : null)
+                 : null;
+             final devices = entries.map((e) => e.device);
+             final byScope = <String, (int, int)>{};
+diff --git a/flutter/lib/steaddesk/support_home.dart b/flutter/lib/steaddesk/support_home.dart
+index 8664c3b..03b3e5e 100644
+--- a/flutter/lib/steaddesk/support_home.dart
++++ b/flutter/lib/steaddesk/support_home.dart
+@@ -54,6 +54,20 @@ const _blue = Color(0xff0a6fa8);
+ const _ink = Color(0xff0b2e42);
+ const _solid = Color(0xffe8f4fa);
+ 
++final caseHomeKey = GlobalKey<_SupportHomeState>();
++
++Future<bool> openCaseDeviceCard(String account, String id) async {
++  final home = caseHomeKey.currentState;
++  if (home == null || account != gFFI.userModel.userName.value) return false;
++  home._navigate(SupportPage.devices);
++  await WidgetsBinding.instance.endOfFrame;
++  if (!home.mounted || account != gFFI.userModel.userName.value) return false;
++  final directory = home.directoryKeys[SupportPage.devices]?.currentState;
++  if (directory == null) return false;
++  directory._openSessionDevice(id);
++  return true;
++}
++
+ class SupportHome extends StatefulWidget {
+   const SupportHome({super.key});
+   @override
+diff --git a/flutter/lib/utils/multi_window_manager.dart b/flutter/lib/utils/multi_window_manager.dart
+index 6182b6a..b4b48b5 100644
+--- a/flutter/lib/utils/multi_window_manager.dart
++++ b/flutter/lib/utils/multi_window_manager.dart
+@@ -452,6 +452,8 @@ class RustDeskMultiWindowManager {
+     DesktopMultiWindow.setMethodHandler(handler);
+   }
+ 
++  List<int> get remoteCaseWindowIds => List.of(_remoteDesktopWindows);
++
+   Future<void> closeAllSubWindows() async {
+     if (casesEnabled && isWindows) {
+       await CaseSession.shutdown(caseEnded);
+diff --git a/flutter/test/steaddesk/case_session_test.dart b/flutter/test/steaddesk/case_session_test.dart
+index cdbb57b..675581c 100644
+--- a/flutter/test/steaddesk/case_session_test.dart
++++ b/flutter/test/steaddesk/case_session_test.dart
+@@ -1,5 +1,8 @@
++import 'dart:async';
++
+ import 'package:flutter_test/flutter_test.dart';
+ import 'package:flutter_hbb/steaddesk/cases/case_session_ledger.dart';
++import 'package:flutter_hbb/steaddesk/cases/case_session_sender.dart';
+ 
+ void main() {
+   late String account;
+@@ -34,6 +37,105 @@ void main() {
+   Future<bool> emit(String kind, int seconds, [String id = 'test-device']) =>
+       ledger.receive(event(kind, seconds, id), save);
+ 
++  CaseData edit(String connection, String id, String text, int seconds) => {
++        'connection': connection,
++        'case_id': id,
++        'note': text,
++        'at': start.add(Duration(seconds: seconds)).toIso8601String()
++      };
++
++  test('notes require the exact live round and signed-in account', () async {
++    await emit('established', 0, 'one');
++    await emit('established', 0, 'two');
++    final id = ledger.live('one', account)!['id'] as String;
++    final first = edit('one', id, 'test note', 5);
++    expect(ledger.updateNote(first, account), isTrue);
++    expect(
++        ledger.updateNote({...first, 'connection': 'two'}, account), isFalse);
++    expect(ledger.updateNote({...first, 'note': 'denied'}, 'other'), isFalse);
++    expect(ledger.live('one', ''), isNull);
++    expect(ledger.live('one', 'other'), isNull);
++    expect(writes, isEmpty);
++    await emit('closed', 30, 'one');
++    expect(writes.single['note'], 'test note');
++    await emit('established', 32, 'one');
++    expect(ledger.live('one', account, caseId: id), isNull);
++    expect(ledger.updateNote(first, account), isFalse);
++    await emit('interrupted', 62, 'one');
++    expect(writes.last['note'], isNot('test note'));
++  });
++
++  CaseSessionSender pendingChild() {
++    final child = CaseSessionSender();
++    ledger = CaseSessionLedger(
++        (event) => {
++              'id': 'test-round',
++              'agent': account,
++              'note': '',
++              'device_id': 'test-peer'
++            }, collectPendingNotes: (connection) async {
++      for (final change in child.pending(connection)) {
++        ledger.updateNote(change, account);
++      }
++    });
++    return child;
++  }
++
++  test('a terminal event on another monitor collects its pending final edit',
++      () async {
++    final child = pendingChild();
++    await emit('established', 0, 'one');
++    final blocked = Completer<void>();
++    final began = Completer<void>();
++    final first = edit('one', 'test-round', 'tes', 10);
++    final acknowledged = child.note(first, (change) async {
++      if (!began.isCompleted) {
++        began.complete();
++        await blocked.future;
++      }
++      return ledger.updateNote(change, account) ? true : null;
++    });
++    await began.future;
++    child.note(edit('one', 'test-round', 'test', 11), (_) async => true);
++    await emit('interrupted', 30, 'one');
++    expect(writes.single['note'], 'test');
++    expect(writes.single['interrupted'], isTrue);
++    blocked.complete();
++    await acknowledged;
++    expect(child.pending(null), isEmpty);
++  });
++
++  test('failed IPC retains only the newest unsent text for orderly shutdown',
++      () async {
++    final child = pendingChild();
++    await emit('established', 0, 'one');
++    final first = edit('one', 'test-round', 'old', 11);
++    expect(await child.note(first, (_) async => false), isFalse);
++    final latest = edit('one', 'test-round', 'new', 12);
++    expect(await child.note(latest, (_) async => false), isFalse);
++    ledger.updateNote(first, account);
++    ledger.updateNote(edit('one', 'test-round', 'older', 10), account);
++    expect(ledger.live('one', account)!['note'], 'old');
++    await ledger.shutdown(start.add(const Duration(seconds: 30)), save);
++    expect(writes.single['note'], 'new');
++    expect(writes.single['interrupted'], isTrue);
++  });
++
++  test('the final keystroke reaches a case closed immediately in the same tab',
++      () async {
++    final child = CaseSessionSender();
++    await emit('established', 0, 'one');
++    final id = ledger.live('one', account)!['id'];
++    Future<bool> send(CaseData value) async =>
++        ledger.updateNote(value, account);
++    final a = child.note(edit('one', id, 'a', 5), send);
++    final b = child.note(edit('one', id, 'ab', 6), send);
++    await child.ordered('one', () => emit('closed', 30, 'one'));
++    expect(await a, isTrue);
++    expect(await b, isTrue);
++    expect(writes.single['note'], 'ab');
++  });
++
+   test('failed handshake, failed auth and a 29s session create no case',
+       () async {
+     await emit('interrupted', 2);
+diff --git a/flutter/test/steaddesk/case_store_test.dart b/flutter/test/steaddesk/case_store_test.dart
+index 0efc0e3..802d7d9 100644
+--- a/flutter/test/steaddesk/case_store_test.dart
++++ b/flutter/test/steaddesk/case_store_test.dart
+@@ -2,6 +2,7 @@ import 'dart:convert';
+ import 'dart:io';
+ 
+ import 'package:flutter_test/flutter_test.dart';
++import '../../lib/steaddesk/cases/case_history.dart';
+ import '../../lib/steaddesk/cases/case_store.dart';
+ 
+ void main() {
+@@ -130,6 +131,127 @@ void main() {
+     expect(await open().pending('demo'), isEmpty);
+   });
+ 
++  group('session history', () {
++    Future<void> seed(int n,
++        {String account = 'demo',
++        String device = 'demo-1',
++        String merchant = 'M9900',
++        String storeCode = 'S01',
++        String category = 'printer',
++        Duration ago = Duration.zero,
++        bool draft = false}) async {
++      final ended = now.subtract(ago);
++      await store.addDraft(account, {
++        ...session(n),
++        'device_id': device,
++        'merchant_code': merchant,
++        'store_code': storeCode,
++        'started_at':
++            ended.subtract(const Duration(minutes: 3)).toIso8601String(),
++        'ended_at': ended.toIso8601String(),
++      });
++      if (!draft) {
++        await store.save(account, id(n),
++            category: category, result: 'resolved', note: 'original $n');
++      }
++    }
++
++    Future<Map<String, dynamic>> request(Map<String, dynamic> body,
++            {String? merchant = 'M9900', String? shop = 'S01'}) =>
++        caseHistoryRequest(
++            store: store,
++            account: 'demo',
++            deviceId: 'demo-1',
++            merchantCode: merchant,
++            storeCode: shop,
++            request: body,
++            clock: () => now);
++
++    test('rolling device summary uses session end time and only saved cases',
++        () async {
++      await seed(0, ago: const Duration(days: 30, microseconds: 1));
++      await seed(1, ago: const Duration(days: 30));
++      await seed(2, ago: const Duration(days: 18));
++      await seed(3, ago: const Duration(days: 2), draft: true);
++      await seed(4, ago: const Duration(days: 1), account: 'other-agent');
++      await seed(5, device: 'demo-2');
++      var response = await request({'op': 'summary'});
++      expect(response['summary'], {
++        'latest': {
++          'category': 'printer',
++          'result': 'resolved',
++          'ended_at': now.subtract(const Duration(days: 18)).toIso8601String()
++        },
++        'count_30d': 2,
++        'repeat_category': null,
++        'repeat_count': 0,
++      });
++      expect(response.containsKey('device'), isFalse);
++      await seed(6, ago: const Duration(hours: 1));
++      await seed(7, category: 'network');
++      response = await request({'op': 'history', 'scope': 'device'});
++      expect(response['summary']['count_30d'], 4);
++      expect(response['summary']['latest']['category'], 'network');
++      expect(response['summary']['repeat_category'], 'printer');
++      expect(response['summary']['repeat_count'], 3);
++      expect((response['device'] as List).map((r) => r['id']),
++          [7, 6, 2, 1, 0].map(id));
++      expect(response['store'], isEmpty);
++    });
++
++    test(
++        'store view requires both codes and only includes its signed-in account',
++        () async {
++      await seed(0);
++      await seed(1, device: 'demo-2');
++      await seed(2, device: 'demo-3', merchant: 'M9901');
++      await seed(3, device: 'demo-4', storeCode: 'S02');
++      await seed(4, account: 'other-agent');
++      await seed(5, draft: true);
++      final response = await request({'op': 'history', 'scope': 'store'});
++      expect(response['device'], isEmpty);
++      expect((response['store'] as List).map((r) => r['id']), [id(0), id(1)]);
++      for (final codes in [(null, 'S01'), ('M9900', '  ')]) {
++        final partial = await request({'op': 'history'},
++            merchant: codes.$1, shop: codes.$2);
++        expect(partial['can_store'], isFalse);
++        expect(partial['store'], isEmpty);
++        expect(partial['device'], hasLength(1));
++      }
++    });
++
++    test(
++        'append preserves original note and checks account, scope and saved status',
++        () async {
++      await seed(0, device: 'demo-2');
++      await seed(1, device: 'demo-3', merchant: 'M9901');
++      await seed(2, draft: true);
++      await seed(3, account: 'other-agent');
++      Future<Map<String, dynamic>> append(int n, String scope) => request({
++            'op': 'append',
++            'at': now.toIso8601String(),
++            'scope': scope,
++            'id': id(n),
++            'text': 'follow-up',
++            'account': 'other-agent',
++            'merchant_code': 'M9901',
++            'device_id': 'demo-2'
++          });
++      await expectLater(append(0, 'device'), throwsStateError);
++      await expectLater(append(1, 'store'), throwsStateError);
++      await expectLater(append(2, 'store'), throwsStateError);
++      await expectLater(append(3, 'store'), throwsStateError);
++      expect(await append(0, 'store'), {'ok': true});
++      expect(await append(0, 'store'), {'ok': true}); // lost acknowledgement
++      final timeline = await request({'op': 'history', 'scope': 'store'});
++      final row = (timeline['store'] as List).single;
++      expect(row['note'], 'original 0');
++      expect(row['appends'], [
++        {'at': now.toIso8601String(), 'by': 'demo', 'text': 'follow-up'}
++      ]);
++    });
++  });
++
+   test('corrupt bytes backed up and one reader reports the reset', () async {
+     const broken = [0xff, 0xfe];
+     await target.writeAsBytes(broken);
+diff --git a/flutter/test/steaddesk/history_host_test.dart b/flutter/test/steaddesk/history_host_test.dart
+new file mode 100644
+index 0000000..44549b8
+--- /dev/null
++++ b/flutter/test/steaddesk/history_host_test.dart
+@@ -0,0 +1,83 @@
++import 'dart:convert';
++
++import 'package:flutter/material.dart';
++import 'package:flutter/services.dart';
++import 'package:flutter_test/flutter_test.dart';
++
++import 'package:flutter_hbb/steaddesk/cases/history_host.dart';
++
++void main() {
++  testWidgets(
++      'live host binds to main, passes the exact case UUID and drops a revoked drawer',
++      (tester) async {
++    const channel = MethodChannel('mixin.one/flutter_multi_window_channel');
++    final messenger =
++        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
++    String? active = 'case-a';
++    String note = '';
++    final seen = <String>[];
++    messenger.setMockMethodCallHandler(channel, (call) async {
++      final message = jsonDecode(call.arguments['arguments']);
++      expectSync(message['connection'], 'test-connection');
++      seen.add(message['action']);
++      if (active == null) return null;
++      if (message['action'] == 'bind')
++        return jsonEncode({'id': active, 'note': note});
++      expectSync(message['case_id'], active);
++      switch (message['action']) {
++        case 'note':
++          note = message['note'];
++          return true;
++        case 'summary':
++        case 'history':
++          return jsonEncode({
++            'summary': {'latest': null},
++            'device': [],
++            'store': [],
++            'device_note': 'test-device-note'
++          });
++      }
++      return null;
++    });
++    addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
++    bool localInput = false;
++    await tester.pumpWidget(MaterialApp(
++        home: Scaffold(
++            body: CaseHistoryHost(
++      connection: 'test-connection',
++      onLocalInput: (v) => localInput = v,
++      builder: (sidebar, drawer) => Row(children: [
++        SizedBox(width: 250, child: sidebar),
++        Expanded(
++            child: Stack(children: [
++          const Text('remote-canvas', key: ValueKey('remote')),
++          if (drawer != null) SizedBox(width: 420, child: drawer),
++        ])),
++      ]),
++    ))));
++    await tester.pumpAndSettle();
++    final canvas = tester.element(find.byKey(const ValueKey('remote')));
++    await tester.enterText(find.byType(TextField), 'note from A');
++    await tester.pump();
++    expect(note, 'note from A');
++    expect(localInput, isTrue);
++    await tester.tap(find.text('历史报告'));
++    await tester.pumpAndSettle();
++    expect(find.text('test-device-note'), findsOneWidget);
++    expect(tester.element(find.byKey(const ValueKey('remote'))), same(canvas));
++    await tester.sendKeyEvent(LogicalKeyboardKey.escape);
++    await tester.pumpAndSettle();
++    expect(find.text('test-device-note'), findsNothing);
++    await tester.tap(find.text('历史报告'));
++    await tester.pumpAndSettle();
++    active = null;
++    await tester.pump(const Duration(seconds: 2));
++    await tester.pumpAndSettle();
++    expect(find.text('test-device-note'), findsNothing);
++    expect(find.byType(TextField), findsNothing);
++    expect(localInput, isFalse);
++    expect(seen, containsAllInOrder(['bind', 'summary', 'note', 'history']));
++    expect(tester.element(find.byKey(const ValueKey('remote'))), same(canvas));
++    await tester.pumpWidget(const SizedBox());
++  });
++}
+diff --git a/flutter/test/steaddesk/history_ui_test.dart b/flutter/test/steaddesk/history_ui_test.dart
+new file mode 100644
+index 0000000..3301017
+--- /dev/null
++++ b/flutter/test/steaddesk/history_ui_test.dart
+@@ -0,0 +1,377 @@
++import 'dart:async';
++import 'dart:io';
++import 'dart:ui' as ui;
++import 'package:flutter/material.dart';
++import 'package:flutter/rendering.dart';
++import 'package:flutter/services.dart';
++import 'package:flutter_test/flutter_test.dart';
++
++import '../../lib/steaddesk/cases/case_dialog.dart';
++import '../../lib/steaddesk/cases/case_store.dart';
++import '../../lib/steaddesk/cases/history_ui.dart';
++
++final _now = DateTime(2026, 11, 13, 12);
++const _jot = '已重新接好测试打印机，试打两张单均正常。';
++const _longNote = '检查纸卷与电源。\n重新连接测试设备。\n复核两张测试单。';
++
++CaseRecord _row(int days, String category, String result,
++    {bool other = false}) {
++  final end = _now.subtract(Duration(days: days));
++  return {
++    'id': 'sample-$days',
++    'device_id': other ? 'demo-b' : 'demo-a',
++    'display_name': other ? '示例后厨平板' : '示例前台平板',
++    'ended_at': end.toUtc().toIso8601String(),
++    'started_at':
++        end.subtract(const Duration(minutes: 8)).toUtc().toIso8601String(),
++    'category': category,
++    'result': result,
++    'agent': 'demo-agent',
++    'note': other ? '刷新后厨测试菜单后恢复。' : _longNote,
++    'appends': [
++      if (days == 2)
++        {
++          'at': end.toUtc().toIso8601String(),
++          'by': 'demo-agent',
++          'text': '已回访测试门店。'
++        }
++    ]
++  };
++}
++
++Map<String, dynamic> _payload(
++    {bool empty = false, bool store = true, bool repeat = true}) {
++  final device = [
++    if (!empty) ...[
++      _row(2, 'printer', 'resolved'),
++      _row(6, 'printer', 'unresolved'),
++      _row(10, repeat ? 'printer' : 'menu', 'resolved')
++    ]
++  ];
++  return {
++    'session': 'sample-session',
++    'can_store': store,
++    'note': '',
++    'device_note': '测试打印机在前台收银台下方。',
++    'summary': {
++      'latest': device.isEmpty ? null : device.first,
++      'count_30d': device.length,
++      'repeat_category': !empty && repeat ? 'printer' : null,
++      'repeat_count': !empty && repeat ? 3 : 0
++    },
++    'device': device,
++    'store': [if (!empty) _row(1, 'menu', 'resolved', other: true), ...device],
++  };
++}
++
++class _DemoStore extends Fake implements CaseStore {
++  @override
++  Future<bool> isAppendOnly(String account, String id) async => false;
++}
++
++class _Clock extends StatefulWidget {
++  const _Clock();
++  @override
++  State<_Clock> createState() => _ClockState();
++}
++
++class _ClockState extends State<_Clock> {
++  int elapsed = 0;
++  late final Timer timer;
++  @override
++  void initState() {
++    super.initState();
++    timer = Timer.periodic(
++        const Duration(seconds: 1), (_) => setState(() => elapsed++));
++  }
++
++  @override
++  void dispose() {
++    timer.cancel();
++    super.dispose();
++  }
++
++  @override
++  Widget build(BuildContext context) => ColoredBox(
++      color: const Color(0xffeaf4f9),
++      child: Align(
++          alignment: const Alignment(.72, -.12),
++          child: Column(mainAxisSize: MainAxisSize.min, children: [
++            const Text('示例设备 · 模拟画面时钟',
++                style: TextStyle(fontSize: 16, color: Color(0xff4a6072))),
++            Text('12:00:${elapsed.toString().padLeft(2, '0')}',
++                key: const ValueKey('clock'),
++                style: const TextStyle(
++                    fontSize: 44,
++                    color: Color(0xff0e3a52),
++                    fontFeatures: [ui.FontFeature.tabularFigures()])),
++          ])));
++}
++
++class _Fixture extends StatefulWidget {
++  const _Fixture({super.key, required this.data});
++  final Map<String, dynamic> data;
++  @override
++  State<_Fixture> createState() => _FixtureState();
++}
++
++class _FixtureState extends State<_Fixture> {
++  var open = false, edited = false, fail = false;
++  String jot = '';
++  final writes = <List<String>>[];
++  @override
++  Widget build(BuildContext context) => Scaffold(
++      backgroundColor: const Color(0xffeaf4f9),
++      body: Column(children: [
++        Material(
++            color: Colors.white,
++            child: SizedBox(
++                height: 52,
++                child: Row(children: [
++                  const SizedBox(width: 16),
++                  const Expanded(
++                      child: Text('示例门店 · 测试点单平板',
++                          style: TextStyle(fontWeight: FontWeight.w600))),
++                  TextButton(
++                      onPressed: () => showCaseCloseDialog(context,
++                              store: _DemoStore(),
++                              account: 'demo-agent',
++                              record: {
++                                ..._row(0, 'printer', 'resolved'),
++                                'status': 'draft',
++                                'category': null,
++                                'result': null,
++                                'note': jot
++                              }),
++                      child: const Text('结束测试会话')),
++                  const SizedBox(width: 12)
++                ]))),
++        Expanded(
++            child: Row(children: [
++          SizedBox(
++              width: 248,
++              child: Card(
++                  margin: const EdgeInsets.all(10),
++                  color: const Color(0xffedf7fa),
++                  child: ListView(
++                      padding: const EdgeInsets.only(top: 14),
++                      children: [
++                        const Padding(
++                            padding: EdgeInsets.symmetric(horizontal: 12),
++                            child: Text('设备健康',
++                                style: TextStyle(fontWeight: FontWeight.w600))),
++                        const Padding(
++                            padding: EdgeInsets.fromLTRB(12, 8, 12, 0),
++                            child: Text('平台   Android\n设备   示例点单平板',
++                                style: TextStyle(fontSize: 12))),
++                        CaseHistorySidebar(
++                            data: widget.data,
++                            clock: () => _now,
++                            onOpen: () => setState(() => open = true),
++                            onNoteChanged: (value) => jot = value)
++                      ]))),
++          Expanded(
++              child: Stack(fit: StackFit.expand, children: [
++            const _Clock(),
++            if (open)
++              Positioned(
++                  left: 0,
++                  top: 0,
++                  bottom: 0,
++                  width: 420,
++                  child: CaseHistoryDrawer(
++                      data: widget.data,
++                      clock: () => _now,
++                      onClose: () => setState(() => open = false),
++                      onEditDevice: () => edited = true,
++                      onAppend: (scope, id, text) async {
++                        if (fail) throw StateError('simulated write error');
++                        writes.add([scope, id, text]);
++                        setState(() {
++                          final row = (widget.data[scope] as List)
++                              .firstWhere((r) => r['id'] == id);
++                          row['appends'].add({
++                            'at': _now.toUtc().toIso8601String(),
++                            'by': 'demo-agent',
++                            'text': text
++                          });
++                        });
++                      }))
++          ]))
++        ]))
++      ]));
++}
++
++Future<void> _render(WidgetTester t, Map<String, dynamic> data,
++    {GlobalKey<_FixtureState>? fixture, GlobalKey? shot}) async {
++  t.view.devicePixelRatio = 1;
++  t.view.physicalSize = const Size(1280, 800);
++  addTearDown(t.view.reset);
++  await t.pumpWidget(RepaintBoundary(
++      key: shot,
++      child: MaterialApp(
++          debugShowCheckedModeBanner: false,
++          theme: ThemeData(
++              useMaterial3: false,
++              fontFamily:
++                  Platform.environment['HISTORY_SCREENSHOT_FONT'] != null
++                      ? 'Capture'
++                      : null),
++          home: _Fixture(key: fixture, data: data))));
++}
++
++Future<void> _open(WidgetTester t) async {
++  await t.tap(find.text('历史报告'));
++  await t.pumpAndSettle();
++}
++
++void main() {
++  testWidgets(
++      'empty device still opens; unparsed store disabled; closes with Esc or X',
++      (t) async {
++    await _render(t, _payload(empty: true, store: false));
++    expect(find.text('暂无记录'), findsOneWidget);
++    await _open(t);
++    expect(
++        t.widget<TextButton>(find.widgetWithText(TextButton, '本门店')).onPressed,
++        isNull);
++    await t.sendKeyEvent(LogicalKeyboardKey.escape);
++    await t.pumpAndSettle();
++    expect(find.byType(CaseHistoryDrawer), findsNothing);
++    await _open(t);
++    await t.tap(find.byTooltip('关闭历史报告'));
++    await t.pumpAndSettle();
++    expect(find.byType(CaseHistoryDrawer), findsNothing);
++    await t.pumpWidget(const SizedBox());
++  });
++
++  testWidgets(
++      'switch scope, copy complete note, edit device, retry append without mutating original note',
++      (t) async {
++    final key = GlobalKey<_FixtureState>();
++    await _render(t, _payload(), fixture: key);
++    await _open(t);
++    await t.tap(find.text('编辑'));
++    expect(key.currentState!.edited, isTrue);
++    expect(find.text('示例后厨平板'), findsNothing);
++    String? copied;
++    final messenger = t.binding.defaultBinaryMessenger;
++    messenger.setMockMethodCallHandler(SystemChannels.platform, (call) async {
++      if (call.method == 'Clipboard.setData') copied = call.arguments['text'];
++      return null;
++    });
++    addTearDown(() =>
++        messenger.setMockMethodCallHandler(SystemChannels.platform, null));
++    await t.tap(find.text('复制处理步骤').first);
++    await t.pump();
++    expect(copied, _longNote);
++    expect(t.widget<Text>(find.text(_longNote).first).maxLines, 2);
++    await t.tap(find.text('本门店'));
++    await t.pumpAndSettle();
++    expect(find.text('示例后厨平板'), findsOneWidget);
++    await t.tap(find.text('追加说明').first);
++    await t.pumpAndSettle();
++    expect(
++        t.widget<TextButton>(find.widgetWithText(TextButton, '保存追加')).onPressed,
++        isNull);
++    await t.enterText(find.widgetWithText(TextField, '追加内容'), '追加复核');
++    await t.pumpAndSettle();
++    key.currentState!.fail = true;
++    await t.tap(find.text('保存追加'));
++    await t.pumpAndSettle();
++    expect(find.text('追加失败，请重试'), findsOneWidget);
++    key.currentState!.fail = false;
++    await t.tap(find.text('保存追加'));
++    await t.pumpAndSettle();
++    expect(key.currentState!.writes, [
++      ['store', 'sample-1', '追加复核']
++    ]);
++    expect(find.textContaining('追加复核'), findsOneWidget);
++    expect(find.text('刷新后厨测试菜单后恢复。'), findsOneWidget);
++    await t.tap(find.text('只看未解决'));
++    await t.pumpAndSettle();
++    expect(find.text('示例后厨平板'), findsNothing);
++    expect(find.text('未解决'), findsOneWidget);
++    await t.pumpWidget(const SizedBox());
++  });
++
++  testWidgets('normal 30-day total and per-session quick note initialization',
++      (t) async {
++    final data = _payload(repeat: false);
++    await _render(t, data);
++    expect(find.text('近 30 天 3 次'), findsOneWidget);
++    await t.enterText(find.byType(TextField), '当前会话输入');
++    await _render(t, {...data});
++    expect(find.text('当前会话输入'), findsOneWidget);
++    await _render(t, {...data, 'note': '另一个窗口修改的随手记'});
++    expect(find.text('另一个窗口修改的随手记'), findsOneWidget);
++    await _render(t, {...data, 'session': 'next-session', 'note': '另一会话'});
++    expect(find.text('另一会话'), findsOneWidget);
++    await t.pumpWidget(const SizedBox());
++  });
++
++  testWidgets(
++      '1280px history overlay keeps ticking canvas mounted; quick note appears in H1 dialog',
++      (t) async {
++    final output = Platform.environment['HISTORY_SCREENSHOT_DIR'];
++    if (output != null) {
++      await t.runAsync(() async {
++        for (final f in {
++          'Capture': Platform.environment['HISTORY_SCREENSHOT_FONT']!,
++          'MaterialIcons': Platform.environment['HISTORY_SCREENSHOT_ICONS']!
++        }.entries) {
++          final loader = FontLoader(f.key)
++            ..addFont(Future.value(
++                ByteData.sublistView(File(f.value).readAsBytesSync())));
++          await loader.load();
++        }
++      });
++      debugDisableShadows = false;
++      addTearDown(() => debugDisableShadows = true);
++    }
++    final shot = GlobalKey();
++    Future<void> capture(String name) async {
++      if (output == null) return;
++      final layer =
++          shot.currentContext!.findRenderObject() as RenderRepaintBoundary;
++      await t.runAsync(() async {
++        final image = await layer.toImage();
++        final bytes = await image.toByteData(format: ui.ImageByteFormat.png);
++        File('$output/$name.png').writeAsBytesSync(bytes!.buffer.asUint8List());
++        image.dispose();
++      });
++    }
++
++    await _render(t, _payload(), shot: shot);
++    final canvas = t.state(find.byType(_Clock));
++    await t.enterText(find.byType(TextField), _jot);
++    await t.pump();
++    expect(t.widget<Text>(find.text('打印机问题 30 天 3 次')).style?.color,
++        const Color(0xff92400e));
++    expect(find.text('上次：打印机 · 已解决 · 2 天前'), findsOneWidget);
++    await capture('h2-sidebar');
++    await _open(t);
++    expect(t.getSize(find.byType(CaseHistoryDrawer)).width, 420);
++    final tick = t.widget<Text>(find.byKey(const ValueKey('clock'))).data;
++    await capture('h2-device-clock-a');
++    await t.pump(const Duration(seconds: 2));
++    expect(t.state(find.byType(_Clock)), same(canvas));
++    expect(
++        t.widget<Text>(find.byKey(const ValueKey('clock'))).data, isNot(tick));
++    await capture('h2-device-clock-b');
++    await t.tap(find.text('本门店'));
++    await t.pumpAndSettle();
++    expect(find.text('示例后厨平板'), findsOneWidget);
++    await capture('h2-store');
++    await t.tap(find.byTooltip('关闭历史报告'));
++    await t.pumpAndSettle();
++    await t.tap(find.text('结束测试会话'));
++    await t.pumpAndSettle();
++    final dialogNote = find.descendant(
++        of: find.byType(Dialog), matching: find.byType(TextField));
++    expect(t.widget<TextField>(dialogNote).controller?.text, _jot);
++    await capture('h2-note-close');
++    if (output != null) debugDisableShadows = true;
++    await t.pumpWidget(const SizedBox());
++  });
++}

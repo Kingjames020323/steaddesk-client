@@ -1,0 +1,50 @@
+diff --git a/flutter/android/app/src/main/res/values/merchant_language.xml b/flutter/android/app/src/main/res/values/merchant_language.xml
+index 1ad833a..14a1cd7 100644
+--- a/flutter/android/app/src/main/res/values/merchant_language.xml
++++ b/flutter/android/app/src/main/res/values/merchant_language.xml
+@@ -1,5 +1,5 @@
+ <resources>
+-    <string name="steaddesk_input">SteadDesk Input</string>
++    <string name="steaddesk_input" translatable="false">SteadDesk Input</string>
+     <string name="merchant_channel">SteadDesk service</string>
+     <string name="merchant_channel_description">Notifications about the SteadDesk remote access service</string>
+     <string name="merchant_service_running">Service is running</string>
+diff --git a/flutter/android/app/src/main/res/values/strings.xml b/flutter/android/app/src/main/res/values/strings.xml
+index 9099575..7de0e20 100644
+--- a/flutter/android/app/src/main/res/values/strings.xml
++++ b/flutter/android/app/src/main/res/values/strings.xml
+@@ -1,5 +1,5 @@
+ <resources>
+     <string name="app_name">SteadDesk</string>
+     <string name="accessibility_service_description">Allow other devices to control your phone using virtual touch, when SteadDesk screen sharing is established</string>
+-    <string name="foreground_service_special_use_subtype">Keeps the SteadDesk remote desktop host available for authorized unattended connections and foreground notifications without starting screen capture before user approval.</string>
++    <string name="foreground_service_special_use_subtype" translatable="false">Keeps the SteadDesk remote desktop host available for authorized unattended connections and foreground notifications without starting screen capture before user approval.</string>
+ </resources>
+diff --git a/flutter/android/app/src/steaddeskMerchant/res/values-es/merchant_language.xml b/flutter/android/app/src/steaddeskMerchant/res/values-es/merchant_language.xml
+index ed187ad..3383121 100644
+--- a/flutter/android/app/src/steaddeskMerchant/res/values-es/merchant_language.xml
++++ b/flutter/android/app/src/steaddeskMerchant/res/values-es/merchant_language.xml
+@@ -1,9 +1,7 @@
+ <resources>
+     <string name="app_name">SteadDesk</string>
+     <string name="merchant_self_heal">Permitir que SteadDesk reactive la aplicación Agent asociada</string>
+-    <string name="steaddesk_input">Servicio de entrada de SteadDesk</string>
+     <string name="accessibility_service_description">Permite que otros dispositivos controlen este teléfono mediante gestos táctiles simulados cuando se comparte la pantalla con SteadDesk</string>
+-    <string name="foreground_service_special_use_subtype">Mantiene SteadDesk disponible para conexiones desatendidas autorizadas y notificaciones en primer plano. La captura de pantalla comienza solo con la aprobación del usuario.</string>
+     <string name="merchant_channel">Servicio de SteadDesk</string>
+     <string name="merchant_channel_description">Notificaciones del servicio de acceso remoto de SteadDesk</string>
+     <string name="merchant_service_running">El servicio se está ejecutando</string>
+diff --git a/flutter/android/app/src/steaddeskMerchant/res/values-zh/merchant_language.xml b/flutter/android/app/src/steaddeskMerchant/res/values-zh/merchant_language.xml
+index d60b966..c4c1a13 100644
+--- a/flutter/android/app/src/steaddeskMerchant/res/values-zh/merchant_language.xml
++++ b/flutter/android/app/src/steaddeskMerchant/res/values-zh/merchant_language.xml
+@@ -1,9 +1,7 @@
+ <resources>
+     <string name="app_name">SteadDesk</string>
+     <string name="merchant_self_heal">允许 SteadDesk 唤醒配套的 Agent 应用</string>
+-    <string name="steaddesk_input">SteadDesk 输入服务</string>
+     <string name="accessibility_service_description">通过 SteadDesk 共享屏幕后，允许其他设备使用模拟触控操作此设备</string>
+-    <string name="foreground_service_special_use_subtype">让 SteadDesk 远程桌面保持可用，以便接收已授权的无人值守连接并显示前台通知。屏幕捕获会在用户批准后开始。</string>
+     <string name="merchant_channel">SteadDesk 服务</string>
+     <string name="merchant_channel_description">SteadDesk 远程访问服务的通知</string>
+     <string name="merchant_service_running">服务正在运行</string>

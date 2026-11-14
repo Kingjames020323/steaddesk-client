@@ -2,6 +2,15 @@
 
 SteadDesk is an AGPL-3.0 remote support client based on RustDesk 1.5.0 for Windows x64 and Android (arm64-v8a, armeabi-v7a and x86_64). Clone with `git clone --recurse-submodules` and run `bash scripts/apply-patches.sh` before building in `upstream/`. The script checks the pinned upstream revisions. [Source pins and patch notes](UPSTREAM.md)
 
+## Client editions
+
+`STEADDESK_EDITION=merchant bash scripts/apply-patches.sh` selects the incoming-only SteadDesk client (Windows or Android). Its remote sessions require a permanent password. `STEADDESK_EDITION=support bash scripts/apply-patches.sh` selects SteadDesk Support for Windows. The support client can initiate sessions. Its home screen has an **Allow incoming connections** switch, off by default. Each accepted inbound session requires a local click. Use separate build directories for the two Windows editions. In an extracted corresponding-source archive, run `bash scripts/configure-edition.sh upstream merchant` or `bash scripts/configure-edition.sh upstream support` before building.
+
+Windows support builds can enable local case closing with `STEADDESK_CASES=true bash scripts/configure-edition.sh upstream support` after applying the patches. In GitHub Actions, run **Build SteadDesk** on the preview branch and select **Enable case closing in the Windows support build** to obtain an enabled installer. The default is off. The merchant build always excludes the case implementation.
+
+
+PR builds upload three packages with individual SHA256SUMS. Windows artifacts are named `SteadDesk-Windows-x64-merchant` and `SteadDesk-Windows-x64-support`. Android uses `SteadDesk-Android-universal`. The APK requires signing before installation. The existing offline release bundle contains the merchant packages.
+
 ## Release procedure
 
 1. Update `RELEASE_VERSION` by pull request. Start at `1.5.0-sd.1` and increase the final number for each release. The version appears in Windows file properties, About and Android's versionName. The installed Windows CLI continues to print `1.5.0` for `--version` so existing provisioning scripts can verify the upstream protocol. Review the PR build, including the offline Windows tests and the assembled release bundle.
@@ -25,3 +34,35 @@ SteadDesk is an AGPL-3.0 remote support client based on RustDesk 1.5.0 for Windo
 Store the signing material on the signing workstation or its removable media. The workflow only needs a GitHub token to create the draft. Windows builds without a publisher signature and unsigned APKs are staging artifacts; Android installation requires a signed APK. Earlier demo APKs used a temporary signing certificate, so Android may reject an in-place upgrade to the offline-signed release.
 
 The source archive includes the distribution tools, patches and the patched upstream source with its pinned submodules. After extraction the source under `upstream/` is already patched. Hosted runner images, OS packages, Flutter dependency resolution and upstream's custom Windows engine download can vary between runs. Verify the assets from the release under test.
+
+### Android merchant self-update
+
+Before committing a future self-update session, compare the candidate APK's numeric version code with the installed package's version code. Submit only a strictly newer version. Skip an equal version and reject a downgrade. Both SUNMI models returned `STATUS_SUCCESS` when reinstalling the same APK, so this callback alone cannot establish that the version increased. [S1 device results](https://github.com/Kingjames020323/steaddesk-client/blob/0c34aee/docs/research/S1-self-update.md)
+
+### Android merchant and Agent recovery
+
+The Android merchant service checks its paired Agent at startup and every five minutes. The Agent checks the merchant on the same schedule. Each direction requires Android signature permissions and the expected caller package. If the APKs use different signing certificates on Android 12 or newer, set the public Agent certificate SHA-256 in `STEADDESK_AGENT_CERT_SHA256` when configuring the merchant build (also supported as a GitHub Actions repository variable), and the public merchant digest in `STEADDESK_MERCHANT_CERT_SHA256` when building the Agent. Without pins, use the same signing certificate. Install the Agent first, install the merchant next, then verify both grants on the device.
+
+The merchant managed-configuration boolean `self_heal_enabled` defaults to true. Turning it off retains passive checks. The separate Agent setting controls the reverse direction. After three wake reservations in a rolling hour the caller pauses further attempts; its heartbeat exposes `selfHealPaused`. The private `files/self-heal.jsonl` retains the last 500 events. A wake acknowledgement confirms the request reached its peer. Check a remote first frame separately.
+
+### Support connection measurements
+
+The support build records ordinary outgoing remote desktop sessions locally by default. In the support home navigation menu, choose **Export connection statistics** to save the current account’s CSV. Signed-out sessions have their own history. The application support directory retains up to 5,000 rows per account in `support-metrics-v1.jsonl`. The records contain timing, outcome, and sampled quality. No session contents are collected or sent.
+
+Set `STEADDESK_METRICS=false` when configuring the build (or in the GitHub Actions repository variables) to disable both collection and export. Merchant builds always omit the recorder.
+
+### Support session reconnect
+
+The desktop support edition keeps the same remote window during a retryable disconnection. It sends up to three automatic reconnect requests. After the third unsuccessful request, choose **Retry** or **End session**. Password prompts and insecure-connection refusals remain under user control. Set `STEADDESK_RECONNECT=false` at build time to use the upstream retry behavior.
+
+### Support session quality
+
+The support toolbar starts in Auto. During the first five seconds after the route is ready it collects new delay reports. With samples available, relay or a median above 150 ms selects Low. Otherwise it selects Balanced, including when there are no samples. A manual choice takes over for the session. The quality indicator turns grey after five seconds without a fresh delay. Hover over it for display frame rates.
+
+Set `STEADDESK_QUALITY=false` when configuring the build or in GitHub Actions repository variables to use the previous toolbar. This option is independent of local connection measurements.
+
+Support builds can enable server-managed shared and personal groups with the build variable `STEADDESK_OPS_GROUPS=true`. It defaults to false. Merchant builds always disable it. The support client uses its signed-in API origin and account, caches the last group listing for offline viewing, and requires a live connection to save changes. On first import it archives the confirmed local groups for that account.
+
+### Support device health
+
+Set `STEADDESK_OPS_HEALTH=true` for a Windows support build with the health API. It defaults to off, independently of the groups flag. Device cards and the session sidebar show the latest observation and its timestamp. After three minutes without a fresh observation the status changes to Unknown. The home alert list supports claiming and closing an alert with a reason. A device card can request a check of its registered store inventory using the existing signed-in API origin.

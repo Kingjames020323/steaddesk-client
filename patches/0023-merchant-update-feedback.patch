@@ -1,0 +1,91 @@
+Subject: Keep merchant update recovery quiet and pin the Android version footer
+
+diff --git a/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/BootReceiver.kt b/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/BootReceiver.kt
+index 8d4fe07..9fc2111 100644
+--- a/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/BootReceiver.kt
++++ b/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/BootReceiver.kt
+@@ -18,7 +18,8 @@ class BootReceiver : BroadcastReceiver() {
+     override fun onReceive(context: Context, intent: Intent) {
+         Log.d(logTag, "onReceive ${intent.action}")
+ 
+-        if (Intent.ACTION_BOOT_COMPLETED == intent.action || DEBUG_BOOT_COMPLETED == intent.action) {
++        val fromUpdate = intent.action == Intent.ACTION_MY_PACKAGE_REPLACED
++        if (fromUpdate || Intent.ACTION_BOOT_COMPLETED == intent.action || DEBUG_BOOT_COMPLETED == intent.action) {
+             // check pre-permission
+             if (!XXPermissions.isGranted(context, REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, SYSTEM_ALERT_WINDOW)){
+                 Log.d(logTag, "REQUEST_IGNORE_BATTERY_OPTIMIZATIONS or SYSTEM_ALERT_WINDOW is not granted")
+@@ -29,7 +30,9 @@ class BootReceiver : BroadcastReceiver() {
+                 action = ACT_INIT_MEDIA_PROJECTION_AND_SERVICE
+                 putExtra(EXT_INIT_FROM_BOOT, true)
+             }
+-            Toast.makeText(context, "RustDesk is Open", Toast.LENGTH_LONG).show()
++            if (!fromUpdate) {
++                Toast.makeText(context, R.string.steaddesk_service_started, Toast.LENGTH_LONG).show()
++            }
+             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                 context.startForegroundService(it)
+             } else {
+diff --git a/flutter/android/app/src/main/res/values-es/steaddesk_service.xml b/flutter/android/app/src/main/res/values-es/steaddesk_service.xml
+new file mode 100644
+index 0000000..89722ce
+--- /dev/null
++++ b/flutter/android/app/src/main/res/values-es/steaddesk_service.xml
+@@ -0,0 +1,3 @@
++<resources>
++    <string name="steaddesk_service_started">Se ha iniciado el servicio de SteadDesk</string>
++</resources>
+diff --git a/flutter/android/app/src/main/res/values-zh/steaddesk_service.xml b/flutter/android/app/src/main/res/values-zh/steaddesk_service.xml
+new file mode 100644
+index 0000000..52c09ef
+--- /dev/null
++++ b/flutter/android/app/src/main/res/values-zh/steaddesk_service.xml
+@@ -0,0 +1,3 @@
++<resources>
++    <string name="steaddesk_service_started">SteadDesk 服务已开启</string>
++</resources>
+diff --git a/flutter/android/app/src/main/res/values/steaddesk_service.xml b/flutter/android/app/src/main/res/values/steaddesk_service.xml
+new file mode 100644
+index 0000000..cf101b0
+--- /dev/null
++++ b/flutter/android/app/src/main/res/values/steaddesk_service.xml
+@@ -0,0 +1,3 @@
++<resources>
++    <string name="steaddesk_service_started">SteadDesk service started</string>
++</resources>
+diff --git a/flutter/lib/steaddesk/merchant_panel.dart b/flutter/lib/steaddesk/merchant_panel.dart
+index 6fa62b8..bfae0c4 100644
+--- a/flutter/lib/steaddesk/merchant_panel.dart
++++ b/flutter/lib/steaddesk/merchant_panel.dart
+@@ -286,11 +286,6 @@ class _MerchantPanelState extends State<MerchantPanel>
+           SelectableText(merchantPhone,
+               style: const TextStyle(fontSize: 20, color: _ink))
+         ],
+-        const SizedBox(height: 20),
+-        if (merchantAndroid)
+-          Padding(
+-              padding: const EdgeInsets.symmetric(vertical: 8),
+-              child: Text('SteadDesk $merchantVersion')),
+       ]);
+ 
+   Widget content() {
+@@ -367,5 +362,19 @@ class _MerchantPanelState extends State<MerchantPanel>
+ 
+   @override
+   Widget build(BuildContext context) =>
+-      Scaffold(backgroundColor: Colors.white, body: SafeArea(child: content()));
++      Scaffold(
++        backgroundColor: Colors.white,
++        body: SafeArea(child: content()),
++        bottomNavigationBar: merchantAndroid
++            ? const SafeArea(
++                top: false,
++                child: Padding(
++                  padding: EdgeInsets.symmetric(horizontal: 16, vertical: 6),
++                  child: Text('SteadDesk $merchantVersion',
++                      textAlign: TextAlign.center,
++                      style: TextStyle(color: _ink, fontSize: 12)),
++                ),
++              )
++            : null,
++      );
+ }

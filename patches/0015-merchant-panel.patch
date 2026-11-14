@@ -1,0 +1,645 @@
+Subject: Show merchant assistance panels, first-time password setup and Windows tray
+
+diff --git a/flutter/lib/desktop/pages/server_page.dart b/flutter/lib/desktop/pages/server_page.dart
+index eeb51b6..72cac57 100644
+--- a/flutter/lib/desktop/pages/server_page.dart
++++ b/flutter/lib/desktop/pages/server_page.dart
+@@ -1,6 +1,7 @@
+ // original cm window in Sciter version.
+ 
+ import 'dart:async';
++import '../../steaddesk/merchant_panel.dart';
+ import 'dart:math';
+ 
+ import 'package:flutter/material.dart';
+@@ -63,6 +64,10 @@ class _DesktopServerPageState extends State<DesktopServerPage>
+ 
+   @override
+   void onWindowClose() {
++    if (merchantWindows && gFFI.serverModel.clients.any((c) => !c.disconnected)) {
++      windowManager.minimize();
++      return;
++    }
+     // Other platforms keep the old behaviour exactly: the ambiguity this guards against is a
+     // Linux session logout, which closes every window in the session.
+     final byOperator = _cmClosedByOperator || !isLinux;
+@@ -86,6 +91,7 @@ class _DesktopServerPageState extends State<DesktopServerPage>
+   @override
+   Widget build(BuildContext context) {
+     super.build(context);
++    if (merchantWindows) return const MerchantPanel(connectionManager: true);
+     return MultiProvider(
+       providers: [
+         ChangeNotifierProvider.value(value: gFFI.serverModel),
+diff --git a/flutter/lib/main.dart b/flutter/lib/main.dart
+index 5f234cb..05a1888 100644
+--- a/flutter/lib/main.dart
++++ b/flutter/lib/main.dart
+@@ -24,6 +24,7 @@ import 'package:provider/provider.dart';
+ import 'package:window_manager/window_manager.dart';
+ 
+ import 'common.dart';
++import 'steaddesk/merchant_panel.dart';
+ import 'consts.dart';
+ import 'mobile/pages/home_page.dart';
+ import 'mobile/pages/server_page.dart';
+@@ -154,7 +155,13 @@ void runMainApp(bool startService) async {
+       isMainWindow: true, alwaysOnTop: alwaysOnTop);
+   windowManager.waitUntilReadyToShow(windowOptions, () async {
+     // Restore the location of the main window before window hide or show.
+-    await restoreWindowPosition(WindowType.Main);
++    if (merchantWindows) {
++      await windowManager.setMinimumSize(merchantSize);
++      await windowManager.setSize(merchantSize);
++      await windowManager.center();
++    } else {
++      await restoreWindowPosition(WindowType.Main);
++    }
+     // Check the startup argument, if we successfully handle the argument, we keep the main window hidden.
+     final handledByUniLinks = await initUniLinks();
+     debugPrint("handled by uni links: $handledByUniLinks");
+@@ -284,14 +291,15 @@ void runMultiWindow(
+ 
+ void runConnectionManagerScreen() async {
+   await initEnv(kAppTypeConnectionManager);
++  if (merchantWindows) await windowManager.setPreventClose(true);
+   _runApp(
+     '',
+     const DesktopServerPage(),
+-    MyTheme.currentThemeMode(),
++    merchantWindows ? ThemeMode.light : MyTheme.currentThemeMode(),
+   );
+   final hide = await bind.cmGetConfig(name: "hide_cm") == 'true';
+-  gFFI.serverModel.hideCm = hide;
+-  if (hide) {
++  gFFI.serverModel.hideCm = !merchantWindows && hide;
++  if (gFFI.serverModel.hideCm) {
+     await hideCmWindow(isStartup: true);
+   } else {
+     await showCmWindow(isStartup: true);
+@@ -301,12 +309,14 @@ void runConnectionManagerScreen() async {
+   listenUniLinks(handleByFlutter: false);
+ }
+ 
++Size get _cmPanelSize => merchantWindows ? merchantSize : kConnectionManagerWindowSizeClosedChat;
++
+ bool _isCmReadyToShow = false;
+ 
+ showCmWindow({bool isStartup = false}) async {
+   if (isStartup) {
+     WindowOptions windowOptions = getHiddenTitleBarWindowOptions(
+-        size: kConnectionManagerWindowSizeClosedChat, alwaysOnTop: true);
++        size: _cmPanelSize, alwaysOnTop: true);
+     await windowManager.waitUntilReadyToShow(windowOptions, null);
+     bind.mainHideDock();
+     await Future.wait([
+@@ -316,7 +326,7 @@ showCmWindow({bool isStartup = false}) async {
+     ]);
+     // ensure initial window size to be changed
+     await windowManager.setSizeAlignment(
+-        kConnectionManagerWindowSizeClosedChat, Alignment.topRight);
++        _cmPanelSize, Alignment.topRight);
+     _isCmReadyToShow = true;
+   } else if (_isCmReadyToShow) {
+     if (await windowManager.getOpacity() != 1) {
+@@ -324,7 +334,7 @@ showCmWindow({bool isStartup = false}) async {
+       await windowManager.focus();
+       await windowManager.minimize(); //needed
+       await windowManager.setSizeAlignment(
+-          kConnectionManagerWindowSizeClosedChat, Alignment.topRight);
++          _cmPanelSize, Alignment.topRight);
+       windowOnTop(null);
+     }
+   }
+@@ -333,7 +343,7 @@ showCmWindow({bool isStartup = false}) async {
+ hideCmWindow({bool isStartup = false}) async {
+   if (isStartup) {
+     WindowOptions windowOptions = getHiddenTitleBarWindowOptions(
+-        size: kConnectionManagerWindowSizeClosedChat);
++        size: _cmPanelSize);
+     windowManager.setOpacity(0);
+     await windowManager.waitUntilReadyToShow(windowOptions, null);
+     bind.mainHideDock();
+@@ -479,7 +489,7 @@ class _AppState extends State<App> with WidgetsBindingObserver {
+               : bind.mainGetAppNameSync(),
+           theme: MyTheme.lightTheme,
+-          themeMode: MyTheme.currentThemeMode(),
+-          home: isDesktop
++          themeMode: merchantAndroid || merchantWindows ? ThemeMode.light : MyTheme.currentThemeMode(),
++          home: merchantAndroid || merchantWindows ? const MerchantPanel() : isDesktop
+               ? const DesktopTabPage()
+               : isWeb
+                   ? WebHomePage()
+@@ -528,7 +538,7 @@ class _AppState extends State<App> with WidgetsBindingObserver {
+               : (context, child) {
+                   child = _keepScaleBuilder(context, child);
+                   child = botToastBuilder(context, child);
+-                  if ((isDesktop && desktopType == DesktopType.main) ||
++                  if ((isDesktop && desktopType == DesktopType.main && !merchantWindows) ||
+                       isWebDesktop) {
+                     child = keyListenerBuilder(context, child);
+                   }
+diff --git a/flutter/lib/steaddesk/merchant_panel.dart b/flutter/lib/steaddesk/merchant_panel.dart
+new file mode 100644
+index 0000000..6fa62b8
+--- /dev/null
++++ b/flutter/lib/steaddesk/merchant_panel.dart
+@@ -0,0 +1,371 @@
++import 'dart:async';
++import 'package:device_info_plus/device_info_plus.dart';
++import 'package:flutter/material.dart';
++import 'package:flutter/services.dart';
++import 'package:window_manager/window_manager.dart';
++
++import '../common.dart';
++import '../consts.dart';
++import '../desktop/pages/desktop_home_page.dart' show setPasswordDialog;
++import '../models/platform_model.dart';
++import '../models/server_model.dart';
++import 'merchant_build.dart';
++import 'merchant_window_stub.dart'
++    if (dart.library.io) 'merchant_window_io.dart';
++
++bool get merchantWindows => merchantEdition && isWindows;
++bool get merchantAndroid => merchantEdition && isAndroid;
++const merchantSize = Size(360, 520);
++// TODO(U-01): replace these design-token values with shared theme references.
++const _blue = Color(0xff0a6fa8),
++    _pale = Color(0xffdff2fa),
++    _ink = Color(0xff0e3a52);
++const _green = Color(0xff15803d),
++    _warning = Color(0xff92400e),
++    _danger = Color(0xffdc2626);
++
++class MerchantPanel extends StatefulWidget {
++  final bool connectionManager;
++  const MerchantPanel({super.key, this.connectionManager = false});
++  @override
++  State<MerchantPanel> createState() => _MerchantPanelState();
++}
++
++class _MerchantPanelState extends State<MerchantPanel>
++    with WidgetsBindingObserver, WindowListener {
++  final model = gFFI.serverModel;
++  Timer? refresh;
++  bool? configured, notifications, battery;
++  bool busy = false;
++  String device = '', id = '';
++  bool? activeCaption;
++
++  @override
++  void initState() {
++    super.initState();
++    WidgetsBinding.instance.addObserver(this);
++    if (merchantWindows) windowManager.addListener(this);
++    model.addListener(changed);
++    if (widget.connectionManager) changed();
++    loadDevice();
++    sample();
++    refresh = Timer.periodic(const Duration(seconds: 3), (_) => sample());
++  }
++
++  Future<void> loadDevice() async {
++    try {
++      final info = DeviceInfoPlugin();
++      final name = merchantAndroid
++          ? await info.androidInfo.then((d) => '${d.brand} ${d.model}'.trim())
++          : await info.windowsInfo.then((d) => d.computerName);
++      if (mounted) setState(() => device = name);
++    } on Exception {/* Hide unavailable device names. */}
++  }
++
++  List<Client> get sessions => model.clients
++      .where((c) =>
++          c.authorized &&
++          !c.disconnected &&
++          !c.isFileTransfer &&
++          !c.isViewCamera &&
++          !c.isTerminal &&
++          c.portForward.isEmpty)
++      .toList();
++
++  void changed() {
++    if (!mounted) return;
++    if (widget.connectionManager) {
++      final active = sessions.isNotEmpty;
++      if (activeCaption != active) {
++        activeCaption = active;
++        windowManager.setTitle(
++            active ? merchantActiveTitle : 'SteadDesk · Connection manager');
++      }
++    }
++    setState(() {});
++  }
++
++  Future<void> sample() async {
++    if (busy || !mounted) return;
++    busy = true;
++    try {
++      final raw = await bind.mainGetMyId();
++      if (!mounted) return;
++      setState(() => id = raw);
++      if (merchantAndroid) {
++        if (configured != true) {
++          final has = await bind.mainGetCommon(key: 'permanent-password-set');
++          if (!mounted) return;
++          // A successful submission also completes setup while this read is pending.
++          if (configured != true) {
++            setState(() => configured = has == 'true'
++                ? true
++                : has == 'false'
++                    ? false
++                    : null);
++          }
++        }
++        await gFFI.invokeMethod('check_service');
++        if (configured == false) {
++          final n = androidVersion < 33 ||
++              await AndroidPermissionManager.check(kAndroid13Notification);
++          final b = await AndroidPermissionManager.check(
++              kRequestIgnoreBatteryOptimizations);
++          if (mounted)
++            setState(() {
++              notifications = n;
++              battery = b;
++            });
++        }
++      }
++    } catch (_) {
++      if (mounted && merchantAndroid && configured != true) {
++        setState(() => configured = null);
++      }
++    } finally {
++      busy = false;
++    }
++  }
++
++  @override
++  void onWindowFocus() {
++    if (merchantWindows && !widget.connectionManager) focusMerchantSession();
++  }
++
++  @override
++  void onWindowClose() {
++    if (merchantWindows && !widget.connectionManager) windowManager.hide();
++  }
++
++  @override
++  void didChangeAppLifecycleState(AppLifecycleState state) {
++    if (state == AppLifecycleState.resumed) {
++      sample();
++    }
++  }
++
++  @override
++  void dispose() {
++    refresh?.cancel();
++    if (merchantWindows) windowManager.removeListener(this);
++    WidgetsBinding.instance.removeObserver(this);
++    model.removeListener(changed);
++    super.dispose();
++  }
++
++  Widget setup() {
++    Widget permission(String label, bool? granted, VoidCallback? request) =>
++        ListTile(
++            onTap: granted == false ? request : null,
++            title: Text(translate(label)),
++            trailing: Text(translate(granted == null
++                ? 'Checking'
++                : granted
++                    ? 'Granted'
++                    : 'Not granted')));
++    return ListView(padding: const EdgeInsets.all(24), children: [
++      brand(),
++      const SizedBox(height: 16),
++      Text(translate('First-time setup'),
++          style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold)),
++      permission('Screen Capture', model.mediaOk, () {
++        if (!model.mediaOk) model.startService();
++      }),
++      permission(
++          'Input Control', model.inputOk, () => showInputWarnAlert(gFFI)),
++      if (androidVersion >= 33)
++        permission('Notifications', notifications,
++            model.checkRequestNotificationPermission),
++      permission(
++          'Battery optimization exemption',
++          battery,
++          () => AndroidPermissionManager.request(
++              kRequestIgnoreBatteryOptimizations)),
++      TextButton(
++        onPressed: () => setPasswordDialog(notEmptyCallback: () {
++          if (mounted) setState(() => configured = true);
++        }),
++        child: Text(translate('Set permanent password')),
++      ),
++    ]);
++  }
++
++  Widget brand() => Row(children: [
++        Image.asset('assets/icon.png',
++            width: merchantAndroid ? 48 : 30,
++            height: merchantAndroid ? 48 : 30),
++        const SizedBox(width: 10),
++        const Flexible(
++            child: Text('SteadDesk',
++                style: TextStyle(
++                    fontWeight: FontWeight.w700, fontSize: 20, color: _ink))),
++      ]);
++
++  Widget identity() =>
++      Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
++        Semantics(container: true, child: Text(translate('This device ID'))),
++        const SizedBox(height: 4),
++        Row(children: [
++          Expanded(
++              child: FittedBox(
++                  fit: BoxFit.scaleDown,
++                  alignment: Alignment.centerLeft,
++                  child: SelectableText(
++                      id.isEmpty ? translate('Generating ...') : id,
++                      style: TextStyle(
++                          fontSize: merchantAndroid ? 52 : 32,
++                          fontWeight: FontWeight.bold,
++                          letterSpacing: 1,
++                          fontFeatures: const [
++                            FontFeature.tabularFigures()
++                          ])))),
++          if (merchantWindows && id.isNotEmpty)
++            IconButton(
++                icon: const Icon(Icons.copy_outlined),
++                color: _blue,
++                tooltip: translate('Copy ID'),
++                onPressed: () => Clipboard.setData(ClipboardData(text: id)))
++        ]),
++        if (device.isNotEmpty) Text(device),
++      ]);
++
++  Widget status() {
++    final active = sessions;
++    if (active.isEmpty) {
++      final ready = model.connectStatus > 0 &&
++          id.isNotEmpty &&
++          (!merchantAndroid || (model.mediaOk && model.inputOk));
++      return Text(
++          translate(ready
++              ? (merchantAndroid ? 'Ready · No active assistance' : 'Ready')
++              : 'Not ready'),
++          style: TextStyle(
++              color: ready ? _green : _warning, fontWeight: FontWeight.w600));
++    }
++    return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
++      for (final c in active)
++        Container(
++            margin: const EdgeInsets.only(bottom: 6),
++            padding: const EdgeInsets.all(14),
++            decoration: BoxDecoration(
++                color: const Color(0xfffff7e6),
++                borderRadius: BorderRadius.circular(10)),
++            child:
++                Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
++              Text(translate('Remote assistance in progress'),
++                  style: const TextStyle(
++                      color: _warning, fontWeight: FontWeight.w600)),
++              if (c.name.trim().isNotEmpty) Text(c.name),
++              const SizedBox(height: 8),
++              FilledButton(
++                  style: FilledButton.styleFrom(
++                      backgroundColor: _danger,
++                      foregroundColor: Colors.white,
++                      shape: RoundedRectangleBorder(
++                          borderRadius: BorderRadius.circular(6))),
++                  onPressed: () {
++                    if (sessions.any((current) => current.id == c.id))
++                      bind.cmCloseConnection(connId: c.id);
++                  },
++                  child: Text(translate('End remote assistance'))),
++            ]))
++    ]);
++  }
++
++  Widget help() =>
++      Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
++        Semantics(
++            container: true,
++            child: Text(translate('Need help?'),
++                style: const TextStyle(fontWeight: FontWeight.w600, color: _ink))),
++        const SizedBox(height: 8),
++        Text(translate('Give your device ID to support.')),
++        if (merchantPhone.trim().isNotEmpty) ...[
++          const SizedBox(height: 12),
++          Text(translate('Support phone')),
++          SelectableText(merchantPhone,
++              style: const TextStyle(fontSize: 20, color: _ink))
++        ],
++        const SizedBox(height: 20),
++        if (merchantAndroid)
++          Padding(
++              padding: const EdgeInsets.symmetric(vertical: 8),
++              child: Text('SteadDesk $merchantVersion')),
++      ]);
++
++  Widget content() {
++    if (merchantAndroid && configured != true) {
++      final page = configured == null
++          ? const Center(child: CircularProgressIndicator())
++          : setup();
++      return Column(children: [
++        if (sessions.isNotEmpty)
++          ConstrainedBox(
++              constraints: BoxConstraints(
++                  maxHeight: MediaQuery.sizeOf(context).height * .4),
++              child: SingleChildScrollView(child: status())),
++        Expanded(child: page),
++      ]);
++    }
++    if (merchantWindows)
++      return Column(children: [
++        GestureDetector(
++            onPanStart: (_) => windowManager.startDragging(),
++            child: Container(
++                color: _pale,
++                padding: const EdgeInsets.fromLTRB(20, 8, 8, 8),
++                child: Row(children: [
++                  Expanded(child: brand()),
++                  IconButton(
++                      tooltip: translate('Minimize'),
++                      icon: const Icon(Icons.minimize),
++                      onPressed: () => windowManager.minimize())
++                ]))),
++        Expanded(
++            child: ListView(
++                padding: const EdgeInsets.all(20),
++                children: [identity(), const SizedBox(height: 22), status()])),
++        const Divider(height: 1),
++        Padding(
++            padding: const EdgeInsets.all(16),
++            child: Align(alignment: Alignment.centerLeft, child: help())),
++      ]);
++    final details = Column(
++        crossAxisAlignment: CrossAxisAlignment.start,
++        mainAxisAlignment: MainAxisAlignment.center,
++        children: [
++          brand(),
++          const SizedBox(height: 26),
++          status(),
++          const SizedBox(height: 22),
++          identity()
++        ]);
++    return LayoutBuilder(builder: (context, size) {
++      if (size.maxWidth < 640)
++        return ListView(padding: const EdgeInsets.all(24), children: [
++          details,
++          const SizedBox(height: 24),
++          Container(
++              color: _pale, padding: const EdgeInsets.all(16), child: help())
++        ]);
++      return Row(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
++        Expanded(
++            flex: 2,
++            child: Center(
++                child: SingleChildScrollView(
++                    padding: const EdgeInsets.all(40), child: details))),
++        Expanded(
++            child: ColoredBox(
++                color: _pale,
++                child: SingleChildScrollView(
++                    padding: const EdgeInsets.symmetric(
++                        horizontal: 24, vertical: 40),
++                    child: help())))
++      ]);
++    });
++  }
++
++  @override
++  Widget build(BuildContext context) =>
++      Scaffold(backgroundColor: Colors.white, body: SafeArea(child: content()));
++}
+diff --git a/flutter/lib/steaddesk/merchant_window_io.dart b/flutter/lib/steaddesk/merchant_window_io.dart
+new file mode 100644
+index 0000000..c6a4541
+--- /dev/null
++++ b/flutter/lib/steaddesk/merchant_window_io.dart
+@@ -0,0 +1,38 @@
++import 'dart:ffi';
++import 'dart:io';
++import 'package:ffi/ffi.dart';
++import 'package:win32/win32.dart';
++export 'merchant_window_stub.dart' show merchantActiveTitle;
++import 'merchant_window_stub.dart' show merchantActiveTitle;
++
++// The upstream connection manager owns incoming connections in a separate
++// process. Activate its live panel instead of caching client IDs in the main UI.
++bool focusMerchantSession() {
++  if (!Platform.isWindows) return false;
++  return using((arena) {
++    final handle = FindWindow(
++        'FLUTTER_RUNNER_WIN32_WINDOW'.toNativeUtf16(allocator: arena),
++        merchantActiveTitle.toNativeUtf16(allocator: arena));
++    if (handle == 0) return false;
++    final pid = arena<Uint32>();
++    GetWindowThreadProcessId(handle, pid);
++    final process = OpenProcess(
++        PROCESS_ACCESS_RIGHTS.PROCESS_QUERY_LIMITED_INFORMATION,
++        FALSE,
++        pid.value);
++    if (process == 0) return false;
++    try {
++      final length = arena<Uint32>()..value = 32768;
++      final path = arena<Uint16>(length.value).cast<Utf16>();
++      if (QueryFullProcessImageName(process, 0, path, length) == 0 ||
++          path.toDartString(length: length.value).toLowerCase() !=
++              Platform.resolvedExecutable.toLowerCase()) {
++        return false;
++      }
++      ShowWindow(handle, SHOW_WINDOW_CMD.SW_RESTORE);
++      return SetForegroundWindow(handle) != 0;
++    } finally {
++      CloseHandle(process);
++    }
++  });
++}
+diff --git a/flutter/lib/steaddesk/merchant_window_stub.dart b/flutter/lib/steaddesk/merchant_window_stub.dart
+new file mode 100644
+index 0000000..41bacfe
+--- /dev/null
++++ b/flutter/lib/steaddesk/merchant_window_stub.dart
+@@ -0,0 +1,2 @@
++const merchantActiveTitle = 'SteadDesk · Remote assistance';
++bool focusMerchantSession() => false;
+diff --git a/src/lang/cn.rs b/src/lang/cn.rs
+index a86d353..bd2f320 100644
+--- a/src/lang/cn.rs
++++ b/src/lang/cn.rs
+@@ -3,6 +3,22 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
+     [
+         ("Allow incoming connections", "允许连入"),
+         ("Status", "状态"),
++        ("Permanent Password", "固定密码"),
++        ("First-time setup", "首次设置"),
++        ("Checking", "检查中"),
++        ("Granted", "已就绪"),
++        ("Not granted", "未就绪"),
++        ("Battery optimization exemption", "电池优化豁免"),
++        ("Ready · No active assistance", "已就绪 · 当前无人连接"),
++        ("Not ready", "尚未就绪"),
++        ("Remote assistance in progress", "客服正在远程协助"),
++        ("End remote assistance", "结束远程协助"),
++        ("Need help?", "需要帮助？"),
++        ("Give your device ID to support.", "请把本机设备 ID 告知客服。"),
++        ("Support phone", "客服电话"),
++        ("Copy ID", "复制设备 ID"),
++        ("This device ID", "本机设备 ID"),
++        ("Notifications", "通知"),
+         ("Your Desktop", "你的桌面"),
+         ("desk_tip", "你的桌面可以通过下面的 ID 和密码访问。"),
+         ("Password", "密码"),
+@@ -44,6 +60,7 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
+         ("allowed characters", "使用允许的字符"),
+         ("id_change_tip", "只可以使用字母 a-z, A-Z, 0-9, - (dash), _ (下划线)。首字母必须是 a-z, A-Z。长度在 6 与 16 之间。"),
+         ("Website", "网站"),
++        ("Show panel", "显示面板"),
+         ("About", "关于"),
+         ("Slogan_tip", "在这个混乱的世界中，用心制作！"),
+         ("Privacy Statement", "隐私声明"),
+diff --git a/src/tray.rs b/src/tray.rs
+index 50e2de0..8b01c52 100644
+--- a/src/tray.rs
++++ b/src/tray.rs
+@@ -64,18 +64,32 @@ fn make_tray() -> hbb_common::ResultType<()> {
+     let mut event_loop = EventLoopBuilder::new().build();
+ 
+     let tray_menu = Menu::new();
++    let merchant_panel = cfg!(windows) && !hbb_common::config::SUPPORT_EDITION;
+     let hide_stop_service = crate::ui_interface::get_builtin_option(
+         keys::OPTION_HIDE_STOP_SERVICE,
+     ) == "Y";
+     // The tray icon is only shown when the service is running, so we don't need to check
+     // the `stop-service` option here.
+-    let quit_i = if !hide_stop_service {
++    let quit_i = if !merchant_panel && !hide_stop_service {
+         Some(MenuItem::new(translate("Stop service".to_owned()), true, None))
+     } else {
+         None
+     };
+-    let open_i = MenuItem::new(translate("Open".to_owned()), true, None);
+-    if let Some(quit_i) = &quit_i {
++    let open_label = if merchant_panel { "Show panel" } else { "Open" };
++    let open_i = MenuItem::new(translate(open_label.to_owned()), true, None);
++    if merchant_panel {
++        use tray_icon::menu::{AboutMetadata, PredefinedMenuItem};
++
++        let about = PredefinedMenuItem::about(
++            Some(&translate("About".to_owned())),
++            Some(AboutMetadata {
++                name: Some(crate::get_app_name()),
++                version: Some(include_str!("../RELEASE_VERSION").trim().to_owned()),
++                ..Default::default()
++            }),
++        );
++        tray_menu.append_items(&[&open_i, &about])?;
++    } else if let Some(quit_i) = &quit_i {
+         tray_menu.append_items(&[&open_i, quit_i]).ok();
+     } else {
+         tray_menu.append_items(&[&open_i]).ok();

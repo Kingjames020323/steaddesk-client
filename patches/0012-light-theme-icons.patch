@@ -1,0 +1,511 @@
+SteadDesk light theme, palette and logo.
+
+diff --git a/flutter/lib/common.dart b/flutter/lib/common.dart
+index 3a82e28..80cad07 100644
+--- a/flutter/lib/common.dart
++++ b/flutter/lib/common.dart
+@@ -30,6 +30,7 @@ import 'package:window_size/window_size.dart' as window_size;
+ 
+ import '../consts.dart';
+ import 'common/widgets/overlay.dart';
++import 'steaddesk/theme.dart';
+ import 'mobile/pages/file_manager_page.dart';
+ import 'mobile/pages/remote_page.dart';
+ import 'mobile/pages/view_camera_page.dart';
+@@ -167,17 +168,17 @@ class ColorThemeExtension extends ThemeExtension<ColorThemeExtension> {
+   final Color? divider;
+ 
+   static final light = ColorThemeExtension(
+-    border: Color(0xFFCCCCCC),
++    border: SteadDeskTheme.divider,
+     border2: Color(0xFFBBBBBB),
+     border3: Colors.black26,
+-    highlight: Color(0xFFE5E5E5),
++    highlight: SteadDeskTheme.selection,
+     drag_indicator: Colors.grey[800],
+     shadow: Colors.black,
+     errorBannerBg: Color(0xFFFDEEEB),
+     me: Colors.green,
+     toastBg: Colors.black.withOpacity(0.6),
+     toastText: Colors.white,
+-    divider: Colors.black38,
++    divider: SteadDeskTheme.rowDivider,
+   );
+ 
+   static final dark = ColorThemeExtension(
+@@ -248,17 +249,17 @@ class ColorThemeExtension extends ThemeExtension<ColorThemeExtension> {
+ class MyTheme {
+   MyTheme._();
+ 
+-  static const Color grayBg = Color(0xFFEFEFF2);
+-  static const Color accent = Color(0xFF0071FF);
+-  static const Color accent50 = Color(0x770071FF);
+-  static const Color accent80 = Color(0xAA0071FF);
++  static const Color grayBg = SteadDeskTheme.hover;
++  static const Color accent = SteadDeskTheme.action;
++  static const Color accent50 = Color(0x770A6FA8);
++  static const Color accent80 = Color(0xAA0A6FA8);
+   static const Color canvasColor = Color(0xFF212121);
+-  static const Color border = Color(0xFFCCCCCC);
+-  static const Color idColor = Color(0xFF00B6F0);
++  static const Color border = SteadDeskTheme.divider;
++  static const Color idColor = SteadDeskTheme.action;
+   static const Color darkGray = Color.fromARGB(255, 148, 148, 148);
+   static const Color cmIdColor = Color(0xFF21790B);
+   static const Color dark = Colors.black87;
+-  static const Color button = Color(0xFF2C8CFF);
++  static const Color button = SteadDeskTheme.action;
+   static const Color hoverBorder = Color(0xFF999999);
+ 
+   // ListTile
+@@ -373,8 +374,15 @@ class MyTheme {
+     // https://stackoverflow.com/questions/77537315/after-upgrading-to-flutter-3-16-the-app-bar-background-color-button-size-and
+     useMaterial3: false,
+     brightness: Brightness.light,
+-    hoverColor: Color.fromARGB(255, 224, 224, 224),
+-    scaffoldBackgroundColor: Colors.white,
++    hoverColor: SteadDeskTheme.hover,
++    primaryColor: SteadDeskTheme.action,
++    dividerColor: SteadDeskTheme.divider,
++    fontFamily: defaultTargetPlatform == TargetPlatform.windows ? 'Segoe UI' : null,
++    fontFamilyFallback: defaultTargetPlatform == TargetPlatform.windows
++        ? const ['Microsoft YaHei UI', 'Microsoft YaHei']
++        : null,
++    progressIndicatorTheme: const ProgressIndicatorThemeData(color: SteadDeskTheme.sea),
++    scaffoldBackgroundColor: SteadDeskTheme.page,
+     dialogBackgroundColor: Colors.white,
+     appBarTheme: AppBarTheme(
+       shadowColor: Colors.transparent,
+@@ -401,14 +409,14 @@ class MyTheme {
+           )
+         : null,
+     textTheme: const TextTheme(
+-        titleLarge: TextStyle(fontSize: 19, color: Colors.black87),
+-        titleSmall: TextStyle(fontSize: 14, color: Colors.black87),
+-        bodySmall: TextStyle(fontSize: 12, color: Colors.black87, height: 1.25),
++        titleLarge: TextStyle(fontSize: 19, color: SteadDeskTheme.heading),
++        titleSmall: TextStyle(fontSize: 14, color: SteadDeskTheme.heading),
++        bodySmall: TextStyle(fontSize: 12, color: SteadDeskTheme.body, height: 1.25),
+         bodyMedium:
+-            TextStyle(fontSize: 14, color: Colors.black87, height: 1.25),
+-        labelLarge: TextStyle(fontSize: 16.0, color: MyTheme.accent80)),
+-    cardColor: grayBg,
+-    hintColor: Color(0xFFAAAAAA),
++            TextStyle(fontSize: 14, color: SteadDeskTheme.body, height: 1.25),
++        labelLarge: TextStyle(fontSize: 16.0, color: SteadDeskTheme.action)),
++    cardColor: SteadDeskTheme.page,
++    hintColor: SteadDeskTheme.secondaryText,
+     visualDensity: VisualDensity.adaptivePlatformDensity,
+     tabBarTheme: const TabBarTheme(
+       labelColor: Colors.black87,
+@@ -417,33 +425,13 @@ class MyTheme {
+     splashColor: (isDesktop || isWebDesktop) ? Colors.transparent : null,
+     highlightColor: (isDesktop || isWebDesktop) ? Colors.transparent : null,
+     splashFactory: (isDesktop || isWebDesktop) ? NoSplash.splashFactory : null,
+-    textButtonTheme: (isDesktop || isWebDesktop)
+-        ? TextButtonThemeData(
+-            style: TextButton.styleFrom(
+-              splashFactory: NoSplash.splashFactory,
+-              shape: RoundedRectangleBorder(
+-                borderRadius: BorderRadius.circular(18.0),
+-              ),
+-            ),
+-          )
+-        : mobileTextButtonTheme,
+-    elevatedButtonTheme: ElevatedButtonThemeData(
+-      style: ElevatedButton.styleFrom(
+-        backgroundColor: MyTheme.accent,
+-        shape: RoundedRectangleBorder(
+-          borderRadius: BorderRadius.circular(8.0),
+-        ),
+-      ),
+-    ),
+-    outlinedButtonTheme: OutlinedButtonThemeData(
+-      style: OutlinedButton.styleFrom(
+-        backgroundColor: grayBg,
+-        foregroundColor: Colors.black87,
+-        shape: RoundedRectangleBorder(
+-          borderRadius: BorderRadius.circular(8.0),
+-        ),
+-      ),
++    textButtonTheme: TextButtonThemeData(
++      style: (isDesktop || isWebDesktop)
++          ? SteadDeskTheme.button
++          : SteadDeskTheme.button.copyWith(padding: mobileTextButtonTheme.style?.padding),
+     ),
++    elevatedButtonTheme: ElevatedButtonThemeData(style: SteadDeskTheme.button),
++    outlinedButtonTheme: OutlinedButtonThemeData(style: SteadDeskTheme.button),
+     switchTheme: switchTheme(),
+     radioTheme: radioTheme(),
+     checkboxTheme: checkboxTheme,
+@@ -451,8 +439,13 @@ class MyTheme {
+     menuBarTheme: MenuBarThemeData(
+         style:
+             MenuStyle(backgroundColor: MaterialStatePropertyAll(Colors.white))),
+-    colorScheme: ColorScheme.light(
+-        primary: Colors.blue, secondary: accent, background: grayBg),
++    colorScheme: const ColorScheme.light(
++      primary: SteadDeskTheme.action,
++      secondary: SteadDeskTheme.action,
++      surface: SteadDeskTheme.page,
++      onSurface: SteadDeskTheme.body,
++      error: SteadDeskTheme.danger,
++    ),
+     popupMenuTheme: PopupMenuThemeData(
+         color: Colors.white,
+         shape: RoundedRectangleBorder(
+@@ -576,39 +569,7 @@ class MyTheme {
+     ],
+   );
+ 
+-  static ThemeMode getThemeModePreference() {
+-    return themeModeFromString(bind.mainGetLocalOption(key: kCommConfKeyTheme));
+-  }
+-
+-  static Future<void> changeDarkMode(ThemeMode mode) async {
+-    Get.changeThemeMode(mode);
+-    if (desktopType == DesktopType.main || isAndroid || isIOS || isWeb) {
+-      if (mode == ThemeMode.system) {
+-        await bind.mainSetLocalOption(
+-            key: kCommConfKeyTheme, value: defaultOptionTheme);
+-      } else {
+-        await bind.mainSetLocalOption(
+-            key: kCommConfKeyTheme, value: mode.toShortString());
+-      }
+-      if (!isWeb) await bind.mainChangeTheme(dark: mode.toShortString());
+-      // Synchronize the window theme of the system.
+-      updateSystemWindowTheme();
+-    }
+-  }
+-
+-  static ThemeMode currentThemeMode() {
+-    final preference = getThemeModePreference();
+-    if (preference == ThemeMode.system) {
+-      if (WidgetsBinding.instance.platformDispatcher.platformBrightness ==
+-          Brightness.light) {
+-        return ThemeMode.light;
+-      } else {
+-        return ThemeMode.dark;
+-      }
+-    } else {
+-      return preference;
+-    }
+-  }
++  static ThemeMode currentThemeMode() => ThemeMode.light;
+ 
+   static ColorThemeExtension color(BuildContext context) {
+     return Theme.of(context).extension<ColorThemeExtension>()!;
+@@ -617,17 +578,6 @@ class MyTheme {
+   static TabbarTheme tabbar(BuildContext context) {
+     return Theme.of(context).extension<TabbarTheme>()!;
+   }
+-
+-  static ThemeMode themeModeFromString(String v) {
+-    switch (v) {
+-      case "light":
+-        return ThemeMode.light;
+-      case "dark":
+-        return ThemeMode.dark;
+-      default:
+-        return ThemeMode.system;
+-    }
+-  }
+ }
+ 
+ extension ParseToString on ThemeMode {
+@@ -3011,14 +2961,8 @@ String getWindowNameWithId(String id, {WindowType? overrideType}) {
+ 
+ Future<void> updateSystemWindowTheme() async {
+   // Set system window theme for macOS.
+-  final userPreference = MyTheme.getThemeModePreference();
+-  if (userPreference != ThemeMode.system) {
+-    if (isMacOS) {
+-      await RdPlatformChannel.instance.changeSystemWindowTheme(
+-          userPreference == ThemeMode.light
+-              ? SystemWindowTheme.light
+-              : SystemWindowTheme.dark);
+-    }
++  if (isMacOS) {
++    await RdPlatformChannel.instance.changeSystemWindowTheme(SystemWindowTheme.light);
+   }
+ }
+ 
+@@ -3788,14 +3732,7 @@ class _LogoState extends State<_Logo> {
+ Widget loadLogo() => const _Logo();
+ 
+ Widget loadIcon(double size) {
+-  return Image.asset('assets/icon.png',
+-      width: size,
+-      height: size,
+-      errorBuilder: (ctx, error, stackTrace) => SvgPicture.asset(
+-            'assets/icon.svg',
+-            width: size,
+-            height: size,
+-          ));
++  return SvgPicture.asset('assets/icon.svg', width: size, height: size);
+ }
+ 
+ var imcomingOnlyHomeSize = Size(280, 300);
+diff --git a/flutter/lib/desktop/pages/desktop_setting_page.dart b/flutter/lib/desktop/pages/desktop_setting_page.dart
+index e9c0c15..abba40b 100644
+--- a/flutter/lib/desktop/pages/desktop_setting_page.dart
++++ b/flutter/lib/desktop/pages/desktop_setting_page.dart
+@@ -413,7 +413,6 @@ class _GeneralState extends State<_General> {
+       controller: scrollController,
+       children: [
+         if (!isWeb) service(),
+-        theme(),
+         _Card(title: 'Language', children: [language()]),
+         if (!isWeb) hwcodec(),
+         if (!isWeb) audio(context),
+@@ -424,33 +423,6 @@ class _GeneralState extends State<_General> {
+     ).marginOnly(bottom: _kListViewBottomMargin);
+   }
+ 
+-  Widget theme() {
+-    final current = MyTheme.getThemeModePreference().toShortString();
+-    onChanged(String value) async {
+-      await MyTheme.changeDarkMode(MyTheme.themeModeFromString(value));
+-      setState(() {});
+-    }
+-
+-    final isOptFixed = isOptionFixed(kCommConfKeyTheme);
+-    return _Card(title: 'Theme', children: [
+-      _Radio<String>(context,
+-          value: 'light',
+-          groupValue: current,
+-          label: 'Light',
+-          onChanged: isOptFixed ? null : onChanged),
+-      _Radio<String>(context,
+-          value: 'dark',
+-          groupValue: current,
+-          label: 'Dark',
+-          onChanged: isOptFixed ? null : onChanged),
+-      _Radio<String>(context,
+-          value: 'system',
+-          groupValue: current,
+-          label: 'Follow System',
+-          onChanged: isOptFixed ? null : onChanged),
+-    ]);
+-  }
+-
+   Widget service() {
+     if (bind.isOutgoingOnly()) {
+       return const Offstage();
+@@ -2528,7 +2500,7 @@ class _AboutState extends State<_About> {
+       final buildDate = data['buildDate'].toString();
+       final fingerprint = data['fingerprint'].toString();
+       final myId = data['myId'].toString();
+-      const linkStyle = TextStyle(decoration: TextDecoration.underline);
++      const linkStyle = TextStyle(color: MyTheme.accent, decoration: TextDecoration.underline);
+       final scrollController = ScrollController();
+       return SingleChildScrollView(
+         controller: scrollController,
+diff --git a/flutter/lib/main.dart b/flutter/lib/main.dart
+index 5f234cb..1613d61 100644
+--- a/flutter/lib/main.dart
++++ b/flutter/lib/main.dart
+@@ -362,7 +362,6 @@ void _runApp(
+       debugShowCheckedModeBanner: false,
+       title: title,
+       theme: MyTheme.lightTheme,
+-      darkTheme: MyTheme.darkTheme,
+       themeMode: themeMode,
+       home: home,
+       localizationsDelegates: const [
+@@ -427,26 +426,6 @@ class _AppState extends State<App> with WidgetsBindingObserver {
+   @override
+   void initState() {
+     super.initState();
+-    WidgetsBinding.instance.window.onPlatformBrightnessChanged = () {
+-      final userPreference = MyTheme.getThemeModePreference();
+-      if (userPreference != ThemeMode.system) return;
+-      WidgetsBinding.instance.handlePlatformBrightnessChanged();
+-      final systemIsDark =
+-          WidgetsBinding.instance.platformDispatcher.platformBrightness ==
+-              Brightness.dark;
+-      final ThemeMode to;
+-      if (systemIsDark) {
+-        to = ThemeMode.dark;
+-      } else {
+-        to = ThemeMode.light;
+-      }
+-      Get.changeThemeMode(to);
+-      // Synchronize the window theme of the system.
+-      updateSystemWindowTheme();
+-      if (desktopType == DesktopType.main) {
+-        bind.mainChangeTheme(dark: to.toShortString());
+-      }
+-    };
+     WidgetsBinding.instance.addObserver(this);
+     WidgetsBinding.instance.addPostFrameCallback((_) => _updateOrientation());
+   }
+@@ -499,7 +478,6 @@ class _AppState extends State<App> with WidgetsBindingObserver {
+               ? '${bind.mainGetAppNameSync()} Web Client V2 (Preview)'
+               : bind.mainGetAppNameSync(),
+           theme: MyTheme.lightTheme,
+-          darkTheme: MyTheme.darkTheme,
+           themeMode: MyTheme.currentThemeMode(),
+           home: isDesktop
+               ? const DesktopTabPage()
+@@ -555,12 +533,6 @@ Widget _keepScaleBuilder(BuildContext context, Widget? child) {
+ 
+ _registerEventHandler() {
+   if (isDesktop && desktopType != DesktopType.main) {
+-    platformFFI.registerEventHandler('theme', 'theme', (evt) async {
+-      String? dark = evt['dark'];
+-      if (dark != null) {
+-        await MyTheme.changeDarkMode(MyTheme.themeModeFromString(dark));
+-      }
+-    });
+     platformFFI.registerEventHandler('language', 'language', (_) async {
+       reloadAllWindows();
+     });
+diff --git a/flutter/lib/mobile/pages/settings_page.dart b/flutter/lib/mobile/pages/settings_page.dart
+index 6d44ef8..47afe78 100644
+--- a/flutter/lib/mobile/pages/settings_page.dart
++++ b/flutter/lib/mobile/pages/settings_page.dart
+@@ -885,18 +885,6 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
+               onPressed: (context) {
+                 showLanguageSettings(gFFI.dialogManager);
+               }),
+-          SettingsTile(
+-            title: Text(translate(
+-                Theme.of(context).brightness == Brightness.light
+-                    ? 'Light Theme'
+-                    : 'Dark Theme')),
+-            leading: Icon(Theme.of(context).brightness == Brightness.light
+-                ? Icons.dark_mode
+-                : Icons.light_mode),
+-            onPressed: (context) {
+-              showThemeSettings(gFFI.dialogManager);
+-            },
+-          ),
+           if (!bind.isDisableAccount())
+             SettingsTile.switchTile(
+               title: Text(translate('note-at-conn-end-tip')),
+@@ -1032,6 +1020,7 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
+                   padding: EdgeInsets.symmetric(vertical: 8),
+                   child: Text('基于 RustDesk（AGPL-3.0） · Source code',
+                       style: TextStyle(
++                        color: MyTheme.accent,
+                         decoration: TextDecoration.underline,
+                       )),
+                 ),
+@@ -1140,34 +1129,6 @@ void showLanguageSettings(OverlayDialogManager dialogManager) async {
+   }
+ }
+ 
+-void showThemeSettings(OverlayDialogManager dialogManager) async {
+-  var themeMode = MyTheme.getThemeModePreference();
+-
+-  dialogManager.show((setState, close, context) {
+-    setTheme(v) {
+-      if (themeMode != v) {
+-        setState(() {
+-          themeMode = v;
+-        });
+-        MyTheme.changeDarkMode(themeMode);
+-        Future.delayed(Duration(milliseconds: 200), close);
+-      }
+-    }
+-
+-    final isOptFixed = isOptionFixed(kCommConfKeyTheme);
+-    return CustomAlertDialog(
+-      content: Column(children: [
+-        getRadio(Text(translate('Light')), ThemeMode.light, themeMode,
+-            isOptFixed ? null : setTheme),
+-        getRadio(Text(translate('Dark')), ThemeMode.dark, themeMode,
+-            isOptFixed ? null : setTheme),
+-        getRadio(Text(translate('Follow System')), ThemeMode.system, themeMode,
+-            isOptFixed ? null : setTheme)
+-      ]),
+-    );
+-  }, backDismiss: true, clickMaskDismiss: true);
+-}
+-
+ void showAbout(OverlayDialogManager dialogManager) {
+   dialogManager.show((setState, close, context) {
+     return CustomAlertDialog(
+@@ -1183,6 +1144,7 @@ void showAbout(OverlayDialogManager dialogManager) {
+               padding: EdgeInsets.symmetric(vertical: 8),
+               child: Text('基于 RustDesk（AGPL-3.0） · Source code',
+                   style: TextStyle(
++                    color: MyTheme.accent,
+                     decoration: TextDecoration.underline,
+                   )),
+             )),
+diff --git a/flutter/lib/steaddesk/theme.dart b/flutter/lib/steaddesk/theme.dart
+new file mode 100644
+index 0000000..313c8dc
+--- /dev/null
++++ b/flutter/lib/steaddesk/theme.dart
+@@ -0,0 +1,68 @@
++import 'dart:ui' show FontFeature;
++import 'package:flutter/material.dart';
++
++/// Shared light palette and geometry for SteadDesk surfaces.
++class SteadDeskTheme {
++  SteadDeskTheme._();
++
++  static const sea = Color(0xFF1FA7E0);
++  static const action = Color(0xFF0A6FA8);
++  static const actionHover = Color(0xFF085A89);
++  static const selection = Color(0xFFDFF2FA);
++  static const brandSurface = Color(0xFFE6F5FB);
++  static const foam = Color(0xFF34C3A6);
++  static const badgeSurface = Color(0xFFE3F7F1);
++  static const badgeText = Color(0xFF0B7A5E);
++  static const page = Color(0xFFFFFFFF);
++  static const sessionSurface = Color(0xFFEAF4F9);
++  static const heading = Color(0xFF0E3A52);
++  static const glassText = Color(0xFF0B2E42);
++  static const body = Color(0xFF17324A);
++  static const bodyHighContrast = Color(0xFF111827);
++  static const secondaryText = Color(0xFF4B5563);
++  static const divider = Color(0xFFE5E7EB);
++  static const rowDivider = Color(0xFFEEF0F2);
++  static const hover = Color(0xFFF3F4F6);
++  static const online = Color(0xFF16A34A);
++  static const offline = Color(0xFF9CA3AF);
++  static const attention = Color(0xFFD97706);
++  static const attentionText = Color(0xFF92400E);
++  static const danger = Color(0xFFDC2626);
++  static const tabularDigits = [FontFeature.tabularFigures()];
++
++  static const glassRadius = 20.0;
++  static const glassInset = 10.0;
++  static const glassBlur = 28.0;
++  static const glassFill = LinearGradient(
++    begin: Alignment.topLeft,
++    end: Alignment.bottomRight,
++    colors: [Color(0x9EFFFFFF), Color(0x6BFFFFFF)],
++  );
++  static const glassBorder = BorderSide(color: Color(0xC7FFFFFF), width: 1);
++  static const glassShadow = BoxShadow(
++    color: Color(0x240B3C5A),
++    offset: Offset(0, 10),
++    blurRadius: 30,
++  );
++  static const glassGlowColors = [sea, foam, action];
++  static const glassOpaque = Color(0xFFE8F4FA);
++
++  static final button = ButtonStyle(
++    foregroundColor: MaterialStateProperty.resolveWith<Color>((states) {
++      if (states.contains(MaterialState.disabled)) return offline;
++      return states.contains(MaterialState.hovered) ? actionHover : action;
++    }),
++    backgroundColor: const MaterialStatePropertyAll(Colors.transparent),
++    overlayColor: MaterialStateProperty.resolveWith<Color?>((states) {
++      if (states.contains(MaterialState.pressed)) return selection;
++      if (states.contains(MaterialState.focused) ||
++          states.contains(MaterialState.hovered)) return hover;
++      return null;
++    }),
++    elevation: const MaterialStatePropertyAll(0.0),
++    side: const MaterialStatePropertyAll(BorderSide.none),
++    shape: const MaterialStatePropertyAll(RoundedRectangleBorder(
++      borderRadius: BorderRadius.all(Radius.circular(6)),
++    )),
++  );
++}
