@@ -29,6 +29,12 @@ if cases not in ("", "0", "1", "false", "true"):
     raise ValueError("STEADDESK_CASES must be true, false, 1 or 0")
 cases = not merchant and cases in ("true", "1")
 lib = tree / "flutter/lib/steaddesk"
+help_flag = os.environ.get("STEADDESK_HELP", "").strip().lower()
+if help_flag not in ("", "0", "1", "false", "true"):
+    raise ValueError("STEADDESK_HELP must be true, false, 1 or 0")
+help_enabled = help_flag in ("true", "1")
+merchant_help = "merchant_help_host" if merchant and help_enabled else "merchant_help_off"
+(lib / "merchant_help_api.dart").write_text(f"export 'help/{merchant_help}.dart';\n", encoding="utf-8")
 metrics = os.environ.get("STEADDESK_METRICS", "").strip().lower()
 if metrics not in ("", "0", "1", "false", "true"):
     raise ValueError("STEADDESK_METRICS must be true, false, 1 or 0")
@@ -61,6 +67,7 @@ def dart_string(value):
 
 (tree / "flutter/lib/steaddesk/merchant_build.dart").write_text(
     "const merchantEdition = " + str(merchant).lower() + ";\n"
+    "const helpEnabled = " + str(help_enabled).lower() + ";\n"
     "const opsHealthEnabled = " + str(ops_health_enabled).lower() + ";\n"
     "const opsGroupsEnabled = " + str(ops_groups_enabled).lower() + ";\n"
     "const qualityEnabled = " + str(quality_enabled).lower() + ";\n"

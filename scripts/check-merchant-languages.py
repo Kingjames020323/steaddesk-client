@@ -92,7 +92,7 @@ def rows_for(source):
             value = catalogs[language].get(key, fallback)
             if not value.strip():
                 errors.append(f"src/lang: {language}: missing {key!r}")
-            elif value.count("{}") != key.count("{}"):
+            elif any(value.count(mark) != key.count(mark) for mark in ("{}", "%s")):
                 errors.append(f"src/lang: {language}: placeholder mismatch in {key!r}")
             values.append(value)
         rows[key] = values

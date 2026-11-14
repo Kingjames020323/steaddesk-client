@@ -1,0 +1,1325 @@
+diff --git a/flutter/lib/steaddesk/help/merchant_help_client.dart b/flutter/lib/steaddesk/help/merchant_help_client.dart
+new file mode 100644
+index 0000000..a9dd945
+--- /dev/null
++++ b/flutter/lib/steaddesk/help/merchant_help_client.dart
+@@ -0,0 +1,341 @@
++import 'dart:async';
++import 'dart:convert';
++import 'dart:io';
++import 'dart:typed_data';
++
++import 'package:crypto/crypto.dart';
++import 'package:uuid/uuid.dart';
++
++typedef HelpJson = Map<String, dynamic>;
++typedef HelpScope = ({Uri origin, String device, String account});
++typedef HelpSign = ({String secret, HelpJson request}) Function(
++    String category, String message, String digest, String? secret);
++typedef HelpSend = Future<HelpJson> Function(Uri origin, String method,
++    String path, String? secret, HelpJson? body, String? key, int? version);
++
++class HelpFailure implements Exception {
++  final int status;
++  final String code;
++  HelpFailure(this.status, [this.code = '']);
++}
++
++Uri configuredHelpOrigin(String value) {
++  final uri = Uri.tryParse(value);
++  if (uri == null ||
++      uri.scheme != 'https' ||
++      uri.host.isEmpty ||
++      uri.userInfo.isNotEmpty ||
++      uri.hasQuery ||
++      uri.hasFragment ||
++      (uri.path.isNotEmpty && uri.path != '/')) {
++    throw HelpFailure(0, 'configuration');
++  }
++  return Uri.parse(uri.origin);
++}
++
++Future<HelpJson> sendHelp(Uri origin, String method, String path,
++    String? secret, HelpJson? body, String? key, int? version) async {
++  final client = HttpClient()..connectionTimeout = const Duration(seconds: 8);
++  Future<HelpJson> send() async {
++    final request =
++        await client.openUrl(method, origin.resolve('/ops/v1/help/$path'));
++    request.followRedirects = false;
++    request.headers.set(HttpHeaders.acceptHeader, 'application/json');
++    if (secret != null) {
++      request.headers.set(HttpHeaders.authorizationHeader, 'Help $secret');
++    }
++    if (key != null) request.headers.set('Idempotency-Key', key);
++    if (version != null) request.headers.set('If-Match', '"$version"');
++    if (body != null) {
++      request.headers.contentType = ContentType.json;
++      final payload = utf8.encode(jsonEncode(body));
++      request.contentLength = payload.length;
++      request.add(payload);
++    }
++    final response = await request.close();
++    final bytes = BytesBuilder(copy: false);
++    await for (final chunk in response) {
++      if (bytes.length + chunk.length > 65536) {
++        throw HelpFailure(response.statusCode);
++      }
++      bytes.add(chunk);
++    }
++    HelpJson? data;
++    try {
++      final parsed = jsonDecode(utf8.decode(bytes.takeBytes()));
++      if (parsed is HelpJson) data = parsed;
++    } on FormatException {/* Error bodies may be empty. */}
++    if (response.statusCode < 200 || response.statusCode >= 300) {
++      final error = data?['error'];
++      throw HelpFailure(response.statusCode,
++          error is Map && error['code'] is String ? error['code'] : '');
++    }
++    if (data == null) throw const FormatException();
++    return data;
++  }
++
++  try {
++    return await send().timeout(const Duration(seconds: 15));
++  } finally {
++    client.close(force: true);
++  }
++}
++
++// Only the main merchant panel owns this journal. The account-private support
++// directory is supplied by the host. Persist a complete retry before any POST.
++class MerchantHelpClient {
++  final File journal;
++  final Future<HelpScope> Function() scope;
++  final HelpSign sign;
++  final HelpSend send;
++  final String merchantVersion;
++  final int Function() now;
++  MerchantHelpClient(this.journal, this.scope, this.sign, this.merchantVersion,
++      {this.send = sendHelp, int Function()? clock})
++      : now = clock ?? (() => DateTime.now().millisecondsSinceEpoch ~/ 1000);
++
++  HelpJson? record, view;
++  List<HelpJson> cards = [];
++  bool screenshots = false;
++  String? notice;
++  bool get pending => record != null && view == null;
++  bool get attachmentPending => record?['png'] != null;
++
++  String fingerprint(HelpScope owner) => sha256
++      .convert(utf8.encode(
++          jsonEncode([owner.origin.origin, owner.device, owner.account])))
++      .toString();
++
++  Future<void> save() async {
++    final entry = record;
++    if (entry == null) {
++      if (await journal.exists()) await journal.delete();
++      return;
++    }
++    await journal.parent.create(recursive: true);
++    final next = File('${journal.path}.next');
++    await next.writeAsString(jsonEncode(entry), flush: true);
++    await next.rename(journal.path);
++  }
++
++  Future<void> forget() async {
++    view = null;
++    cards = [];
++    record = null;
++    await save();
++  }
++
++  Future<HelpScope> owner() async {
++    final current = await scope();
++    if (record != null && record!['owner'] != fingerprint(current)) {
++      await forget();
++      throw HelpFailure(0, 'owner');
++    }
++    return current;
++  }
++
++  Future<void> initialize() async {
++    final leftover = File('${journal.path}.next');
++    if (await leftover.exists()) await leftover.delete();
++    if (await journal.exists()) {
++      record = jsonDecode(await journal.readAsString()) as HelpJson;
++      view = record?['view'] as HelpJson?;
++      await owner();
++    }
++  }
++
++  Future<void> capabilities() async {
++    screenshots = false;
++    final current = await owner();
++    try {
++      final data = await send(
++          current.origin, 'GET', 'capabilities', null, null, null, null);
++      screenshots = data['screenshots'] == true;
++    } catch (_) {/* Older or unreachable servers default to text only. */}
++  }
++
++  Future<HelpJson> call(String method, String path,
++      {HelpJson? body, String? key, int? version}) async {
++    final current = await owner();
++    final result = await send(current.origin, method, path,
++        record!['secret'] as String, body, key, version);
++    await owner();
++    return result;
++  }
++
++  Future<void> create(String category, String message, Uint8List? png) async {
++    final current = await owner();
++    if (record != null) throw HelpFailure(409);
++    if (utf8.encode(message).length > 1024) throw HelpFailure(400, 'message');
++    if (png != null && !screenshots) throw HelpFailure(400);
++    final signed = sign(category, message,
++        png == null ? '' : sha256.convert(png).toString(), null);
++    if (signed.request['device_id'] != current.device) {
++      throw HelpFailure(0, 'owner');
++    }
++    notice = null;
++    record = {
++      'owner': fingerprint(current),
++      'secret': signed.secret,
++      'key': const Uuid().v4(),
++      'signed': signed.request,
++      'diagnostic': {
++        'v': 1,
++        'sampled_at': now(),
++        'merchant_version': merchantVersion,
++        'health': 'unknown',
++      },
++      if (png != null) 'png': base64Encode(png),
++    };
++    await save();
++    await submit();
++  }
++
++  Future<void> submit() async {
++    var signed = record!['signed'] as HelpJson;
++    if ((now() - (signed['ts'] as int)).abs() > 300) {
++      final current = await owner();
++      final refreshed = sign(signed['category'], signed['message'],
++          signed['screenshot_sha256'], record!['secret']);
++      if (refreshed.secret != record!['secret'] ||
++          refreshed.request['device_id'] != current.device) {
++        throw HelpFailure(0, 'owner');
++      }
++      signed = refreshed.request;
++      record!['signed'] = signed;
++      await save();
++    }
++    try {
++      final data =
++          await call('POST', 'requests', body: signed, key: record!['key']);
++      await accept(data);
++    } on HelpFailure catch (failure) {
++      if (failure.status == 409) {
++        try {
++          await accept(await call('GET', 'me'));
++          return;
++        } on HelpFailure catch (recovery) {
++          if (recovery.status != 404) rethrow;
++        }
++      }
++      if ([400, 403, 409, 413, 429].contains(failure.status)) await forget();
++      rethrow;
++    }
++  }
++
++  Future<void> accept(HelpJson data) async {
++    final version = data['version'];
++    if (data['id'] is! String ||
++        version is! int ||
++        !['queued', 'claimed', 'callback_requested', 'closed', 'cancelled']
++            .contains(data['state'])) {
++      throw const FormatException();
++    }
++    if (view != null &&
++        (data['id'] != view!['id'] || version < view!['version'])) return;
++    record!.remove('signed');
++    final action = record!['action'];
++    if (action is Map && version > action['version']) record!.remove('action');
++    record!['view'] = view = data;
++    if (data['state'] != 'queued') cards = [];
++    if (data['state'] == 'closed' || data['state'] == 'cancelled') {
++      record!.remove('png');
++      record!.remove('diagnostic');
++    }
++    await save();
++    if (data['state'] == 'cancelled') {
++      await forget();
++      notice = 'Help request cancelled';
++    }
++  }
++
++  Future<void> refresh() async {
++    if (record == null) return;
++    await owner();
++    if (view?['state'] == 'closed' &&
++        now() - (view!['ended_at'] as int) > 600) {
++      await forget();
++      return;
++    }
++    try {
++      await accept(await call('GET', 'me'));
++    } on HelpFailure catch (e) {
++      if (e.status != 404) rethrow;
++      if (record?['signed'] == null) {
++        await forget();
++        return;
++      }
++      await submit();
++    }
++    if (record?['action'] != null) await sendAction();
++    if (view?['state'] == 'queued') {
++      final list = (await call('GET', 'me/step-cards'))['cards'] as List;
++      cards = list
++          .whereType<HelpJson>()
++          .where((c) =>
++              c['card_id'] is String &&
++              c['card_version'] is int &&
++              c['steps'] is List)
++          .take(3)
++          .toList();
++    }
++    if (record?['diagnostic'] != null) {
++      await call('PUT', 'me/diagnostic', body: record!['diagnostic']);
++      record!.remove('diagnostic');
++      await save();
++    }
++    if (attachmentPending) await upload();
++  }
++
++  Future<void> upload() async {
++    final png = base64Decode(record!['png'] as String);
++    final digest = sha256.convert(png).toString();
++    const width = 32768;
++    final total = (png.length + width - 1) ~/ width;
++    for (var i = 0; i < total; i++) {
++      final part = Uint8List.sublistView(
++          png, i * width, i + 1 == total ? png.length : (i + 1) * width);
++      await call('PUT', 'me/screenshot/chunks/$i', body: {
++        'total': total,
++        'size': png.length,
++        'sha256': digest,
++        'chunk_sha256': sha256.convert(part).toString(),
++        'data': base64Encode(part),
++      });
++    }
++    record!.remove('png');
++    await save();
++  }
++
++  Future<void> act(String action, HelpJson body) async {
++    if (record!['action'] != null) {
++      await refresh();
++      return;
++    }
++    record!['action'] = {
++      'name': action,
++      'body': body,
++      'key': const Uuid().v4(),
++      'version': view!['version']
++    };
++    await save();
++    await sendAction();
++  }
++
++  Future<void> sendAction() async {
++    final action = record!['action'] as HelpJson;
++    try {
++      final result = await call('POST', 'me/${action['name']}',
++          body: action['body'], key: action['key'], version: action['version']);
++      record!.remove('action');
++      await accept(result);
++    } on HelpFailure catch (e) {
++      if (e.status >= 500 || e.status == 429) rethrow;
++      record?.remove('action');
++      await save();
++      if (e.status != 409 && e.status != 412) rethrow;
++      await accept(await call('GET', 'me'));
++      notice = 'The request changed. Its latest status is shown.';
++    }
++  }
++}
+diff --git a/flutter/lib/steaddesk/help/merchant_help_host.dart b/flutter/lib/steaddesk/help/merchant_help_host.dart
+new file mode 100644
+index 0000000..3f0398c
+--- /dev/null
++++ b/flutter/lib/steaddesk/help/merchant_help_host.dart
+@@ -0,0 +1,42 @@
++import 'dart:convert';
++import 'dart:io';
++
++import 'package:flutter/widgets.dart';
++import 'package:path_provider/path_provider.dart';
++
++import '../../common.dart' show translate;
++import '../../models/native_model.dart' show PlatformFFI;
++import '../../models/platform_model.dart' show bind;
++import '../merchant_build.dart' show merchantVersion;
++import 'merchant_help_client.dart';
++import 'merchant_help_image.dart';
++import 'merchant_help_widget.dart';
++
++Widget merchantHelpEntry() => MerchantHelpEntry(
++    label: translate,
++    pick: pickHelpScreenshot,
++    open: () async {
++      final directory = await getApplicationSupportDirectory();
++      return MerchantHelpClient(
++          File('${directory.path}/merchant-help-receipt.json'), () async {
++        final configured = await bind.mainGetOption(key: 'api-server');
++        final device = await bind.mainGetMyId();
++        if (device.isEmpty) throw HelpFailure(0, 'configuration');
++        final profile = bind.mainGetLocalOption(key: 'user_info');
++        final account = profile.isEmpty
++            ? ''
++            : (jsonDecode(profile)['name'] as String? ?? '');
++        return (
++          origin: configuredHelpOrigin(configured),
++          device: device,
++          account: account
++        );
++      }, (category, message, digest, secret) {
++        final signed = PlatformFFI.instance.helpSigner!.sign(
++            category: category,
++            message: message,
++            screenshotSha256: digest,
++            receiptSecret: secret);
++        return (secret: signed.receiptSecret, request: signed.request);
++      }, merchantVersion);
++    });
+diff --git a/flutter/lib/steaddesk/help/merchant_help_image.dart b/flutter/lib/steaddesk/help/merchant_help_image.dart
+new file mode 100644
+index 0000000..d0028c4
+--- /dev/null
++++ b/flutter/lib/steaddesk/help/merchant_help_image.dart
+@@ -0,0 +1,74 @@
++import 'dart:io';
++import 'dart:typed_data';
++import 'dart:ui' as ui;
++
++import 'package:file_picker/file_picker.dart';
++
++Future<Uint8List?> pickHelpScreenshot() async {
++  final pick = await FilePicker.platform.pickFiles(
++      type: FileType.custom,
++      allowedExtensions: ['png'],
++      allowMultiple: false,
++      withData: false);
++  if (pick == null) return null;
++  final path = pick.files.single.path;
++  if (path == null) throw const FormatException();
++  final file = File(path);
++  if (await file.length() > 524288) throw const FormatException();
++  final bytes = BytesBuilder();
++  await for (final block in file.openRead()) {
++    if (bytes.length + block.length > 524288) throw const FormatException();
++    bytes.add(block);
++  }
++  return cleanHelpScreenshot(bytes.takeBytes());
++}
++
++Future<Uint8List> cleanHelpScreenshot(Uint8List bytes) async {
++  if (bytes.length < 45 || bytes.length > 524288) throw const FormatException();
++  final data = ByteData.sublistView(bytes);
++  if (data.getUint32(0) != 0x89504e47 ||
++      data.getUint32(4) != 0x0d0a1a0a ||
++      data.getUint32(8) != 13 ||
++      data.getUint32(12) != 0x49484452) throw const FormatException();
++  final w = data.getUint32(16), h = data.getUint32(20);
++  if (w == 0 || h == 0 || w > 1600 || h > 1600 || w * h > 1600000) {
++    throw const FormatException();
++  }
++  // Drop auxiliary chunks before decoding, including metadata and profiles.
++  // Only static PNG image data, palette and transparency are needed.
++  final clean = BytesBuilder()..add(bytes.sublist(0, 8));
++  var ended = false;
++  for (var i = 8; i < bytes.length;) {
++    if (i + 12 > bytes.length) throw const FormatException();
++    final size = data.getUint32(i);
++    final tag = String.fromCharCodes(bytes.sublist(i + 4, i + 8));
++    final end = i + 12 + size;
++    if (end > bytes.length || ended || ['acTL', 'fcTL', 'fdAT'].contains(tag)) {
++      throw const FormatException();
++    }
++    if (['IHDR', 'PLTE', 'tRNS', 'IDAT', 'IEND'].contains(tag)) {
++      clean.add(Uint8List.sublistView(bytes, i, end));
++    }
++    ended = tag == 'IEND';
++    i = end;
++  }
++  if (!ended) throw const FormatException();
++  final codec = await ui.instantiateImageCodec(clean.takeBytes());
++  try {
++    if (codec.frameCount != 1) throw const FormatException();
++    final image = (await codec.getNextFrame()).image;
++    try {
++      if (image.width != w || image.height != h) throw const FormatException();
++      final encoded = await image.toByteData(format: ui.ImageByteFormat.png);
++      if (encoded == null || encoded.lengthInBytes > 524288) {
++        throw const FormatException();
++      }
++      return encoded.buffer
++          .asUint8List(encoded.offsetInBytes, encoded.lengthInBytes);
++    } finally {
++      image.dispose();
++    }
++  } finally {
++    codec.dispose();
++  }
++}
+diff --git a/flutter/lib/steaddesk/help/merchant_help_off.dart b/flutter/lib/steaddesk/help/merchant_help_off.dart
+new file mode 100644
+index 0000000..28e98c8
+--- /dev/null
++++ b/flutter/lib/steaddesk/help/merchant_help_off.dart
+@@ -0,0 +1,3 @@
++import 'package:flutter/widgets.dart';
++
++Widget merchantHelpEntry() => const SizedBox.shrink();
+diff --git a/flutter/lib/steaddesk/help/merchant_help_widget.dart b/flutter/lib/steaddesk/help/merchant_help_widget.dart
+new file mode 100644
+index 0000000..541e834
+--- /dev/null
++++ b/flutter/lib/steaddesk/help/merchant_help_widget.dart
+@@ -0,0 +1,372 @@
++import 'dart:async';
++import 'dart:convert';
++import 'dart:typed_data';
++
++import 'package:flutter/material.dart';
++import 'merchant_help_client.dart';
++
++const helpCategories = {
++  'printer': 'Printer',
++  'menu': 'Menu',
++  'checkout': 'Checkout operation',
++  'network': 'Network',
++  'frozen': 'Device frozen',
++  'other': 'Other',
++};
++
++class MerchantHelpEntry extends StatefulWidget {
++  final Future<MerchantHelpClient> Function() open;
++  final String Function(String) label;
++  final Future<Uint8List?> Function() pick;
++  const MerchantHelpEntry(
++      {super.key, required this.open, required this.label, required this.pick});
++  @override
++  State<MerchantHelpEntry> createState() => _MerchantHelpEntryState();
++}
++
++class _MerchantHelpEntryState extends State<MerchantHelpEntry> {
++  MerchantHelpClient? client;
++  bool busy = false, online = true, expanded = false;
++  String? error;
++  Timer? timer;
++  @override
++  void initState() {
++    super.initState();
++    unawaited(run(() async {
++      client = await widget.open();
++      await client!.initialize();
++      if (client!.record != null) await client!.refresh();
++    }));
++    timer = Timer.periodic(const Duration(seconds: 8), (_) {
++      if (client?.record != null) {
++        unawaited(run(() => client!.refresh(), polling: true));
++      }
++    });
++  }
++
++  @override
++  void dispose() {
++    timer?.cancel();
++    super.dispose();
++  }
++
++  Future<void> run(Future<void> Function() work, {bool polling = false}) async {
++    if (busy || !mounted) return;
++    setState(() {
++      busy = true;
++      if (!polling) error = null;
++    });
++    try {
++      await work();
++      online = true;
++      if (polling && error == 'Connection interrupted. Retrying.') error = null;
++    } catch (e) {
++      online = false;
++      error = e is HelpFailure
++          ? switch (e.status) {
++              403 => 'Contact support to register this device again.',
++              429 => 'Too many requests. Try again later.',
++              409 => 'An active request already exists.',
++              400 => 'Check the message and the device clock.',
++              _ => e.code == 'configuration'
++                  ? 'Configure the support server to request help.'
++                  : 'Connection interrupted. Retrying.',
++            }
++          : 'Connection interrupted. Retrying.';
++    } finally {
++      if (mounted) setState(() => busy = false);
++    }
++  }
++
++  Future<void> open() async {
++    await run(() async {
++      if (client == null) {
++        client = await widget.open();
++        await client!.initialize();
++      }
++      await client!.capabilities();
++      expanded = true;
++    });
++  }
++
++  @override
++  Widget build(BuildContext context) {
++    final c = client;
++    final t = widget.label;
++    final hasTicket = c?.record != null;
++    final v = c?.view;
++    final closed = v?['state'] == 'closed';
++    final end = v?['ended_at'];
++    if (expanded && closed && end is int && c!.now() - end >= 60) {
++      // Only collapse once per ticket; the merchant can still reopen the bar.
++      if (lastCollapsed != v!['id']) {
++        expanded = false;
++        lastCollapsed = v['id'] as String;
++      }
++    }
++    return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
++      if (!expanded || c == null)
++        OutlinedButton.icon(
++          onPressed: busy ? null : open,
++          icon: Icon(hasTicket ? Icons.headset_mic : Icons.support_agent),
++          label: Text(t(hasTicket ? 'View help request' : 'Contact support')),
++        )
++      else ...[
++        Row(children: [
++          Expanded(
++              child: Text(t('Contact support'),
++                  style: Theme.of(context).textTheme.titleMedium)),
++          IconButton(
++              tooltip: t('Collapse help'),
++              icon: const Icon(Icons.expand_less),
++              onPressed: () => setState(() => expanded = false)),
++        ]),
++        if (!hasTicket)
++          HelpComposer(
++              label: t,
++              enabled: !busy,
++              screenshots: c.screenshots,
++              pick: widget.pick,
++              create: (category, message, image) => run(() async {
++                    await c.create(category, message, image);
++                    await c.refresh();
++                  }))
++        else if (v == null)
++          Text(t('Restoring your request…'))
++        else
++          HelpWaiting(
++              view: v,
++              cards: c.cards,
++              label: t,
++              now: c.now(),
++              online: online,
++              busy: busy,
++              act: (name, body) => run(() => c.act(name, body)),
++              again: closed
++                  ? () => run(() async {
++                        await c.forget();
++                        await c.capabilities();
++                      })
++                  : null),
++        if (c.attachmentPending) Text(t('Screenshot upload pending')),
++        if (hasTicket && !online)
++          TextButton(
++              onPressed: busy ? null : () => run(c.refresh),
++              child: Text(t('Retry'))),
++      ],
++      if (error != null)
++        Text(t(error!),
++            style: TextStyle(color: Theme.of(context).colorScheme.error)),
++      if (c?.notice != null) Text(t(c!.notice!)),
++    ]);
++  }
++
++  String? lastCollapsed;
++}
++
++class HelpComposer extends StatefulWidget {
++  final String Function(String) label;
++  final bool enabled, screenshots;
++  final Future<Uint8List?> Function() pick;
++  final Future<void> Function(String, String, Uint8List?) create;
++  const HelpComposer(
++      {super.key,
++      required this.label,
++      required this.enabled,
++      required this.screenshots,
++      required this.pick,
++      required this.create});
++  @override
++  State<HelpComposer> createState() => _HelpComposerState();
++}
++
++class _HelpComposerState extends State<HelpComposer> {
++  final text = TextEditingController();
++  Uint8List? png;
++  String? imageError;
++  bool selecting = false;
++  @override
++  void dispose() {
++    text.dispose();
++    super.dispose();
++  }
++
++  Future<void> select() async {
++    final t = widget.label;
++    setState(() {
++      selecting = true;
++      imageError = null;
++    });
++    try {
++      final next = await widget.pick();
++      if (next == null || !mounted) return;
++      final yes = await showDialog<bool>(
++          context: context,
++          builder: (ctx) => AlertDialog(
++                  title: Text(t('Preview screenshot')),
++                  content: Image.memory(next, fit: BoxFit.contain),
++                  actions: [
++                    TextButton(
++                        onPressed: () => Navigator.pop(ctx, false),
++                        child: Text(t('Remove'))),
++                    FilledButton(
++                        onPressed: () => Navigator.pop(ctx, true),
++                        child: Text(t('Use screenshot'))),
++                  ]));
++      if (yes == true) png = next;
++    } catch (_) {
++      imageError =
++          'Choose a static PNG up to 512 KiB and 1600 pixels per side.';
++    } finally {
++      if (mounted) setState(() => selecting = false);
++    }
++  }
++
++  @override
++  Widget build(BuildContext context) {
++    final t = widget.label;
++    final tooLong = utf8.encode(text.text).length > 1024;
++    final ready = widget.enabled && !selecting && !tooLong;
++    return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
++      Text(t('Select a reason to join the queue.')),
++      const SizedBox(height: 6),
++      Text(t('Includes device ID, app version and available health checks.')),
++      const SizedBox(height: 8),
++      TextField(
++          controller: text,
++          enabled: widget.enabled,
++          maxLines: 2,
++          onChanged: (_) => setState(() {}),
++          decoration: InputDecoration(
++              labelText: t('Message (optional)'),
++              errorText: tooLong ? t('Use at most 1024 UTF-8 bytes.') : null,
++              border: const OutlineInputBorder())),
++      if (widget.screenshots) ...[
++        if (png != null)
++          Row(children: [
++            Image.memory(png!, width: 48, height: 36),
++            TextButton(
++                onPressed: ready ? () => setState(() => png = null) : null,
++                child: Text(t('Remove')))
++          ])
++        else
++          TextButton.icon(
++              onPressed: ready ? select : null,
++              icon: const Icon(Icons.image_outlined),
++              label: Text(t('Choose screenshot'))),
++        if (imageError != null) Text(t(imageError!)),
++      ],
++      const SizedBox(height: 8),
++      Wrap(spacing: 8, runSpacing: 4, children: [
++        for (final e in helpCategories.entries)
++          OutlinedButton(
++              onPressed: ready
++                  ? () => widget.create(
++                      e.key, text.text, widget.screenshots ? png : null)
++                  : null,
++              child: Text(t(e.value))),
++      ]),
++    ]);
++  }
++}
++
++class HelpWaiting extends StatelessWidget {
++  final HelpJson view;
++  final List<HelpJson> cards;
++  final int now;
++  final bool online, busy;
++  final String Function(String) label;
++  final void Function(String, HelpJson) act;
++  final VoidCallback? again;
++  const HelpWaiting(
++      {super.key,
++      required this.view,
++      required this.cards,
++      required this.now,
++      required this.online,
++      required this.busy,
++      required this.label,
++      required this.act,
++      this.again});
++  @override
++  Widget build(BuildContext context) {
++    final t = label;
++    String format(String key, Object value) =>
++        t(key).replaceFirst('%s', value.toString());
++    final state = view['state'];
++    final queued = state == 'queued', closed = state == 'closed';
++    final wait = (now - (view['queued_at'] as int? ?? now)).clamp(0, 1 << 31);
++    final eta = view['eta_minutes'];
++    String time(int seconds) => TimeOfDay.fromDateTime(
++            DateTime.fromMillisecondsSinceEpoch(seconds * 1000))
++        .format(context);
++    Widget button(String key, String action, [HelpJson body = const {}]) =>
++        OutlinedButton(
++            onPressed: busy ? null : () => act(action, body),
++            child: Text(t(key)));
++    return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
++      if (view['lane'] == 'unverified')
++        Text(t('Awaiting manual device verification')),
++      if (queued) ...[
++        if (view['ahead'] is int)
++          Text(format('%s ahead of you', view['ahead']),
++              style: Theme.of(context).textTheme.titleLarge),
++        Text(format('Waiting for %s min', wait ~/ 60),
++            style: TextStyle(
++                color: wait > 900
++                    ? Colors.red.shade800
++                    : wait > 300
++                        ? Colors.orange.shade900
++                        : null)),
++        if (online &&
++            eta is List &&
++            eta.length == 2 &&
++            eta.every((v) => v is int))
++          Text(t('Estimated wait: %s–%s min')
++              .replaceFirst('%s', '${eta[0]}')
++              .replaceFirst('%s', '${eta[1]}')),
++        if (!online && view['queue_updated_at'] is int)
++          Text(format('Last updated %s', time(view['queue_updated_at']))),
++        for (final card in cards.take(3))
++          Card(
++              child: Padding(
++                  padding: const EdgeInsets.all(8),
++                  child: Column(
++                      crossAxisAlignment: CrossAxisAlignment.stretch,
++                      children: [
++                        for (final step
++                            in (card['steps'] as List).whereType<String>())
++                          Text(step),
++                        button('This solved my problem', 'self-resolve', {
++                          'card_id': card['card_id'],
++                          'card_version': card['card_version']
++                        }),
++                      ]))),
++        button('Request a callback', 'callback'),
++      ] else if (state == 'claimed') ...[
++        Text(format('Handled by %s', view['handler'] ?? '—'),
++            style: Theme.of(context).textTheme.titleMedium),
++        if (view['claimed_at'] is int)
++          Text(format('Claimed at %s', time(view['claimed_at']))),
++      ] else if (state == 'callback_requested')
++        Text(t('Callback requested'))
++      else if (closed) ...[
++        Text(t('Request closed'),
++            style: Theme.of(context).textTheme.titleMedium),
++        if (view['close_result'] != 'self_resolved' &&
++            view['feedback'] == null &&
++            view['ended_at'] is int &&
++            now - view['ended_at'] <= 600) ...[
++          button('Resolved', 'feedback', {'feedback': 'resolved'}),
++          button('Still needs help', 'feedback', {'feedback': 'not_resolved'}),
++        ],
++        if (again != null)
++          TextButton(
++              onPressed: busy ? null : again,
++              child: Text(t('Start another request'))),
++      ],
++      if (queued || state == 'claimed' || state == 'callback_requested')
++        button('Cancel help request', 'cancel'),
++    ]);
++  }
++}
+diff --git a/flutter/lib/steaddesk/merchant_panel.dart b/flutter/lib/steaddesk/merchant_panel.dart
+index a8f8b15..b3fdf66 100644
+--- a/flutter/lib/steaddesk/merchant_panel.dart
++++ b/flutter/lib/steaddesk/merchant_panel.dart
+@@ -10,6 +10,8 @@ import '../desktop/pages/desktop_home_page.dart' show setPasswordDialog;
+ import '../models/platform_model.dart';
+ import '../models/server_model.dart';
+ import 'merchant_build.dart';
++import 'help/merchant_help_off.dart'
++    if (dart.library.io) 'merchant_help_api.dart';
+ import 'merchant_pause_button.dart';
+ import 'merchant_window_stub.dart'
+     if (dart.library.io) 'merchant_window_io.dart';
+@@ -406,6 +408,7 @@ class _MerchantPanelState extends State<MerchantPanel>
+                     const TextStyle(fontWeight: FontWeight.w600, color: _ink))),
+         const SizedBox(height: 8),
+         Text(translate('Give your device ID to support.')),
++        if (helpEnabled && !widget.connectionManager) merchantHelpEntry(),
+         if (merchantPhone.trim().isNotEmpty) ...[
+           const SizedBox(height: 12),
+           Text(translate('Support phone')),
+diff --git a/flutter/pubspec.lock b/flutter/pubspec.lock
+index acfd62a..c484910 100644
+--- a/flutter/pubspec.lock
++++ b/flutter/pubspec.lock
+@@ -279,7 +279,7 @@ packages:
+     source: hosted
+     version: "0.3.4+2"
+   crypto:
+-    dependency: transitive
++    dependency: "direct main"
+     description:
+       name: crypto
+       sha256: "1e445881f28f22d6140f181e07737b22f1e099a5e1ff94b0af2f9e4a463f4855"
+diff --git a/flutter/pubspec.yaml b/flutter/pubspec.yaml
+index b99d08b..2a44c6a 100644
+--- a/flutter/pubspec.yaml
++++ b/flutter/pubspec.yaml
+@@ -27,6 +27,7 @@ dependencies:
+   flutter_localizations:
+     sdk: flutter
+ 
++  crypto: ^3.0.3
+   ffi: ^2.1.0
+   path_provider: ^2.1.1
+   provider: ^6.0.5
+diff --git a/flutter/test/steaddesk/merchant_help_test.dart b/flutter/test/steaddesk/merchant_help_test.dart
+new file mode 100644
+index 0000000..fc645c8
+--- /dev/null
++++ b/flutter/test/steaddesk/merchant_help_test.dart
+@@ -0,0 +1,313 @@
++import 'dart:convert';
++import 'dart:io';
++import 'dart:typed_data';
++
++import 'package:crypto/crypto.dart';
++import 'package:flutter/material.dart';
++import 'package:flutter_test/flutter_test.dart';
++import 'package:flutter_hbb/steaddesk/help/merchant_help_client.dart';
++import 'package:flutter_hbb/steaddesk/help/merchant_help_image.dart';
++import 'package:flutter_hbb/steaddesk/help/merchant_help_widget.dart';
++
++const request = {
++  'id': 'example-ticket',
++  'state': 'queued',
++  'version': 1,
++  'queued_at': 1200,
++  'ahead': 2
++};
++
++class _LoopbackHttp extends HttpOverrides {}
++
++void main() {
++  late Directory dir;
++  late File journal;
++  var seconds = 1200, signs = 0;
++  var account = '';
++  setUp(() {
++    dir = Directory.systemTemp.createTempSync('merchant-help-test-');
++    journal = File('${dir.path}/receipt');
++    seconds = 1200;
++    signs = 0;
++    account = '';
++  });
++  tearDown(() => dir.deleteSync(recursive: true));
++  MerchantHelpClient client(HelpSend send) => MerchantHelpClient(
++          journal,
++          () async => (
++                origin: Uri.https('example.invalid'),
++                device: '123456789',
++                account: account
++              ), (category, text, digest, secret) {
++        signs++;
++        return (
++          secret: secret ?? 'fixture-only',
++          request: <String, dynamic>{
++            'category': category,
++            'message': text,
++            'screenshot_sha256': digest,
++            'ts': seconds,
++            'device_id': '123456789'
++          }
++        );
++      }, '1.5.0-sd.1', clock: () => seconds, send: send);
++
++  test('JSON writes advertise encoded byte length to the HTTP service',
++      () async {
++    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
++    addTearDown(() => server.close(force: true));
++    final body = {'message': '测试'};
++    final bytes = utf8.encode(jsonEncode(body));
++    final check = server.first.then((req) async {
++      expect(req.contentLength, bytes.length);
++      expect(req.headers.value(HttpHeaders.transferEncodingHeader), isNull);
++      expect(await utf8.decoder.bind(req).join(), jsonEncode(body));
++      req.response.headers.contentType = ContentType.json;
++      req.response.write('{}');
++      await req.response.close();
++    });
++    await HttpOverrides.runWithHttpOverrides(
++        () => sendHelp(Uri.parse('http://127.0.0.1:${server.port}'), 'POST',
++            'requests', 'test-receipt', body, 'test-key', null),
++        _LoopbackHttp());
++    await check;
++  });
++
++  test('lost create response recovers from disk with the original receipt only',
++      () async {
++    var created = false, posts = 0;
++    Future<HelpJson> api(Uri origin, String method, String path, String? secret,
++        HelpJson? body, String? key, int? version) async {
++      expect(secret, 'fixture-only');
++      if (path == 'requests') {
++        expect(journal.existsSync(), isTrue);
++        expect(body!['message'], ' test ');
++        expect(body.containsKey('secret'), isFalse);
++        expect(key, isNotEmpty);
++        posts++;
++        created = true;
++        throw const SocketException('disconnected');
++      }
++      if (path == 'me') {
++        expect(created, isTrue);
++        return request;
++      }
++      if (path == 'me/step-cards') return {'cards': []};
++      expect(path, 'me/diagnostic');
++      return {};
++    }
++
++    await expectLater(client(api).create('printer', ' test ', null),
++        throwsA(isA<SocketException>()));
++    final restarted = client(api);
++    await restarted.initialize();
++    await restarted.refresh();
++    expect(restarted.view!['ahead'], 2);
++    expect([signs, posts], [1, 1]);
++    expect(journal.readAsStringSync(), isNot(contains(' test ')));
++    account = 'another-account';
++    await expectLater(restarted.refresh(), throwsA(isA<HelpFailure>()));
++    expect(journal.existsSync(), isFalse);
++  });
++
++  test(
++      'undelivered create repeats original key; expiry refreshes signature only',
++      () async {
++    final posts = <String?>[];
++    final timestamps = <int>[];
++    final c = client((origin, method, path, secret, body, key, version) async {
++      if (path == 'me') throw HelpFailure(404);
++      if (path == 'me/step-cards') return {'cards': []};
++      if (path == 'me/diagnostic') return {};
++      posts.add(key);
++      timestamps.add(body!['ts']);
++      expect(secret, 'fixture-only');
++      if (posts.length < 3) throw const SocketException('offline');
++      return request;
++    });
++    await expectLater(
++        c.create('menu', '', null), throwsA(isA<SocketException>()));
++    await expectLater(c.refresh(), throwsA(isA<SocketException>()));
++    seconds += 301;
++    await c.refresh();
++    expect(posts.toSet().length, 1);
++    expect(timestamps, [1200, 1200, 1501]);
++    expect(signs, 2);
++    expect(c.view!['state'], 'queued');
++  });
++
++  test(
++      'interrupted merchant action is delivered with the same key and If-Match',
++      () async {
++    final keys = <String?>[];
++    Future<HelpJson> api(Uri origin, String method, String path, String? secret,
++        HelpJson? body, String? key, int? version) async {
++      if (path == 'me/callback') {
++        keys.add(key);
++        expect(version, 1);
++        if (keys.length == 1) throw const SocketException('offline');
++        return {...request, 'state': 'callback_requested', 'version': 2};
++      }
++      if (path == 'me/diagnostic') return {};
++      return request;
++    }
++
++    final c = client(api);
++    await c.create('frozen', '', null);
++    await expectLater(c.act('callback', {}), throwsA(isA<SocketException>()));
++    final restarted = client(api);
++    await restarted.initialize();
++    await restarted.refresh();
++    expect(keys.length, 2);
++    expect(keys.first, keys.last);
++    expect(restarted.view!['state'], 'callback_requested');
++  });
++
++  test('screenshot opt-in, digest, bounded chunks and terminal cleanup',
++      () async {
++    final image = Uint8List.fromList(List.generate(32800, (i) => i % 256));
++    final chunks = <int>[];
++    final c = client((origin, method, path, secret, body, key, version) async {
++      if (path == 'capabilities') {
++        expect(secret, isNull);
++        return {'screenshots': true};
++      }
++      if (path == 'requests') {
++        expect(body!['screenshot_sha256'], sha256.convert(image).toString());
++      }
++      if (path == 'me/step-cards') return {'cards': []};
++      if (path.contains('chunks/')) {
++        final part = base64Decode(body!['data']);
++        chunks.add(part.length);
++        expect(body['chunk_sha256'], sha256.convert(part).toString());
++        expect(body['total'], 2);
++        expect(body['size'], image.length);
++      }
++      if (path == 'me/cancel') {
++        return {...request, 'state': 'cancelled', 'version': 2};
++      }
++      return request;
++    });
++    await expectLater(
++        c.create('other', '', image), throwsA(isA<HelpFailure>()));
++    await c.capabilities();
++    await c.create('other', '', image);
++    await c.refresh();
++    expect(chunks, [32768, 32]);
++    expect(c.attachmentPending, false);
++    await c.act('cancel', {});
++    expect(journal.existsSync(), false);
++    final unavailable =
++        client((a, b, c, d, e, f, g) async => {'screenshots': 'true'});
++    await unavailable.capabilities();
++    expect(unavailable.screenshots, isFalse);
++    for (final value in [
++      '',
++      'http://example.invalid',
++      'https://user@example.invalid',
++      'https://example.invalid/path'
++    ]) {
++      expect(() => configuredHelpOrigin(value), throwsA(isA<HelpFailure>()));
++    }
++  });
++
++  testWidgets(
++      'static PNG strips ancillary blocks and rejects animations and size excess',
++      (tester) async {
++    final raw = base64Decode(
++        'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR4nGNgAAIAAAUAAXpeqz8AAAAASUVORK5CYII=');
++    Uint8List inserted(String type) => Uint8List.fromList([
++          ...raw.take(33),
++          0,
++          0,
++          0,
++          0,
++          ...ascii.encode(type),
++          0,
++          0,
++          0,
++          0,
++          ...raw.skip(33)
++        ]);
++    final clean =
++        await tester.runAsync(() => cleanHelpScreenshot(inserted('tEXt')));
++    expect(clean, isNotNull);
++    expect(ascii.decode(clean!, allowInvalid: true), isNot(contains('tEXt')));
++    await expectLater(
++        cleanHelpScreenshot(inserted('acTL')), throwsFormatException);
++    final oversized = Uint8List.fromList(raw);
++    ByteData.sublistView(oversized).setUint32(16, 1601);
++    await expectLater(cleanHelpScreenshot(oversized), throwsFormatException);
++  });
++
++  testWidgets(
++      'six reasons each create immediately and optional message stays unchanged',
++      (tester) async {
++    final selections = <String>[];
++    await tester.pumpWidget(MaterialApp(
++        home: Scaffold(
++            body: HelpComposer(
++                label: (s) => s,
++                enabled: true,
++                screenshots: false,
++                pick: () async => null,
++                create: (category, text, png) async {
++                  selections.add(category);
++                  expect(text, ' test ');
++                  expect(png, isNull);
++                }))));
++    await tester.enterText(find.byType(TextField), ' test ');
++    for (final reason in helpCategories.values) {
++      await tester.tap(find.text(reason));
++      await tester.pump();
++    }
++    expect(selections, helpCategories.keys.toList());
++    expect(find.text('Choose screenshot'), findsNothing);
++  });
++
++  testWidgets(
++      'empty cards withhold self-resolution; claimed and closed views follow server state',
++      (tester) async {
++    final actions = <String>[];
++    Future<void> show(HelpJson view, [List<HelpJson> cards = const []]) =>
++        tester.pumpWidget(MaterialApp(
++            home: Scaffold(
++                body: HelpWaiting(
++                    view: view,
++                    cards: cards,
++                    label: (s) => s,
++                    now: 1500,
++                    online: true,
++                    busy: false,
++                    act: (name, body) => actions.add(name)))));
++    await show(request);
++    expect(find.text('2 ahead of you'), findsOneWidget);
++    expect(find.text('This solved my problem'), findsNothing);
++    expect(find.textContaining('Estimated wait'), findsNothing);
++    await show({
++      ...request,
++      'eta_minutes': [5, 10]
++    }, [
++      {
++        'card_id': 'demo',
++        'card_version': 1,
++        'steps': ['Check paper']
++      }
++    ]);
++    await tester.tap(find.text('This solved my problem'));
++    expect(actions, ['self-resolve']);
++    expect(find.text('Estimated wait: 5–10 min'), findsOneWidget);
++    await show({...request, 'state': 'claimed', 'handler': 'Example helper'});
++    expect(find.text('Handled by Example helper'), findsOneWidget);
++    expect(find.text('Request a callback'), findsNothing);
++    await show({...request, 'state': 'closed', 'ended_at': 1490});
++    expect(find.text('Still needs help'), findsOneWidget);
++    await show({
++      ...request,
++      'state': 'closed',
++      'ended_at': 1490,
++      'close_result': 'self_resolved'
++    });
++    expect(find.text('Still needs help'), findsNothing);
++  });
++}
+diff --git a/src/lang/cn.rs b/src/lang/cn.rs
+index 1866fc5..0fed0aa 100644
+--- a/src/lang/cn.rs
++++ b/src/lang/cn.rs
+@@ -972,5 +972,44 @@ lazy_static::lazy_static! {
+         ("Agent is running", "Agent 正在运行"),
+         ("Unknown service state", "服务状态未知"),
+         ("Wake request acknowledged", "唤醒请求已确认"),
++        ("Contact support", "联系客服"),
++        ("View help request", "查看求助进度"),
++        ("Collapse help", "收起求助"),
++        ("Menu", "菜单"),
++        ("Checkout operation", "收银操作"),
++        ("Device frozen", "设备卡住"),
++        ("Select a reason to join the queue.", "选择原因即可排队。"),
++        ("Includes device ID, app version and available health checks.", "将附上设备 ID、应用版本和可用的健康检查。"),
++        ("Message (optional)", "留言（可选）"),
++        ("Use at most 1024 UTF-8 bytes.", "留言最多 1024 个 UTF-8 字节。"),
++        ("Choose screenshot", "选择截图"),
++        ("Preview screenshot", "预览截图"),
++        ("Use screenshot", "使用此截图"),
++        ("Choose a static PNG up to 512 KiB and 1600 pixels per side.", "请选择静态 PNG（最大 512 KiB，每边最多 1600 像素）。"),
++        ("Restoring your request…", "正在恢复求助单…"),
++        ("Screenshot upload pending", "截图等待上传"),
++        ("Connection interrupted. Retrying.", "连接中断，正在重试。"),
++        ("Awaiting manual device verification", "等待人工核验设备"),
++        ("%s ahead of you", "前面还有 %s 位"),
++        ("Waiting for %s min", "已等待 %s 分钟"),
++        ("Estimated wait: %s–%s min", "预计还需 %s–%s 分钟"),
++        ("Last updated %s", "上次更新于 %s"),
++        ("This solved my problem", "这个解决了我的问题"),
++        ("Request a callback", "改为预约回电"),
++        ("Cancel help request", "取消求助"),
++        ("Handled by %s", "处理人：%s"),
++        ("Claimed at %s", "接手时间：%s"),
++        ("Callback requested", "已申请回电"),
++        ("Request closed", "求助单已结案"),
++        ("Resolved", "解决了"),
++        ("Still needs help", "还没好"),
++        ("Start another request", "再次求助"),
++        ("Help request cancelled", "求助已取消"),
++        ("The request changed. Its latest status is shown.", "求助单已更新，现已显示最新状态。"),
++        ("Contact support to register this device again.", "请联系客服重新登记这台设备。"),
++        ("Too many requests. Try again later.", "请求过多，请稍后再试。"),
++        ("An active request already exists.", "已有进行中的求助单。"),
++        ("Check the message and the device clock.", "请检查留言和设备时间。"),
++        ("Configure the support server to request help.", "请先配置客服服务器。"),
+     ].iter().cloned().collect();
+ }
+diff --git a/src/lang/es.rs b/src/lang/es.rs
+index e7e6dd6..7bb83f1 100644
+--- a/src/lang/es.rs
++++ b/src/lang/es.rs
+@@ -876,5 +876,44 @@ lazy_static::lazy_static! {
+         ("Agent is running", "Agent en ejecución"),
+         ("Unknown service state", "Estado del servicio desconocido"),
+         ("Wake request acknowledged", "Solicitud de reactivación confirmada"),
++        ("Contact support", "Contactar con soporte"),
++        ("View help request", "Ver solicitud de ayuda"),
++        ("Collapse help", "Contraer ayuda"),
++        ("Menu", "Menú"),
++        ("Checkout operation", "Operación de caja"),
++        ("Device frozen", "Dispositivo bloqueado"),
++        ("Select a reason to join the queue.", "Selecciona un motivo para entrar en la cola."),
++        ("Includes device ID, app version and available health checks.", "Incluye el ID del equipo, la versión de la app y las comprobaciones disponibles."),
++        ("Message (optional)", "Mensaje (opcional)"),
++        ("Use at most 1024 UTF-8 bytes.", "Usa como máximo 1024 bytes UTF-8."),
++        ("Choose screenshot", "Elegir captura"),
++        ("Preview screenshot", "Vista previa de la captura"),
++        ("Use screenshot", "Usar esta captura"),
++        ("Choose a static PNG up to 512 KiB and 1600 pixels per side.", "Elige un PNG estático de hasta 512 KiB y 1600 píxeles por lado."),
++        ("Restoring your request…", "Recuperando tu solicitud…"),
++        ("Screenshot upload pending", "Captura pendiente de envío"),
++        ("Connection interrupted. Retrying.", "Conexión interrumpida. Reintentando."),
++        ("Awaiting manual device verification", "Dispositivo pendiente de verificación manual"),
++        ("%s ahead of you", "Hay %s por delante"),
++        ("Waiting for %s min", "Llevas %s min esperando"),
++        ("Estimated wait: %s–%s min", "Espera estimada: %s–%s min"),
++        ("Last updated %s", "Última actualización: %s"),
++        ("This solved my problem", "Esto resolvió mi problema"),
++        ("Request a callback", "Solicitar una llamada"),
++        ("Cancel help request", "Cancelar solicitud"),
++        ("Handled by %s", "Te atiende %s"),
++        ("Claimed at %s", "Asignada a las %s"),
++        ("Callback requested", "Llamada solicitada"),
++        ("Request closed", "Solicitud cerrada"),
++        ("Resolved", "Se resolvió"),
++        ("Still needs help", "Sigue sin resolverse"),
++        ("Start another request", "Crear otra solicitud"),
++        ("Help request cancelled", "Solicitud cancelada"),
++        ("The request changed. Its latest status is shown.", "La solicitud ha cambiado. Se muestra el estado actual."),
++        ("Contact support to register this device again.", "Contacta con soporte para registrar este equipo de nuevo."),
++        ("Too many requests. Try again later.", "Demasiadas solicitudes. Inténtalo más tarde."),
++        ("An active request already exists.", "Ya existe una solicitud activa."),
++        ("Check the message and the device clock.", "Comprueba el mensaje y la hora del dispositivo."),
++        ("Configure the support server to request help.", "Configura el servidor de soporte para pedir ayuda."),
+     ].iter().cloned().collect();
+ }
