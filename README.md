@@ -60,3 +60,5 @@ The desktop support edition keeps the same remote window during a retryable disc
 The support toolbar starts in Auto. During the first five seconds after the route is ready it collects new delay reports. With samples available, relay or a median above 150 ms selects Low. Otherwise it selects Balanced, including when there are no samples. A manual choice takes over for the session. The quality indicator turns grey after five seconds without a fresh delay. Hover over it for display frame rates.
 
 Set `STEADDESK_QUALITY=false` when configuring the build or in GitHub Actions repository variables to use the previous toolbar. This option is independent of local connection measurements.
+
+Support builds can enable server-managed shared and personal groups with the build variable `STEADDESK_OPS_GROUPS=true`. It defaults to false. Merchant builds always disable it. The support client uses its signed-in API origin and account, caches the last group listing for offline viewing, and requires a live connection to save changes. On first import it archives the confirmed local groups for that account.
