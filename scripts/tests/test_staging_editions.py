@@ -40,11 +40,14 @@ class StagingEditionTests(unittest.TestCase):
                                    env={**os.environ, "STEADDESK_CASES": flag,
                                         "STEADDESK_METRICS": metrics,
                                         "STEADDESK_QUALITY": metrics,
+                                        "STEADDESK_RECONNECT": metrics,
                                         "STEADDESK_AGENT_CERT_SHA256": "aa" * 32 if flag else ""}, check=True)
                     lib = tree / "flutter/lib/steaddesk"
                     self.assertIn(f"const casesEnabled = {str(enable).lower()};",
                                   (lib / "merchant_build.dart").read_text())
                     quality = edition == "support" and metrics != "false"
+                    self.assertIn(f"const reconnectEnabled = {str(quality).lower()};",
+                                  (lib / "merchant_build.dart").read_text())
                     self.assertIn(f"const qualityEnabled = {str(quality).lower()};",
                                   (lib / "merchant_build.dart").read_text())
                     expected_metrics = "support_metrics" if edition == "support" and metrics != "false" else "support_metrics_off"
