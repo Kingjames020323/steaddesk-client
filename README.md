@@ -44,3 +44,9 @@ Before committing a future self-update session, compare the candidate APK's nume
 The Android merchant service checks its paired Agent at startup and every five minutes. The Agent checks the merchant on the same schedule. Each direction requires Android signature permissions and the expected caller package. If the APKs use different signing certificates on Android 12 or newer, set the public Agent certificate SHA-256 in `STEADDESK_AGENT_CERT_SHA256` when configuring the merchant build (also supported as a GitHub Actions repository variable), and the public merchant digest in `STEADDESK_MERCHANT_CERT_SHA256` when building the Agent. Without pins, use the same signing certificate. Install the Agent first, install the merchant next, then verify both grants on the device.
 
 The merchant managed-configuration boolean `self_heal_enabled` defaults to true. Turning it off retains passive checks. The separate Agent setting controls the reverse direction. After three wake reservations in a rolling hour the caller pauses further attempts; its heartbeat exposes `selfHealPaused`. The private `files/self-heal.jsonl` retains the last 500 events. A wake acknowledgement confirms the request reached its peer. Check a remote first frame separately.
+
+### Support connection measurements
+
+The support build records ordinary outgoing remote desktop sessions locally by default. In the support home navigation menu, choose **Export connection statistics** to save the current account’s CSV. Signed-out sessions have their own history. The application support directory retains up to 5,000 rows per account in `support-metrics-v1.jsonl`. The records contain timing, outcome, and sampled quality. No session contents are collected or sent.
+
+Set `STEADDESK_METRICS=false` when configuring the build (or in the GitHub Actions repository variables) to disable both collection and export. Merchant builds always omit the recorder.
