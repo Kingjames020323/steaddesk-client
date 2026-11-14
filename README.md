@@ -62,3 +62,7 @@ The support toolbar starts in Auto. During the first five seconds after the rout
 Set `STEADDESK_QUALITY=false` when configuring the build or in GitHub Actions repository variables to use the previous toolbar. This option is independent of local connection measurements.
 
 Support builds can enable server-managed shared and personal groups with the build variable `STEADDESK_OPS_GROUPS=true`. It defaults to false. Merchant builds always disable it. The support client uses its signed-in API origin and account, caches the last group listing for offline viewing, and requires a live connection to save changes. On first import it archives the confirmed local groups for that account.
+
+### Support device health
+
+Set `STEADDESK_OPS_HEALTH=true` for a Windows support build with the health API. It defaults to off, independently of the groups flag. Device cards and the session sidebar show the latest observation and its timestamp. After three minutes without a fresh observation the status changes to Unknown. The home alert list supports claiming and closing an alert with a reason. A device card can request a check of its registered store inventory using the existing signed-in API origin.
