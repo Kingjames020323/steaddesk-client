@@ -1,0 +1,1459 @@
+diff --git a/flutter/lib/common.dart b/flutter/lib/common.dart
+index efb8d52..b5b0286 100644
+--- a/flutter/lib/common.dart
++++ b/flutter/lib/common.dart
+@@ -2452,6 +2452,7 @@ connectMainDesktop(String id,
+     required bool isTcpTunneling,
+     required bool isRDP,
+     Map<String, dynamic>? metricSeed,
++    String? helpAttempt,
+     bool? forceRelay,
+     String? password,
+     String? connToken,
+@@ -2483,6 +2484,7 @@ connectMainDesktop(String id,
+   } else {
+     await rustDeskWinManager.newRemoteDesktop(id,
+         metricSeed: metricSeed,
++        helpAttempt: helpAttempt,
+         password: password,
+         isSharedPassword: isSharedPassword,
+         forceRelay: forceRelay);
+@@ -2502,6 +2504,7 @@ connect(BuildContext context, String id,
+     bool isRDP = false,
+     bool forceRelay = false,
+     Map<String, dynamic>? metricSeed,
++    String? helpAttempt,
+     String? password,
+     String? connToken,
+     bool? isSharedPassword}) async {
+@@ -2534,6 +2537,7 @@ connect(BuildContext context, String id,
+       await connectMainDesktop(
+         id,
+         metricSeed: metricSeed,
++        helpAttempt: helpAttempt,
+         isFileTransfer: isFileTransfer,
+         isViewCamera: isViewCamera,
+         isTerminal: isTerminal,
+diff --git a/flutter/lib/desktop/pages/remote_page.dart b/flutter/lib/desktop/pages/remote_page.dart
+index be84c12..da95bc9 100644
+--- a/flutter/lib/desktop/pages/remote_page.dart
++++ b/flutter/lib/desktop/pages/remote_page.dart
+@@ -42,6 +42,7 @@ class RemotePage extends StatefulWidget {
+     required this.toolbarState,
+     this.sessionId,
+     this.metricSeed,
++    this.helpAttempt,
+     this.tabWindowId,
+     this.password,
+     this.display,
+@@ -57,6 +58,7 @@ class RemotePage extends StatefulWidget {
+   final String id;
+   final SessionID? sessionId;
+   final Map<String, dynamic>? metricSeed;
++  final String? helpAttempt;
+   final int? tabWindowId;
+   final int? display;
+   final List<int>? displays;
+@@ -158,6 +160,7 @@ class _RemotePageState extends State<RemotePage>
+   void initState() {
+     super.initState();
+     _ffi = FFI(widget.sessionId);
++    _ffi.helpAttempt = widget.helpAttempt;
+     // Only a newly mounted connection owns the measurement. An existing tab
+     // is selected without mounting its duplicate, and a moved tab resumes
+     // its source measurement through the cached-session handoff.
+diff --git a/flutter/lib/desktop/pages/remote_tab_page.dart b/flutter/lib/desktop/pages/remote_tab_page.dart
+index 2f1c4fc..e511357 100644
+--- a/flutter/lib/desktop/pages/remote_tab_page.dart
++++ b/flutter/lib/desktop/pages/remote_tab_page.dart
+@@ -97,6 +97,7 @@ class _ConnectionTabPageState extends State<ConnectionTabPage> {
+           key: ValueKey(peerId),
+           id: peerId!,
+           metricSeed: params['metric_seed'],
++          helpAttempt: params['help_attempt'],
+           sessionId: sessionId == null ? null : SessionID(sessionId),
+           tabWindowId: tabWindowId,
+           display: display,
+@@ -426,6 +427,14 @@ class _ConnectionTabPageState extends State<ConnectionTabPage> {
+       RemoteCountState.find().value = tabController.length;
+ 
+   Future<dynamic> _remoteMethodHandler(call, fromWindowId) async {
++    if (call.method == 'steaddesk.help.attach' && fromWindowId == kMainWindowId) {
++      final args = jsonDecode(call.arguments);
++      final page = tabController.widget(args['id']);
++      if (page is RemotePage) {
++        page.mountedFfi?.helpAttempt = args['attempt'];
++      }
++      return true;
++    }
+     if (SupportMetrics.enabled && call.method == 'steaddesk.metrics.shutdown') {
+       if (fromWindowId == kMainWindowId) {
+         _drainingMetrics = true;
+@@ -494,6 +503,10 @@ class _ConnectionTabPageState extends State<ConnectionTabPage> {
+     if (call.method == kWindowEventNewRemoteDesktop) {
+       final args = jsonDecode(call.arguments);
+       final id = args['id'];
++      final existing = tabController.widget(id);
++      if (args['help_attempt'] is String && existing is RemotePage) {
++        existing.mountedFfi?.helpAttempt = args['help_attempt'];
++      }
+       final switchUuid = args['switch_uuid'];
+       final sessionId = args['session_id'];
+       final tabWindowId = args['tab_window_id'];
+@@ -531,6 +544,7 @@ class _ConnectionTabPageState extends State<ConnectionTabPage> {
+           key: ValueKey(id),
+           id: id,
+           metricSeed: args['metric_seed'],
++          helpAttempt: args['help_attempt'],
+           sessionId: sessionId == null ? null : SessionID(sessionId),
+           tabWindowId: tabWindowId,
+           display: display,
+diff --git a/flutter/lib/models/model.dart b/flutter/lib/models/model.dart
+index d29ec92..b28cae2 100644
+--- a/flutter/lib/models/model.dart
++++ b/flutter/lib/models/model.dart
+@@ -1518,7 +1518,7 @@ class FfiModel with ChangeNotifier {
+       if (connection.isNotEmpty) {
+         if (casesEnabled) {
+           CaseSession.established(
+-              connection, peerId, _pi.hostname, _pi.platform);
++              connection, peerId, _pi.hostname, _pi.platform, parent.target?.helpAttempt);
+         }
+         DeviceSessions.established(peerId, connection, _pi.version);
+       }
+@@ -4178,6 +4178,7 @@ enum ConnType {
+ /// Flutter state manager and data communication with the Rust core.
+ class FFI {
+   MetricSession? metrics;
++  String? helpAttempt;
+   SessionQuality? sessionQuality;
+   bool _awaitingMetricTransfer = false;
+   DateTime? _firstFrameDuringTransfer;
+diff --git a/flutter/lib/steaddesk/cases/case_inbox.dart b/flutter/lib/steaddesk/cases/case_inbox.dart
+index 933e518..eb7adaf 100644
+--- a/flutter/lib/steaddesk/cases/case_inbox.dart
++++ b/flutter/lib/steaddesk/cases/case_inbox.dart
+@@ -5,6 +5,8 @@ import 'dart:io';
+ import 'package:flutter/material.dart';
+ import 'package:path_provider/path_provider.dart';
+ 
++import '../support_help_header_api.dart' show writeHelpCase;
++import '../merchant_build.dart' show normalCasesEnabled;
+ import 'case_dialog.dart';
+ import 'case_history.dart';
+ import 'case_store.dart';
+@@ -48,9 +50,10 @@ class CaseInbox extends ChangeNotifier {
+ final _inbox = CaseInbox(LocalCaseStore(
+     file: () async => File(
+         '${(await getApplicationSupportDirectory()).path}/$caseStoreFileName'),
+-    onCorrupt: _reportRecovery));
++    writeHelp: writeHelpCase, onCorrupt: _reportRecovery));
+ void _reportRecovery() => _inbox.reportRecovery();
+-Future<bool> caseEnded(Map<String, dynamic> event) => _inbox.ended(event);
++Future<bool> caseEnded(Map<String, dynamic> event) =>
++    normalCasesEnabled || event['help_id'] != null ? _inbox.ended(event) : Future.value(true);
+ 
+ Future<Map<String, dynamic>> readCaseHistory(Map<String, dynamic> session,
+     String action, Map<String, dynamic> data) =>
+diff --git a/flutter/lib/steaddesk/cases/case_session.dart b/flutter/lib/steaddesk/cases/case_session.dart
+index e6fcb76..4dd1f74 100644
+--- a/flutter/lib/steaddesk/cases/case_session.dart
++++ b/flutter/lib/steaddesk/cases/case_session.dart
+@@ -20,12 +20,33 @@ class CaseSession {
+   static final _sender = CaseSessionSender();
+   static String get _account => gFFI.userModel.userName.value.trim();
+ 
++  // Main owns ticket metadata. Child windows receive only a launch nonce.
++  static final _helpAttempts =
++      <String, ({String peer, String account, CaseData fields, DateTime at})>{};
++  static void linkHelp(
++      String attempt, String peer, String account, CaseData fields) {
++    if (account != _account) return;
++    _helpAttempts.removeWhere((_, a) =>
++        DateTime.now().difference(a.at) > const Duration(minutes: 10) ||
++        a.account != account ||
++        a.peer == peer);
++    if (!_ledger.linkActive(peer, account, fields)) {
++      _helpAttempts[attempt] =
++          (peer: peer, account: account, fields: fields, at: DateTime.now());
++    }
++  }
++
+   static CaseData? _snapshot(CaseData event) {
+     // The main engine owns login and address-book state. Child engines do not
+     // load the active account. Snapshot here rather than attributing on close.
+     final account = _account;
+     if (account.isEmpty) return null;
+     final id = event['device_id'] as String;
++    final attempt = _helpAttempts.remove(event['help_attempt']);
++    final linked = attempt != null &&
++        attempt.peer == id &&
++        attempt.account == account &&
++        DateTime.now().difference(attempt.at) <= const Duration(minutes: 10);
+     final ab = gFFI.abModel;
+     final peers = [
+       for (final book in {ab.current, ...ab.addressbooks.values}) ...book.peers,
+@@ -59,6 +80,7 @@ class CaseSession {
+       'store_code': device.store,
+       'agent': account,
+       'note': '',
++      if (linked) ...attempt.fields,
+       'auto': {'files': null, 'recording_id': null}
+     };
+   }
+@@ -74,9 +96,14 @@ class CaseSession {
+       _ledger.shutdown(DateTime.now().toUtc(), ended);
+ 
+   static void established(
+-      String connection, String peerId, String hostname, String platform) {
+-    unawaited(_send(connection, 'established',
+-        {'device_id': peerId, 'hostname': hostname, 'platform': platform}));
++      String connection, String peerId, String hostname, String platform,
++      [String? helpAttempt]) {
++    unawaited(_send(connection, 'established', {
++      'device_id': peerId,
++      'hostname': hostname,
++      'platform': platform,
++      if (helpAttempt != null) 'help_attempt': helpAttempt
++    }));
+   }
+ 
+   static void message(
+diff --git a/flutter/lib/steaddesk/cases/case_session_ledger.dart b/flutter/lib/steaddesk/cases/case_session_ledger.dart
+index c23a7dc..7b492aa 100644
+--- a/flutter/lib/steaddesk/cases/case_session_ledger.dart
++++ b/flutter/lib/steaddesk/cases/case_session_ledger.dart
+@@ -52,6 +52,15 @@ class CaseSessionLedger {
+     return Map.of(current);
+   }
+ 
++  bool linkActive(String device, String account, CaseData fields) {
++    final rows = _active.values
++        .where((r) => r['agent'] == account && r['device_id'] == device)
++        .toList();
++    if (rows.length != 1) return false;
++    rows.single.addAll(fields);
++    return true;
++  }
++
+   bool updateNote(CaseData edit, String account) {
+     final connection = edit['connection'];
+     final id = edit['case_id'];
+@@ -119,8 +128,9 @@ class CaseSessionLedger {
+     if (kind == 'discard' ||
+         current == null ||
+         current['agent'] == null ||
+-        at.difference(DateTime.parse(current['started_at'])) <
+-            const Duration(seconds: 30)) {
++        (current['help_id'] == null &&
++            at.difference(DateTime.parse(current['started_at'])) <
++                const Duration(seconds: 30))) {
+       return false;
+     }
+     _unacknowledged[key] = {
+diff --git a/flutter/lib/steaddesk/cases/case_session_off.dart b/flutter/lib/steaddesk/cases/case_session_off.dart
+index b1e518f..ad87288 100644
+--- a/flutter/lib/steaddesk/cases/case_session_off.dart
++++ b/flutter/lib/steaddesk/cases/case_session_off.dart
+@@ -1,11 +1,14 @@
+ class CaseSession {
++  static void linkHelp(String attempt, String peer, String account,
++      Map<String, dynamic> fields) {}
+   static Future<bool> route(String message,
+           Future<bool> Function(Map<String, dynamic>) ended) async =>
+       false;
+   static Future<void> shutdown(
+       Future<bool> Function(Map<String, dynamic>) ended) async {}
+   static void established(
+-      String connection, String peerId, String hostname, String platform) {}
++      String connection, String peerId, String hostname, String platform,
++      [String? helpAttempt]) {}
+   static void message(
+       String connection, String type, String title, String text) {}
+   static Future<void> closed(String connection) async {}
+diff --git a/flutter/lib/steaddesk/cases/case_store.dart b/flutter/lib/steaddesk/cases/case_store.dart
+index 88b6e99..2907f24 100644
+--- a/flutter/lib/steaddesk/cases/case_store.dart
++++ b/flutter/lib/steaddesk/cases/case_store.dart
+@@ -1,3 +1,4 @@
++import 'dart:async';
+ import 'dart:convert';
+ import 'dart:io';
+ 
+@@ -71,8 +72,9 @@ class LocalCaseStore implements CaseStore {
+   final Future<File> Function() file;
+   final DateTime Function() clock;
+   final void Function()? onCorrupt;
++  final Future<void> Function(CaseRecord, String, String)? writeHelp;
+   LocalCaseStore(
+-      {required this.file, DateTime Function()? clock, this.onCorrupt})
++      {required this.file, DateTime Function()? clock, this.onCorrupt, this.writeHelp})
+       : clock = clock ?? DateTime.now;
+ 
+   // All store instances in the main engine share the queue. The separate lock
+@@ -250,13 +252,16 @@ class LocalCaseStore implements CaseStore {
+           'agent': account,
+           'started_at': record['started_at'],
+           'ended_at': record['ended_at'],
+-          'category': null,
++          'category': record['help_id'] != null ? record['category'] : null,
+           'result': null,
+           'follow_up': null,
+           'transferred_to': null,
+           'note': record['note'] as String? ?? '',
+           'auto': record['auto'] ?? <String, dynamic>{},
+-          'help_id': null,
++          'help_id': record['help_id'],
++          if (record['help_id'] != null) ...{
++            'help_origin': record['help_origin'], 'help_version': record['help_version'],
++          },
+           'created_at': now,
+           'updated_at': now,
+           'appends': [],
+@@ -280,7 +285,7 @@ class LocalCaseStore implements CaseStore {
+           _expired(_find(accounts, account, id), clock().toUtc()));
+ 
+   Future<void> _edit(String account, String id,
+-          void Function(CaseRecord, DateTime, bool) edit,
++          FutureOr<void> Function(CaseRecord, DateTime, bool) edit,
+           {bool? expectedAppendOnly}) =>
+       _locked((target, accounts) async {
+         final row = _find(accounts, account, id);
+@@ -289,7 +294,7 @@ class LocalCaseStore implements CaseStore {
+         if (expectedAppendOnly == false && expired) {
+           throw const CaseEditWindowExpired();
+         }
+-        edit(row, now, expired);
++        await edit(row, now, expired);
+         row['updated_at'] = now.toIso8601String();
+         _trim(accounts[account]!);
+         await _replace(target, accounts);
+@@ -329,7 +334,7 @@ class LocalCaseStore implements CaseStore {
+           String? transferredTo,
+           required String note,
+           bool? expectedAppendOnly}) =>
+-      _edit(account, id, (row, now, expired) {
++      _edit(account, id, (row, now, expired) async {
+         if (expired && row['status'] == 'saved') {
+           throw StateError('Case is append only');
+         }
+@@ -349,6 +354,16 @@ class LocalCaseStore implements CaseStore {
+         if (result == 'transferred' && !_present(transferredTo)) {
+           throw const FormatException('transferred_to');
+         }
++        // Validate the entire local form before sending the scoped close. A failed
++        // write leaves a durable draft; replay verifies the server's round record.
++        if (row['help_id'] != null && row['status'] == 'draft') {
++          if (writeHelp == null) throw StateError('求助服务未启用');
++          await writeHelp!(row, category!, result!);
++        }
++        if (row['help_id'] != null && row['status'] == 'saved' &&
++            (row['category'] != category || row['result'] != result)) {
++          throw StateError('求助单已结案');
++        }
+         row['category'] = category;
+         row['result'] = result;
+         row['follow_up'] = needsFollowUp
+diff --git a/flutter/lib/steaddesk/support_help.dart b/flutter/lib/steaddesk/support_help.dart
+new file mode 100644
+index 0000000..9a50302
+--- /dev/null
++++ b/flutter/lib/steaddesk/support_help.dart
+@@ -0,0 +1,250 @@
++import 'dart:convert';
++import 'dart:io';
++
++import 'package:uuid/uuid.dart';
++import 'ops_groups.dart' show opsEndpoint;
++
++typedef HelpRow = Map<String, dynamic>;
++const helpCategories = {
++  'printer': 'printer',
++  'menu': 'menu',
++  'checkout': 'pos_operation',
++  'network': 'network',
++  'frozen': 'crash',
++  'other': 'other',
++};
++const helpReasons = {
++  'printer': '打印机',
++  'menu': '菜单',
++  'checkout': '收银操作',
++  'network': '网络',
++  'frozen': '设备卡住',
++  'other': '其他',
++};
++
++class HelpStaffError implements Exception {
++  final int status;
++  const HelpStaffError(this.status);
++  @override
++  String toString() => switch (status) {
++        401 || 403 => '登录已过期或无权处理，请重新登录。',
++        404 => '求助单已不可见，请刷新队列。',
++        409 || 412 => '这张单已发生变化，请刷新后重试。',
++        429 => '请求太频繁，请稍后刷新。',
++        _ => '无法连接求助服务，请稍后重试。',
++      };
++}
++
++class SupportHelpApi {
++  final Uri base;
++  final String account;
++  final String _token;
++  final bool Function() current;
++  final _http = HttpClient()
++    ..connectionTimeout = const Duration(seconds: 6)
++    ..findProxy = (_) => 'DIRECT';
++  SupportHelpApi(Uri origin, this.account, this._token, this.current)
++      : base = opsEndpoint(origin);
++
++  void check() {
++    if (!current()) throw const HelpStaffError(401);
++  }
++
++  void dispose() => _http.close(force: true);
++
++  Future<HelpRow> _request(String path,
++      {Map<String, String>? query,
++      HelpRow? body,
++      int? version,
++      String? key}) async {
++    check();
++    final url = base.resolve(path).replace(queryParameters: query);
++    final req = await _http
++        .openUrl(body == null ? 'GET' : 'POST', url)
++        .timeout(const Duration(seconds: 8));
++    check();
++    req.followRedirects = false;
++    req.headers.set(HttpHeaders.authorizationHeader, 'Bearer $_token');
++    if (body != null) {
++      req.headers.contentType = ContentType.json;
++      req.headers.set('Idempotency-Key', key ?? const Uuid().v4());
++      req.headers.set('If-Match', '"$version"');
++      final payload = utf8.encode(jsonEncode(body));
++      req.contentLength = payload.length;
++      req.add(payload);
++    }
++    final response = await req.close().timeout(const Duration(seconds: 12));
++    if (response.statusCode != 200) {
++      await response.listen((_) {}).cancel();
++      throw HelpStaffError(response.statusCode);
++    }
++    final bytes = <int>[];
++    await for (final part in response.timeout(const Duration(seconds: 8))) {
++      if (bytes.length + part.length > 4 * 1024 * 1024)
++        throw const HelpStaffError(500);
++      bytes.addAll(part);
++    }
++    check();
++    return jsonDecode(utf8.decode(bytes)) as HelpRow;
++  }
++
++  Future<List<HelpRow>> queue() async {
++    final visible = <String, HelpRow>{};
++    for (final state in ['queued', 'callback_requested', 'claimed']) {
++      var offset = 0;
++      while (true) {
++        final page = await _request('help/queue', query: {
++          'state': state,
++          'limit': '100',
++          'offset': '$offset',
++        });
++        for (final row in (page['tickets'] as List).cast<HelpRow>()) {
++          if (state == 'claimed' && row['handler'] != account) continue;
++          final id = row['id'] as String;
++          if (visible[id] == null ||
++              row['version'] >= visible[id]!['version']) {
++            visible[id] = row;
++          }
++        }
++        final next = page['next_offset'];
++        if (next == null) break;
++        if (next is! int || next <= offset) throw const HelpStaffError(500);
++        offset = next;
++      }
++    }
++    return visible.values.toList();
++  }
++
++  String _ticket(String id) {
++    if (!RegExp(r'^[hu]_[a-f0-9]{32}$').hasMatch(id))
++      throw const HelpStaffError(404);
++    return 'help/requests/$id';
++  }
++
++  Future<HelpRow> detail(String id) => _request(_ticket(id));
++
++  Future<String?> clientHealth(String id) async {
++    try {
++      final value = await _request('${_ticket(id)}/attachments/diagnostic');
++      if (value['source'] != 'client_self_report') return null;
++      return value['data']?['health'] as String?;
++    } on HelpStaffError catch (e) {
++      if (e.status == 404) return null;
++      rethrow;
++    }
++  }
++
++  Future<String?> storeName(String? group) async {
++    if (group == null || !RegExp(r'^[a-zA-Z0-9_-]+$').hasMatch(group))
++      return null;
++    final row = await _request('groups/$group');
++    return row['name'] as String?;
++  }
++
++  Future<HelpRow> claim(HelpRow row) async {
++    final id = row['id'] as String;
++    final response = await _request('${_ticket(id)}/claim',
++        body: {}, version: row['version'] as int);
++    final detail = await this.detail(id);
++    if (response['state'] != 'claimed' ||
++        detail['state'] != 'claimed' ||
++        _claimVersion(detail) != _claimVersion(response, fallback: true) ||
++        detail['handler'] != account) {
++      throw const HelpStaffError(409);
++    }
++    return detail;
++  }
++
++  static int? _claimVersion(HelpRow row, {bool fallback = false}) {
++    final history = row['history'] as List?;
++    if (history == null) return fallback ? row['version'] as int? : null;
++    for (final event in history.reversed.cast<HelpRow>()) {
++      if (event['kind'] == 'help.claimed') return event['version'] as int;
++    }
++    return null;
++  }
++
++  Future<void> closeCase(HelpRow record, String issue, String result) async {
++    if (record['agent'] != account ||
++        record['help_origin'] != base.toString()) {
++      throw const HelpStaffError(403);
++    }
++    final id = record['help_id'] as String;
++    final version = record['help_version'] as int;
++    final before = await detail(id);
++    // A lost response (or a failed local file write) can be retried after restart,
++    // even after the merchant reopened the ticket and the next round began.
++    final history = (before['history'] as List).cast<HelpRow>();
++    final claim = history.where((e) =>
++        e['version'] == version &&
++        e['kind'] == 'help.claimed' &&
++        e['handler'] == account);
++    if (claim.isEmpty) throw const HelpStaffError(409);
++    final later = history.where((e) => e['version'] > version);
++    for (final e in later) {
++      if (e['kind'] == 'help.closed') {
++        final same = (before['case_records'] as List).cast<HelpRow>().any((r) =>
++            r['version'] == e['version'] &&
++            r['closed_by'] == account &&
++            r['category'] == issue &&
++            r['result'] == result);
++        if (same) return;
++        throw const HelpStaffError(409);
++      }
++      if (e['state'] != 'claimed' ||
++          e['handler'] != account ||
++          e['kind'] == 'help.claimed') {
++        throw const HelpStaffError(409);
++      }
++    }
++    if (before['state'] != 'claimed' || before['handler'] != account)
++      throw const HelpStaffError(409);
++    final expected = before['version'] as int;
++    await _request('${_ticket(id)}/close',
++        version: expected,
++        key:
++            const Uuid().v5(record['id'] as String, '$expected:$issue:$result'),
++        body: {'close_issue_type': issue, 'close_result': result});
++  }
++}
++
++String? verifiedHelpDevice(HelpRow row) {
++  final id = row['device_id'];
++  return row['lane'] == 'verified' &&
++          id is String &&
++          RegExp(r'^[0-9]{9,10}$').hasMatch(id)
++      ? id
++      : null;
++}
++
++HelpRow helpCaseFields(SupportHelpApi api, HelpRow ticket) => {
++      'help_id': ticket['id'],
++      'help_version': SupportHelpApi._claimVersion(ticket),
++      'help_origin': api.base.toString(),
++      'category': helpCategories[ticket['category']],
++    };
++
++String helpDiagnostic(HelpRow row) {
++  final diag = row['server_diagnostic'];
++  if (diag is! Map && row['client_health'] is String) {
++    final label = const {
++      'unknown': '未知',
++      'attention': '关注',
++      'normal': '正常',
++      'alert': '告警'
++    }[row['client_health']];
++    return '客户端自述 · 设备健康：${label ?? '未知'}';
++  }
++  if (diag is! Map)
++    return row['lane'] == 'unverified' ? '未验证 · 无服务端诊断' : '暂无诊断';
++  final status = diag['health']?['status'];
++  final health = const {
++        'normal': '正常',
++        'alert': '告警',
++        'attention': '关注',
++        'unknown': '未知'
++      }[status] ??
++      '未知';
++  final check = diag['check']?['state'];
++  return '设备健康：$health' + (check == null ? '' : ' · 快速检查 $check');
++}
+diff --git a/flutter/lib/steaddesk/support_help_host.dart b/flutter/lib/steaddesk/support_help_host.dart
+new file mode 100644
+index 0000000..c35b728
+--- /dev/null
++++ b/flutter/lib/steaddesk/support_help_host.dart
+@@ -0,0 +1,190 @@
++import 'dart:async';
++import 'dart:convert';
++import 'package:flutter/material.dart';
++import 'package:uuid/uuid.dart';
++
++import '../common.dart' show connect, gFFI;
++import '../models/platform_model.dart' show bind;
++import 'case_session_api.dart' show CaseSession;
++import 'support_help.dart';
++import 'support_help_queue.dart';
++
++typedef _Login = ({String account, String token});
++_Login? _login() {
++  try {
++    final account =
++        jsonDecode(bind.mainGetLocalOption(key: 'user_info'))['name'];
++    final token = bind.mainGetLocalOption(key: 'access_token');
++    if (account is String && account.isNotEmpty && token.isNotEmpty) {
++      return (account: account, token: token);
++    }
++  } catch (_) {}
++  return null;
++}
++
++Uri? _configuredOrigin() =>
++    Uri.tryParse(bind.mainGetOptionSync(key: 'api-server'));
++
++Future<void> writeHelpCase(HelpRow row, String issue, String result) async {
++  final login = _login();
++  if (login == null || login.account != row['agent'])
++    throw const HelpStaffError(401);
++  final origin = _configuredOrigin();
++  if (origin == null) throw const HelpStaffError(503);
++  final api = SupportHelpApi(origin, login.account, login.token,
++      () => login == _login() && origin == _configuredOrigin());
++  try {
++    await api.closeCase(row, issue, result);
++  } finally {
++    api.dispose();
++  }
++}
++
++class SupportHelpHeader extends StatefulWidget {
++  const SupportHelpHeader({super.key});
++  @override
++  State<SupportHelpHeader> createState() => _SupportHelpHeaderState();
++}
++
++class _SupportHelpHeaderState extends State<SupportHelpHeader> {
++  _Login? login;
++  Uri? origin;
++  SupportHelpApi? api;
++  List<HelpRow>? tickets;
++  int version = 0;
++  String? error;
++  Timer? timer;
++  late final StreamSubscription<String> accountEvents;
++  final queueChanges = ValueNotifier(0);
++  Route<void>? opened;
++  bool refreshing = false;
++  @override
++  void initState() {
++    super.initState();
++    accountEvents = gFFI.userModel.userName.listen((_) => _refresh());
++    timer = Timer.periodic(const Duration(seconds: 12), (_) => _refresh());
++    scheduleMicrotask(_refresh);
++  }
++
++  void _retire() {
++    version++;
++    api?.dispose();
++    api = null;
++    tickets = null;
++    error = null;
++    final route = opened;
++    if (route != null && route.isActive) route.navigator?.removeRoute(route);
++  }
++
++  Future<void> _refresh() async {
++    if (!mounted) return;
++    final now = _login();
++    if (now != login) {
++      _retire();
++      setState(() => login = now);
++    }
++    if (now == null || refreshing) return;
++    refreshing = true;
++    final guard = version;
++    try {
++      final target = _configuredOrigin();
++      if (target == null) throw const HelpStaffError(503);
++      if (!mounted || version != guard || _login() != now) return;
++      if (origin != target) {
++        _retire();
++        origin = target;
++      }
++      api ??= SupportHelpApi(
++          target,
++          now.account,
++          now.token,
++          () =>
++              mounted &&
++              now == _login() &&
++              target == _configuredOrigin() &&
++              target == origin);
++      final active = api!;
++      final rows = await active.queue();
++      if (!mounted || active != api || _login() != now) return;
++      setState(() {
++        tickets = rows;
++        error = null;
++      });
++      queueChanges.value++;
++    } catch (e) {
++      if (mounted && now == _login()) {
++        setState(() {
++          tickets = null;
++          error = e is HelpStaffError
++              ? e.toString()
++              : const HelpStaffError(0).toString();
++        });
++        queueChanges.value++;
++      }
++    } finally {
++      refreshing = false;
++      if (mounted && now != _login()) scheduleMicrotask(_refresh);
++    }
++  }
++
++  Future<void> _open() async {
++    if (api == null) {
++      await _refresh();
++      if (!mounted) return;
++      if (api == null) {
++        ScaffoldMessenger.maybeOf(context)
++            ?.showSnackBar(SnackBar(content: Text(error ?? '请配置求助服务地址。')));
++        return;
++      }
++    }
++    final active = api!;
++    final nav = Navigator.of(context, rootNavigator: true);
++    final route = DialogRoute<void>(
++        context: context,
++        builder: (ctx) => Navigator(
++            onGenerateRoute: (_) => PageRouteBuilder<void>(
++                opaque: false,
++                pageBuilder: (inner, __, ___) => ValueListenableBuilder<int>(
++                    valueListenable: queueChanges,
++                    builder: (_, revision, __) => SupportHelpQueue(
++                        api: active,
++                        rows: tickets,
++                        error: error,
++                        onRefresh: _refresh,
++                        onConnect: (row) async {
++                          active.check();
++                          final id = verifiedHelpDevice(row);
++                          if (id == null ||
++                              row['state'] != 'claimed' ||
++                              row['handler'] != active.account) {
++                            throw const HelpStaffError(403);
++                          }
++                          // The nonce only correlates a local launch with its authenticated peer_info event.
++                          final attempt = const Uuid().v4();
++                          CaseSession.linkHelp(attempt, id, active.account,
++                              helpCaseFields(active, row));
++                          Navigator.of(ctx).pop();
++                          await connect(context, id, helpAttempt: attempt);
++                        })))));
++    opened = route;
++    nav.push(route);
++    await route.completed;
++    if (identical(opened, route)) opened = null;
++    if (mounted) await _refresh();
++  }
++
++  @override
++  void dispose() {
++    timer?.cancel();
++    accountEvents.cancel();
++    _retire();
++    queueChanges.dispose();
++    super.dispose();
++  }
++
++  @override
++  Widget build(BuildContext context) => TextButton(
++      onPressed: login == null ? null : _open,
++      child: Text(
++          '求助 ${tickets?.where((r) => r['state'] != 'claimed').length ?? '—'}'));
++}
+diff --git a/flutter/lib/steaddesk/support_help_off.dart b/flutter/lib/steaddesk/support_help_off.dart
+new file mode 100644
+index 0000000..bb3759a
+--- /dev/null
++++ b/flutter/lib/steaddesk/support_help_off.dart
+@@ -0,0 +1,12 @@
++import 'package:flutter/widgets.dart';
++
++class SupportHelpHeader extends StatelessWidget {
++  const SupportHelpHeader({super.key});
++  @override
++  Widget build(BuildContext context) => const SizedBox.shrink();
++}
++
++Future<void> writeHelpCase(
++    Map<String, dynamic> row, String issue, String result) async {
++  throw StateError('求助服务未启用');
++}
+diff --git a/flutter/lib/steaddesk/support_help_queue.dart b/flutter/lib/steaddesk/support_help_queue.dart
+new file mode 100644
+index 0000000..45a6b32
+--- /dev/null
++++ b/flutter/lib/steaddesk/support_help_queue.dart
+@@ -0,0 +1,237 @@
++import 'package:flutter/material.dart';
++import 'package:uuid/uuid.dart';
++import 'cases/case_dialog.dart' show caseCategoryLabels, caseResultLabels;
++import 'support_help.dart';
++
++class SupportHelpQueue extends StatefulWidget {
++  final SupportHelpApi api;
++  final List<HelpRow>? rows;
++  final String? error;
++  final Future<void> Function() onRefresh;
++  final Future<void> Function(HelpRow) onConnect;
++  const SupportHelpQueue(
++      {super.key,
++      required this.api,
++      required this.rows,
++      required this.error,
++      required this.onRefresh,
++      required this.onConnect});
++  @override
++  State<SupportHelpQueue> createState() => _SupportHelpQueueState();
++}
++
++class _SupportHelpQueueState extends State<SupportHelpQueue> {
++  String? busy, issue;
++  final details = <(String, int), Future<HelpRow>>{};
++  final stores = <String, Future<String?>>{};
++  @override
++  void didUpdateWidget(SupportHelpQueue old) {
++    super.didUpdateWidget(old);
++    if (!identical(widget.rows, old.rows)) {
++      final activeKeys = (widget.rows ?? const <HelpRow>[])
++          .map((r) => (r['id'] as String, r['version'] as int))
++          .toSet();
++      details.removeWhere((key, _) => !activeKeys.contains(key));
++      if (activeKeys.isEmpty) stores.clear();
++    }
++  }
++
++  Future<HelpRow> _detail(HelpRow row) async {
++    final data = await widget.api.detail(row['id']);
++    if (data['state'] != row['state'] || data['version'] != row['version'])
++      throw const HelpStaffError(409);
++    final group = data['group_id'];
++    if (group is String && data['lane'] == 'verified') {
++      try {
++        data['store_name'] =
++            await stores.putIfAbsent(group, () => widget.api.storeName(group));
++      } on HelpStaffError catch (e) {
++        stores.remove(group);
++        if (e.status != 404 && e.status != 403) rethrow;
++      }
++    }
++    final history = (data['history'] as List).cast<HelpRow>();
++    if (history.any((e) => e['kind'] == 'help.diagnostic_updated') &&
++        data['lane'] == 'unverified') {
++      data['client_health'] = await widget.api.clientHealth(row['id']);
++    }
++    return data;
++  }
++
++  Future<void> _manualClose(HelpRow row) async {
++    String category = helpCategories[row['category']] ?? 'other';
++    String? result;
++    final confirmed = await showDialog<bool>(
++        context: context,
++        useRootNavigator: false,
++        builder: (ctx) => StatefulBuilder(
++            builder: (_, change) => AlertDialog(
++                    title: const Text('人工跟进结案'),
++                    content: Column(mainAxisSize: MainAxisSize.min, children: [
++                      Text('求助 #${row['id']}'),
++                      DropdownButtonFormField<String>(
++                          value: category,
++                          decoration: const InputDecoration(labelText: '问题类型'),
++                          items: [
++                            for (final e in caseCategoryLabels.entries)
++                              DropdownMenuItem(
++                                  value: e.key, child: Text(e.value))
++                          ],
++                          onChanged: (v) => change(() => category = v!)),
++                      DropdownButtonFormField<String>(
++                          value: result,
++                          decoration: const InputDecoration(labelText: '处理结果'),
++                          items: [
++                            for (final e in caseResultLabels.entries)
++                              DropdownMenuItem(
++                                  value: e.key, child: Text(e.value))
++                          ],
++                          onChanged: (v) => change(() => result = v)),
++                    ]),
++                    actions: [
++                      TextButton(
++                          onPressed: () => Navigator.pop(ctx, false),
++                          child: const Text('返回')),
++                      TextButton(
++                          onPressed: result == null
++                              ? null
++                              : () => Navigator.pop(ctx, true),
++                          child: const Text('保存结案')),
++                    ])));
++    if (!mounted || confirmed != true) return;
++    await widget.api.closeCase({
++      'id': const Uuid().v4(),
++      'agent': widget.api.account,
++      ...helpCaseFields(widget.api, row)
++    }, category, result!);
++  }
++
++  Future<void> _act(HelpRow row) async {
++    setState(() {
++      busy = row['id'];
++      issue = null;
++    });
++    try {
++      final ticket = row['state'] == 'claimed'
++          ? await widget.api.detail(row['id'])
++          : await widget.api.claim(row);
++      if (!mounted) return;
++      if (ticket['state'] != 'claimed' ||
++          ticket['handler'] != widget.api.account) {
++        throw const HelpStaffError(409);
++      }
++      if (verifiedHelpDevice(ticket) != null) {
++        await widget.onConnect(ticket);
++      } else if (row['state'] == 'claimed') {
++        await _manualClose(ticket);
++      } else {
++        setState(() => issue = '已认领，等待人工核验。');
++      }
++    } catch (e) {
++      if (mounted)
++        setState(() => issue = e is HelpStaffError
++            ? e.toString()
++            : const HelpStaffError(0).toString());
++    } finally {
++      if (mounted) {
++        setState(() => busy = null);
++        await widget.onRefresh();
++      }
++    }
++  }
++
++  Widget _entry(HelpRow row) => FutureBuilder<HelpRow>(
++      key: ValueKey((row['id'], row['version'])),
++      future:
++          details.putIfAbsent((row['id'], row['version']), () => _detail(row)),
++      builder: (_, snap) {
++        final detail = snap.data;
++        final verified = row['lane'] == 'verified';
++        final claimed = row['state'] == 'claimed';
++        final stamp = DateTime.fromMillisecondsSinceEpoch(
++            ((detail?['queued_at'] ?? row['created_at']) as int) * 1000);
++        final minutes =
++            DateTime.now().difference(stamp).inMinutes.clamp(0, 9999999);
++        final callback = detail?['callback_requested_at'];
++        final store =
++            verified ? (detail?['store_name'] ?? '门店资料暂不可用') : '门店待核验';
++        final caption = [
++          '已等 $minutes 分钟',
++          if (detail != null)
++            helpDiagnostic(detail)
++          else if (snap.hasError)
++            '诊断暂不可用'
++          else
++            '正在读取诊断…',
++          if (row['state'] == 'callback_requested') ...[
++            '申请回电：${callback is int ? DateTime.fromMillisecondsSinceEpoch(callback * 1000).toLocal().toString().split('.').first : '时间暂不可用'}',
++            '电话：${detail?['callback_phone'] ?? '未提供'}',
++          ]
++        ];
++        return ListTile(
++            title: Text('$store · ${helpReasons[row['category']] ?? '其他'}'),
++            subtitle: Text(caption.join(' · ')),
++            trailing: TextButton(
++                onPressed:
++                    busy == null && detail != null ? () => _act(row) : null,
++                child: Text(claimed ? (verified ? '连接' : '人工结案') : '认领')));
++      });
++
++  @override
++  Widget build(BuildContext context) {
++    final rows = widget.rows ?? const <HelpRow>[];
++    final entries = <Object>[];
++    void section(String label, bool Function(HelpRow) accept) {
++      entries.add(label);
++      final matches = rows.where(accept).toList();
++      if (matches.isEmpty) {
++        entries.add(const Text('暂无求助单'));
++      } else {
++        entries.addAll(matches);
++      }
++    }
++
++    if (widget.rows != null) {
++      section('已验证', (r) => r['state'] == 'queued' && r['lane'] == 'verified');
++      section('未验证 · 人工核验',
++          (r) => r['state'] == 'queued' && r['lane'] == 'unverified');
++      section('预约回电', (r) => r['state'] == 'callback_requested');
++      section('我已认领', (r) => r['state'] == 'claimed');
++    }
++    return AlertDialog(
++        title: const Text('求助队列'),
++        content: SizedBox(
++            width: 640,
++            height: 430,
++            child:
++                Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
++              if (issue != null || widget.error != null)
++                Text(issue ?? widget.error!),
++              Expanded(
++                  child: ListView.builder(
++                      itemCount: entries.length,
++                      itemBuilder: (_, i) {
++                        final item = entries[i];
++                        if (item is HelpRow) return _entry(item);
++                        if (item is Widget) return item;
++                        return Padding(
++                            padding: const EdgeInsets.symmetric(vertical: 8),
++                            child: Text('$item',
++                                style: const TextStyle(
++                                    fontWeight: FontWeight.bold)));
++                      })),
++            ])),
++        actions: [
++          TextButton(
++              onPressed: () async {
++                details.clear();
++                stores.clear();
++                await widget.onRefresh();
++              },
++              child: const Text('刷新')),
++          TextButton(
++              onPressed: () => Navigator.of(context, rootNavigator: true).pop(),
++              child: const Text('返回')),
++        ]);
++  }
++}
+diff --git a/flutter/lib/steaddesk/support_home.dart b/flutter/lib/steaddesk/support_home.dart
+index a851bfe..eaf92ec 100644
+--- a/flutter/lib/steaddesk/support_home.dart
++++ b/flutter/lib/steaddesk/support_home.dart
+@@ -19,9 +19,10 @@ import '../models/peer_model.dart';
+ import '../models/peer_tab_model.dart';
+ import '../models/ab_model.dart';
+ import 'ops_health_host.dart';
++import 'support_help_header_api.dart';
+ import 'case_inbox_api.dart' show PendingCasesBar;
+ import 'merchant_build.dart'
+-    show casesEnabled, opsGroupsEnabled, opsHealthEnabled, merchantEdition;
++    show casesEnabled, helpEnabled, opsGroupsEnabled, opsHealthEnabled, merchantEdition;
+ import 'ops_groups.dart';
+ import 'ops_group_tile.dart';
+ import 'support_device.dart';
+diff --git a/flutter/lib/steaddesk/support_home_bar.dart b/flutter/lib/steaddesk/support_home_bar.dart
+index 5521d08..0da39c5 100644
+--- a/flutter/lib/steaddesk/support_home_bar.dart
++++ b/flutter/lib/steaddesk/support_home_bar.dart
+@@ -45,6 +45,7 @@ class _HomeHeader extends StatelessWidget {
+                 onSearch: onSearch,
+                 directory: directory,
+                 jump: jump)),
++        if (helpEnabled && isWindows) const SupportHelpHeader(),
+         if (opsHealthEnabled) const OpsHealthHost(HealthSurface.header),
+         const SizedBox(width: 12),
+         ValueListenableBuilder<TextEditingValue>(
+diff --git a/flutter/lib/utils/multi_window_manager.dart b/flutter/lib/utils/multi_window_manager.dart
+index dfe4eec..3e284b8 100644
+--- a/flutter/lib/utils/multi_window_manager.dart
++++ b/flutter/lib/utils/multi_window_manager.dart
+@@ -229,6 +229,7 @@ class RustDeskMultiWindowManager {
+     String remoteId,
+     List<int> windows, {
+     Map<String, dynamic>? metricSeed,
++    String? helpAttempt,
+     String? password,
+     bool? forceRelay,
+     String? switchUuid,
+@@ -240,6 +241,7 @@ class RustDeskMultiWindowManager {
+       "type": type.index,
+       "id": remoteId,
+       if (metricSeed != null) "metric_seed": metricSeed,
++      if (helpAttempt != null) "help_attempt": helpAttempt,
+       "password": password,
+       "forceRelay": forceRelay
+     };
+@@ -265,6 +267,10 @@ class RustDeskMultiWindowManager {
+       for (final windowId in windows) {
+         if (await DesktopMultiWindow.invokeMethod(
+             windowId, kWindowEventActiveSession, remoteId)) {
++          if (helpAttempt != null) {
++            await DesktopMultiWindow.invokeMethod(windowId, 'steaddesk.help.attach',
++                jsonEncode({'id': remoteId, 'attempt': helpAttempt}));
++          }
+           return MultiWindowCallResult(windowId, null);
+         }
+       }
+@@ -276,6 +282,7 @@ class RustDeskMultiWindowManager {
+   Future<MultiWindowCallResult> newRemoteDesktop(
+     String remoteId, {
+     Map<String, dynamic>? metricSeed,
++    String? helpAttempt,
+     String? password,
+     bool? isSharedPassword,
+     String? switchUuid,
+@@ -287,6 +294,7 @@ class RustDeskMultiWindowManager {
+       remoteId,
+       _remoteDesktopWindows,
+       metricSeed: metricSeed,
++      helpAttempt: helpAttempt,
+       password: password,
+       forceRelay: forceRelay,
+       switchUuid: switchUuid,
+diff --git a/flutter/test/steaddesk/case_store_test.dart b/flutter/test/steaddesk/case_store_test.dart
+index 802d7d9..6cde261 100644
+--- a/flutter/test/steaddesk/case_store_test.dart
++++ b/flutter/test/steaddesk/case_store_test.dart
+@@ -36,6 +36,18 @@ void main() {
+   });
+   tearDown(() => dir.delete(recursive: true));
+ 
++  test('a linked help round survives restart with its H-1 category', () async {
++    final record = session(1)..addAll({
++      'help_id': 'h_fixture', 'help_version': 2, 'help_origin': 'https://example.invalid',
++      'category': 'pos_operation'
++    });
++    await store.addDraft('demo', record);
++    final restored = (await open().pending('demo')).single;
++    expect(restored['help_id'], 'h_fixture');
++    expect(restored['help_version'], 2);
++    expect(restored['category'], 'pos_operation');
++  });
++
+   test(
+       'overlapping writers across instances preserve isolated draft IDs and retries',
+       () async {
+diff --git a/flutter/test/steaddesk/support_help_test.dart b/flutter/test/steaddesk/support_help_test.dart
+new file mode 100644
+index 0000000..17c0522
+--- /dev/null
++++ b/flutter/test/steaddesk/support_help_test.dart
+@@ -0,0 +1,152 @@
++import 'package:flutter/material.dart';
++import 'package:flutter_test/flutter_test.dart';
++import '../../lib/steaddesk/support_help.dart';
++import '../../lib/steaddesk/support_help_queue.dart';
++import '../../lib/steaddesk/cases/case_session_ledger.dart';
++
++class FixtureApi extends Fake implements SupportHelpApi {
++  @override
++  String get account => 'fixture';
++  @override
++  Uri get base => Uri.parse('https://example.invalid/ops/v1/');
++  final closed = <String>[];
++  @override
++  Future<void> closeCase(HelpRow record, String issue, String result) async {
++    closed.add('${record['help_id']}:$issue:$result');
++  }
++
++  final rows = <String, HelpRow>{};
++  @override
++  Future<HelpRow> detail(String id) async => rows[id]!;
++  @override
++  Future<String?> storeName(String? id) async => 'Fixture Store';
++  @override
++  Future<HelpRow> claim(HelpRow row) async => {
++        ...rows[row['id']]!,
++        'state': 'claimed',
++        'handler': account,
++        'version': 2
++      };
++}
++
++void main() {
++  test(
++      'only an authenticated matching round accepts a claim, including a short session',
++      () async {
++    final saved = <HelpRow>[];
++    final ledger = CaseSessionLedger((event) =>
++        {'id': 'round', 'agent': 'agent', 'device_id': event['device_id']});
++    final fields = {'help_id': 'fixture', 'category': 'crash'};
++    expect(ledger.linkActive('790001001', 'agent', fields), isFalse);
++    await ledger.receive({
++      'kind': 'established',
++      'event_id': '1',
++      'connection': 'conn',
++      'at': '2026-01-01T00:00:00Z',
++      'device_id': '790001001'
++    }, (_) async => true);
++    expect(ledger.linkActive('790001002', 'agent', fields), isFalse);
++    expect(ledger.linkActive('790001001', 'other', fields), isFalse);
++    expect(ledger.linkActive('790001001', 'agent', fields), isTrue);
++    await ledger.receive({
++      'kind': 'closed',
++      'event_id': '2',
++      'connection': 'conn',
++      'at': '2026-01-01T00:00:05Z'
++    }, (r) async {
++      saved.add(r);
++      return true;
++    });
++    expect(saved.single['help_id'], 'fixture');
++    expect(saved.single['category'], 'crash');
++    expect(ledger.linkActive('790001001', 'agent', fields), isFalse);
++  });
++
++  testWidgets(
++      'unverified handler can save a manual close without opening a session',
++      (t) async {
++    final api = FixtureApi();
++    final row = {
++      'id': 'manual',
++      'lane': 'unverified',
++      'state': 'claimed',
++      'handler': 'fixture',
++      'version': 2,
++      'created_at': 0,
++      'category': 'frozen',
++      'history': [
++        {'kind': 'help.claimed', 'version': 2}
++      ]
++    };
++    api.rows['manual'] = row;
++    await t.pumpWidget(MaterialApp(
++        home: SupportHelpQueue(
++            api: api,
++            rows: [row],
++            error: null,
++            onRefresh: () async {},
++            onConnect: (_) async => fail('Unexpected connect'))));
++    await t.pumpAndSettle();
++    await t.ensureVisible(find.text('人工结案'));
++    await t.tap(find.text('人工结案'));
++    await t.pumpAndSettle();
++    expect(find.text('人工跟进结案'), findsOneWidget);
++    await t.tap(find.byType(DropdownButtonFormField<String>).last);
++    await t.pumpAndSettle();
++    await t.tap(find.text('已解决').last);
++    await t.pumpAndSettle();
++    await t.tap(find.text('保存结案'));
++    await t.pumpAndSettle();
++    expect(api.closed, ['manual:crash:resolved']);
++  });
++
++  testWidgets(
++      'queue separates lanes, shows callback details and opens only verified peers',
++      (t) async {
++    final api = FixtureApi();
++    for (final kind in ['verified', 'unverified', 'callback_requested']) {
++      final verified = kind == 'verified',
++          callback = kind == 'callback_requested';
++      api.rows[kind] = {
++        'id': kind,
++        'version': 1,
++        'state': callback ? kind : 'queued',
++        'lane': verified ? 'verified' : 'unverified',
++        'group_id': verified ? 'store' : null,
++        'device_id': '790001001',
++        'category': 'frozen',
++        'created_at': 0,
++        'history': [],
++        'server_diagnostic': verified
++            ? {
++                'health': {'status': 'attention'}
++              }
++            : null,
++        'callback_requested_at': callback ? 123 : null
++      };
++    }
++    await t.binding.setSurfaceSize(const Size(1024, 760));
++    addTearDown(() => t.binding.setSurfaceSize(null));
++    final opened = <HelpRow>[];
++    await t.pumpWidget(MaterialApp(
++        home: SupportHelpQueue(
++            api: api,
++            rows: api.rows.values.toList(),
++            error: null,
++            onRefresh: () async {},
++            onConnect: (row) async {
++              opened.add(row);
++            })));
++    await t.pumpAndSettle();
++    expect(find.text('已验证'), findsOneWidget);
++    expect(find.textContaining('Fixture Store · 设备卡住'), findsOneWidget);
++    expect(find.textContaining('设备健康：关注'), findsOneWidget);
++    expect(find.textContaining('电话：未提供'), findsOneWidget);
++    await t.tap(find.text('认领').at(1));
++    await t.pumpAndSettle();
++    expect(opened, isEmpty);
++    await t.tap(find.text('认领').first);
++    await t.pumpAndSettle();
++    expect(verifiedHelpDevice(opened.single), '790001001');
++  });
++}
+diff --git a/flutter/tool/support_help_drill.dart b/flutter/tool/support_help_drill.dart
+new file mode 100644
+index 0000000..c06b68c
+--- /dev/null
++++ b/flutter/tool/support_help_drill.dart
+@@ -0,0 +1,128 @@
++// Run against an isolated loopback fixture. Credentials are read from a private
++// temporary file, never included in the public test or printed.
++import 'dart:convert';
++import 'dart:io';
++import 'package:flutter_test/flutter_test.dart';
++import 'package:uuid/uuid.dart';
++import '../lib/steaddesk/support_help.dart';
++import '../lib/steaddesk/cases/case_store.dart';
++
++void main() {
++  test('two operators, self-service disappearance and H-1 round-trip',
++      () async {
++    final config = jsonDecode(
++        await File(Platform.environment['HELP_QUEUE_DRILL']!).readAsString());
++    final base = Uri.parse(config['origin']);
++    expect(base.host, '127.0.0.1');
++    final api = [
++      for (final account in (config['accounts'] as Map).entries)
++        SupportHelpApi(base, account.key, account.value, () => true)
++    ];
++    final client = HttpClient()..findProxy = (_) => 'DIRECT';
++    addTearDown(() {
++      for (final a in api) {
++        a.dispose();
++      }
++      client.close(force: true);
++    });
++    Future<HelpRow> merchant(String receipt, String method, String route,
++        [HelpRow? body, int? version]) async {
++      final req =
++          await client.openUrl(method, base.resolve('/ops/v1/help/me/$route'));
++      req.followRedirects = false;
++      req.headers.set('Authorization', receipt);
++      req.headers.set('Idempotency-Key', const Uuid().v4());
++      if (version != null) req.headers.set('If-Match', '"$version"');
++      if (body != null) {
++        final payload = utf8.encode(jsonEncode(body));
++        req.headers.contentType = ContentType.json;
++        req.contentLength = payload.length;
++        req.add(payload);
++      }
++      final response = await req.close();
++      final json = jsonDecode(await utf8.decoder.bind(response).join());
++      expect(response.statusCode, 200, reason: json['code'] as String?);
++      return json as HelpRow;
++    }
++
++    final rows = await api.first.queue();
++    final primary = rows.singleWhere((r) => r['id'] == config['primary']);
++    final self = rows.singleWhere((r) => r['id'] == config['self']);
++    final callback = rows.singleWhere((r) => r['id'] == config['callback']);
++    final cb = await api.first.detail(callback['id']);
++    expect(cb['callback_requested_at'], isA<int>());
++    expect(cb['callback_phone'], isNull);
++    expect(verifiedHelpDevice(cb), isNull);
++    final followed = await api.first.claim(callback);
++    expect(verifiedHelpDevice(followed), isNull);
++    expect(followed['handler'], api.first.account);
++    await api.first.closeCase({
++      'id': const Uuid().v4(),
++      'agent': api.first.account,
++      ...helpCaseFields(api.first, followed)
++    }, 'pos_operation', 'not_needed');
++    final manualClosed = await api.first.detail(callback['id']);
++    expect(manualClosed['case_records'].single['result'], 'not_needed');
++    final results = await Future.wait(api.map((a) async {
++      try {
++        return await a.claim(primary);
++      } on HelpStaffError catch (e) {
++        return {'status': e.status};
++      }
++    }));
++    expect(results.where((r) => r['status'] == 409), hasLength(1));
++    final index = results.indexWhere((r) => r['state'] == 'claimed');
++    expect(index, isNonNegative);
++    final winner = api[index], claimed = results[index];
++    expect(verifiedHelpDevice(claimed), config['device']);
++    expect(await winner.storeName(claimed['group_id']), 'Fixture store');
++    final cards = await merchant(config['selfReceipt'], 'GET', 'step-cards');
++    final card = cards['cards'].first;
++    await merchant(
++        config['selfReceipt'],
++        'POST',
++        'self-resolve',
++        {'card_id': card['card_id'], 'card_version': card['card_version']},
++        self['version']);
++    expect((await winner.queue()).where((r) => r['id'] == self['id']), isEmpty);
++    final dir = await Directory.systemTemp.createTemp('help-close-fixture');
++    addTearDown(() => dir.delete(recursive: true));
++    final store = LocalCaseStore(
++        file: () async => File('${dir.path}/cases.json'),
++        writeHelp: winner.closeCase);
++    final id = const Uuid().v4(), now = DateTime.now().toUtc();
++    final record = {
++      'id': id,
++      'agent': winner.account,
++      'device_id': config['device'],
++      'started_at': now.subtract(const Duration(minutes: 1)).toIso8601String(),
++      'ended_at': now.toIso8601String(),
++      ...helpCaseFields(winner, claimed)
++    };
++    await store.addDraft(winner.account, record);
++    final draft = (await store.pending(winner.account)).single;
++    expect(draft['help_id'], primary['id']);
++    expect(draft['category'], 'pos_operation');
++    await merchant(config['primaryReceipt'], 'PUT', 'diagnostic', {
++      'v': 1,
++      'sampled_at': now.millisecondsSinceEpoch ~/ 1000,
++      'health': 'unknown',
++      'self_heal': []
++    });
++    final changed = await winner.detail(primary['id']);
++    expect(changed['version'], greaterThan(draft['help_version']));
++    await store.save(winner.account, id,
++        category: 'pos_operation', result: 'resolved', note: '');
++    await winner.closeCase(
++        draft, 'pos_operation', 'resolved'); // post-commit response loss
++    expect(await store.pending(winner.account), isEmpty);
++    final closed = await winner.detail(primary['id']);
++    expect(closed['state'], 'closed');
++    expect(closed['close_result'], 'resolved');
++    expect(closed['case_records'], hasLength(1));
++    expect(closed['case_records'][0]['category'], 'pos_operation');
++    expect(closed['case_records'][0]['closed_by'], winner.account);
++    print('PASS loopback claims=200/409 self_resolved_absent callback_manual '
++        'diagnostic_version_advanced H1_saved server_case_records=1 retry_no_duplicate');
++  });
++}
