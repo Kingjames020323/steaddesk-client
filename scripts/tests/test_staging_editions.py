@@ -63,6 +63,12 @@ class StagingEditionTests(unittest.TestCase):
                     self.assertEqual(selected.find(f"queries/package[@{ANDROID}name='com.steaddesk.agent']") is not None, merchant)
                     wake = selected.find(f"application/service[@{ANDROID}name='com.carriez.flutter_hbb.AgentWakeService']")
                     permission = selected.find(f"permission[@{ANDROID}name='com.steaddesk.remote.permission.WAKE_SERVICE']")
+                    marker = selected.find(f"application/receiver[@{ANDROID}name='com.carriez.flutter_hbb.MerchantRemotePaused']")
+                    self.assertEqual(marker is not None, merchant)
+                    if merchant:
+                        self.assertEqual(marker.attrib[ANDROID + "enabled"], "false")
+                        self.assertEqual(marker.attrib[ANDROID + "exported"], "false")
+                        self.assertEqual(list(marker), [])
                     self.assertEqual(wake is not None, merchant)
                     self.assertEqual(permission is not None, merchant)
                     self.assertEqual(selected.find(f"uses-permission[@{ANDROID}name='com.steaddesk.agent.permission.WAKE_CONNECTION']") is not None, merchant)
