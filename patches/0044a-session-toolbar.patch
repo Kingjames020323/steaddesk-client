@@ -1,0 +1,1177 @@
+diff --git a/flutter/lib/desktop/pages/remote_page.dart b/flutter/lib/desktop/pages/remote_page.dart
+index da95bc9..64008a3 100644
+--- a/flutter/lib/desktop/pages/remote_page.dart
++++ b/flutter/lib/desktop/pages/remote_page.dart
+@@ -16,6 +16,7 @@ import '../../common/widgets/dialog.dart';
+ import '../../common/widgets/toolbar.dart';
+ import '../../models/model.dart';
+ import '../../steaddesk/metrics_api.dart';
++import '../../steaddesk/toolbar_api.dart';
+ import '../../steaddesk/dialogs.dart' show steadUsesChinese;
+ import '../../steaddesk/reconnect_overlay.dart';
+ import '../../models/input_model.dart';
+@@ -727,6 +728,25 @@ class _RemotePageState extends State<RemotePage>
+   late final bool _supportSession =
+       isDesktop && bind.mainGetAppNameSync() == 'SteadDesk Support';
+ 
++  late final _toolbarFrame = toolbarEnabled && _supportSession ? ToolbarFrame() : null;
++
++  bool get _toolbarActive => mounted && _isSelectedTab && !_isWindowBlur &&
++      _ffi.connType == ConnType.defaultConn && _ffi.ffiModel.pi.isSet.isTrue &&
++      _ffi.ffiModel.waitForFirstImage.isFalse && !_ffi.ffiModel.reconnectInputLocked;
++
++  bool _toolbarMayCapture(int display) {
++    final model = _ffi.ffiModel;
++    if (!_toolbarActive || display != model.pi.currentDisplay ||
++        model.permissions['recording'] == false || model.rect?.isEmpty != false) return false;
++    if (!_ffi.imageModel.useTextureRender && !model.pi.forceTextureRender) {
++      return _ffi.imageModel.image != null;
++    }
++    final displays = model.pi.getCurDisplays();
++    return displays.isNotEmpty && List.generate(displays.length,
++        (i) => display == kAllDisplayValue ? i : display)
++        .every((i) => _ffi.textureModel.getTextureId(i).value >= 0);
++  }
++
+   Widget buildBody(BuildContext context) {
+     remoteToolbar(BuildContext context) => RemoteToolbar(
+           id: widget.id,
+@@ -779,7 +799,11 @@ class _RemotePageState extends State<RemotePage>
+       if (_supportSession) {
+         final ready = _ffi.ffiModel.pi.isSet.isTrue &&
+             _ffi.ffiModel.waitForFirstImage.isFalse;
++        final display = _ffi.ffiModel.pi.currentDisplay;
+         final session = SessionSurface(
++            toolbarFrame: _toolbarFrame,
++            toolbarActive: () => _toolbarActive,
++            screenshotAllowed: () => _toolbarMayCapture(display),
+             id: widget.id,
+             ffi: _ffi,
+             state: widget.toolbarState,
+@@ -1027,7 +1051,8 @@ class _RemotePageState extends State<RemotePage>
+                   ? Container(color: Colors.transparent)
+                   : Obx(() {
+                       _ffi.textureModel.updateCurrentDisplay(peerDisplay.value);
+-                      return ImagePaint(
++                      final image = ImagePaint(
++                        toolbarFrame: _toolbarFrame,
+                         id: widget.id,
+                         zoomCursor: _zoomCursor,
+                         cursorOverImage: _cursorOverImage,
+@@ -1038,6 +1063,7 @@ class _RemotePageState extends State<RemotePage>
+                                 child, enterView, leaveView),
+                         ffi: _ffi,
+                       );
++                      return _toolbarFrame?.view(image) ?? image;
+                     }),
+             );
+           }),
+@@ -1144,6 +1170,7 @@ class _ViewStyleUpdaterState extends State<_ViewStyleUpdater> {
+ }
+ 
+ class ImagePaint extends StatefulWidget {
++  final ToolbarFrame? toolbarFrame;
+   final FFI ffi;
+   final String id;
+   final RxBool zoomCursor;
+@@ -1153,7 +1180,8 @@ class ImagePaint extends StatefulWidget {
+   final Widget Function(Widget)? listenerBuilder;
+ 
+   ImagePaint(
+-      {Key? key,
++      {this.toolbarFrame,
++      Key? key,
+       required this.ffi,
+       required this.id,
+       required this.zoomCursor,
+@@ -1241,7 +1269,7 @@ class _ImagePaintState extends State<ImagePaint> {
+           child: mouseRegion(
+             child: Obx(() => _buildCrossScrollbarFromLayout(
+                   context,
+-                  _buildListener(paintWidget),
++                  _buildListener(widget.toolbarFrame?.paint(paintWidget) ?? paintWidget),
+                   c.size,
+                   paintSize,
+                   c.scrollHorizontal,
+@@ -1262,7 +1290,7 @@ class _ImagePaintState extends State<ImagePaint> {
+                     c.size,
+                     isViewOriginal())
+                 : _buildScrollAutoNonTextureRender(m, c, s);
+-        return mouseRegion(child: _buildListener(paintWidget));
++        return mouseRegion(child: _buildListener(widget.toolbarFrame?.paint(paintWidget) ?? paintWidget));
+       } else {
+         return Container();
+       }
+diff --git a/flutter/lib/desktop/widgets/remote_toolbar.dart b/flutter/lib/desktop/widgets/remote_toolbar.dart
+index 75ee45b..08e4f44 100644
+--- a/flutter/lib/desktop/widgets/remote_toolbar.dart
++++ b/flutter/lib/desktop/widgets/remote_toolbar.dart
+@@ -32,6 +32,7 @@ import '../../steaddesk/history_host_api.dart';
+ import '../../steaddesk/quality_badge.dart';
+ import '../../steaddesk/merchant_build.dart' show casesEnabled, opsHealthEnabled;
+ import '../../steaddesk/ops_health_host.dart';
++import '../../steaddesk/toolbar_api.dart';
+ 
+ part '../../steaddesk/session_surface.dart';
+ 
+diff --git a/flutter/lib/steaddesk/cases/case_dialog.dart b/flutter/lib/steaddesk/cases/case_dialog.dart
+index dc3f898..69ddb47 100644
+--- a/flutter/lib/steaddesk/cases/case_dialog.dart
++++ b/flutter/lib/steaddesk/cases/case_dialog.dart
+@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
+ import 'package:flutter/services.dart';
+ 
+ import '../theme.dart';
++import '../toolbar_api.dart';
+ import 'case_store.dart';
+ 
+ const caseCategoryLabels = {
+@@ -515,6 +516,10 @@ class _CaseCloseDialogState extends State<_CaseCloseDialog> {
+         if (transfer) _transfer(),
+         const SizedBox(height: 16),
+         _note(),
++        if (toolbarEnabled)
++          toolbarCaseAttachments(account: widget.account,
++              peer: widget.record['device_id'] ?? '', caseId: widget.record['id'],
++              ticket: widget.record['help_id'], origin: widget.record['help_origin']),
+         if (facts.isNotEmpty)
+           ExpansionTile(
+               tilePadding: EdgeInsets.zero,
+diff --git a/flutter/lib/steaddesk/session_surface.dart b/flutter/lib/steaddesk/session_surface.dart
+index 6a2d669..9697f5f 100644
+--- a/flutter/lib/steaddesk/session_surface.dart
++++ b/flutter/lib/steaddesk/session_surface.dart
+@@ -14,6 +14,8 @@ class SessionSurface extends StatefulWidget {
+   final FFI ffi;
+   final ToolbarState state;
+   final Widget canvas;
++  final ToolbarFrame? toolbarFrame;
++  final bool Function()? toolbarActive, screenshotAllowed;
+   final Widget reconnectOverlay;
+   final bool ready;
+   final ValueChanged<bool> onLocalInput;
+@@ -24,6 +26,9 @@ class SessionSurface extends StatefulWidget {
+       required this.ffi,
+       required this.state,
+       required this.canvas,
++      this.toolbarFrame,
++      this.toolbarActive,
++      this.screenshotAllowed,
+       required this.reconnectOverlay,
+       required this.ready,
+       required this.onLocalInput,
+@@ -56,7 +61,7 @@ class _SessionSurfaceState extends State<SessionSurface> {
+     final locked = model.reconnectInputLocked;
+     final recovering = model.reconnectActive || model.reconnectExhausted;
+     final android = widget.ready && model.isPeerAndroid && !locked;
+-    Widget layout(Widget? history, Widget? drawer) => Obx(() {
++    Widget layout(Widget? history, Widget? drawer, Widget? toolbar, Widget? actions) => Obx(() {
+       final grabbed = ffi.inputModel.relativeMouseMode.value;
+       return ColoredBox(
+           color: _surface,
+@@ -76,14 +81,14 @@ class _SessionSurfaceState extends State<SessionSurface> {
+                             shape: MaterialStatePropertyAll(
+                                 RoundedRectangleBorder(
+                                     borderRadius: BorderRadius.circular(6))))),
+-                    child: _SessionHeader(session: widget))),
++                    child: _SessionHeader(session: widget, toolbar: toolbar))),
+             Expanded(
+                 child: Row(children: [
+               if (widget.ready || recovering || history != null)
+                 IgnorePointer(
+                     ignoring: grabbed,
+                     child: _DevicePanel(
+-                        ffi: ffi, mode: panel, change: changePanel, history: history)),
++                        ffi: ffi, mode: panel, change: changePanel, history: history, actions: actions)),
+               Expanded(child: LayoutBuilder(builder: (context, bounds) {
+                 final barHeight =
+                     android ? math.min(36.0, bounds.maxHeight / 3) : 0.0;
+@@ -129,18 +134,32 @@ class _SessionSurfaceState extends State<SessionSurface> {
+             ]))
+           ]));
+     });
+-    if (!casesEnabled || !isWindows) return layout(null, null);
++    Widget withToolbar(Widget? history, Widget? drawer) {
++      final frame = widget.toolbarFrame;
++      if (frame == null || !widget.ready || locked || recovering) {
++        return layout(history, drawer, null, null);
++      }
++      final connection = bind.sessionGetConnSessionId(sessionId: ffi.sessionId);
++      if (connection.isEmpty || connection == '0') return layout(history, drawer, null, null);
++      return sessionToolbar(key: ValueKey((widget.id, ffi.sessionId, connection)),
++          peer: widget.id, session: ffi.sessionId.toString(), connection: connection,
++          cases: casesEnabled && isWindows, platform: model.pi.platform,
++          active: widget.toolbarActive!, screenshotAllowed: widget.screenshotAllowed!,
++          frame: frame, builder: (toolbar, actions) => layout(history, drawer, toolbar, actions));
++    }
++    if (!casesEnabled || !isWindows) return withToolbar(null, null);
+     return CaseHistoryHost(
+         connection: widget.ready || model.recovery != null
+             ? bind.sessionGetConnSessionId(sessionId: ffi.sessionId)
+             : '',
+-        onLocalInput: widget.onLocalInput, builder: layout);
++        onLocalInput: widget.onLocalInput, builder: withToolbar);
+   }
+ }
+ 
+ class _SessionHeader extends StatelessWidget {
+   final SessionSurface session;
+-  const _SessionHeader({required this.session});
++  final Widget? toolbar;
++  const _SessionHeader({required this.session, this.toolbar});
+ 
+   @override
+   Widget build(BuildContext context) {
+@@ -286,6 +305,7 @@ class _SessionHeader extends StatelessWidget {
+                                         padding: MaterialStatePropertyAll(
+                                             EdgeInsets.zero)),
+                                     children: [
++                                      if (toolbar != null) toolbar!,
+                                       primary(SessionAction.transfer,
+                                           'Transfer file'),
+                                       _ChatMenu(
+@@ -518,9 +538,10 @@ class _DevicePanel extends StatelessWidget {
+   final FFI ffi;
+   final _PanelMode mode;
+   final Widget? history;
++  final Widget? actions;
+   final ValueChanged<_PanelMode> change;
+   const _DevicePanel(
+-      {required this.ffi, required this.mode, required this.change, this.history});
++      {required this.ffi, required this.mode, required this.change, this.history, this.actions});
+ 
+   Future<void> menu(BuildContext context, Offset point) async {
+     final box = Overlay.of(context).context.findRenderObject() as RenderBox;
+@@ -693,6 +714,7 @@ class _DevicePanel extends StatelessWidget {
+                                         field('SteadDesk version', pi.version),
+                                       if (opsHealthEnabled)
+                                         OpsHealthHost(HealthSurface.sidebar, device: ffi.id),
++                                      if (actions != null) actions!,
+                                       if (history != null) history!,
+                                       const SizedBox(height: 10),
+                                     ]))),
+diff --git a/flutter/lib/steaddesk/support_help_queue.dart b/flutter/lib/steaddesk/support_help_queue.dart
+index 45a6b32..7678b4d 100644
+--- a/flutter/lib/steaddesk/support_help_queue.dart
++++ b/flutter/lib/steaddesk/support_help_queue.dart
+@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
+ import 'package:uuid/uuid.dart';
+ import 'cases/case_dialog.dart' show caseCategoryLabels, caseResultLabels;
+ import 'support_help.dart';
++import 'toolbar_api.dart';
+ 
+ class SupportHelpQueue extends StatefulWidget {
+   final SupportHelpApi api;
+@@ -170,7 +171,14 @@ class _SupportHelpQueueState extends State<SupportHelpQueue> {
+         ];
+         return ListTile(
+             title: Text('$store · ${helpReasons[row['category']] ?? '其他'}'),
+-            subtitle: Text(caption.join(' · ')),
++            subtitle: toolbarEnabled && verified && claimed
++                ? Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
++                    Text(caption.join(' · ')),
++                    toolbarCaseAttachments(account: widget.api.account,
++                        peer: row['device_id'] ?? '', caseId: '', ticket: row['id'],
++                        origin: widget.api.base.toString()),
++                  ])
++                : Text(caption.join(' · ')),
+             trailing: TextButton(
+                 onPressed:
+                     busy == null && detail != null ? () => _act(row) : null,
+diff --git a/flutter/lib/steaddesk/toolbar/actions.dart b/flutter/lib/steaddesk/toolbar/actions.dart
+new file mode 100644
+index 0000000..99206d3
+--- /dev/null
++++ b/flutter/lib/steaddesk/toolbar/actions.dart
+@@ -0,0 +1,69 @@
++import 'dart:convert';
++import 'dart:math' as math;
++import 'dart:typed_data';
++import 'package:crypto/crypto.dart';
++import 'package:uuid/uuid.dart';
++
++typedef ToolbarJson = Map<String, dynamic>;
++typedef ToolbarRequest = Future<ToolbarJson>
++    Function(String method, String path, [ToolbarJson? body]);
++
++enum ToolbarAction {
++  quick('quick_check', '快速检查'),
++  logs('collect_logs', '收集日志'),
++  screenshot('screenshot', '截图附单');
++
++  const ToolbarAction(this.wire, this.label);
++  final String wire, label;
++}
++
++String toolbarSessionRoute(
++    {required String peer,
++    required String session,
++    required String connection,
++    required bool cases,
++    required String? caseId}) {
++  if (!RegExp(r'^[0-9]{9,10}$').hasMatch(peer)) {
++    throw const FormatException('设备编号无效。');
++  }
++  if (cases && caseId == null) throw const FormatException('正在等待当前结案记录。');
++  final id = caseId ??
++      const Uuid().v5(
++          Uuid.NAMESPACE_URL, 'steaddesk/session/$peer/$session/$connection');
++  if (!Uuid.isValidUUID(fromString: id)) throw const FormatException('会话编号无效。');
++  return 'toolbar/$peer/$id';
++}
++
++const chunkSize = 32768;
++Future<void> submitToolbarAction(ToolbarRequest request, String route,
++    ToolbarAction action, bool Function() current,
++    {String? ticket, Uint8List? png}) async {
++  void check() {
++    if (!current()) throw const FormatException('会话或登录状态已变化。');
++  }
++
++  check();
++  final body = <String, dynamic>{
++    'action': action.wire,
++    if (ticket != null) 'ticket_id': ticket,
++  };
++  if (action == ToolbarAction.screenshot) {
++    if (png == null || png.isEmpty || png.length > 512 * 1024) {
++      throw const FormatException('截图超过大小限制或画面不可用。');
++    }
++    body['size'] = png.length;
++    body['sha256'] = sha256.convert(png).toString();
++  }
++  final row = await request('POST', route, body);
++  if (action != ToolbarAction.screenshot) return;
++  final id = row['id'];
++  if (id is! String || !RegExp(r'^[a-zA-Z0-9_-]{1,100}$').hasMatch(id)) {
++    throw const FormatException('无效的附件编号。');
++  }
++  for (int start = 0; start < png!.length; start += chunkSize) {
++    check();
++    final end = math.min(start + chunkSize, png.length);
++    await request('PUT', '$route/$id/chunks/${start ~/ chunkSize}',
++        {'data': base64Encode(Uint8List.sublistView(png, start, end))});
++  }
++}
+diff --git a/flutter/lib/steaddesk/toolbar/archive.dart b/flutter/lib/steaddesk/toolbar/archive.dart
+new file mode 100644
+index 0000000..ac84404
+--- /dev/null
++++ b/flutter/lib/steaddesk/toolbar/archive.dart
+@@ -0,0 +1,163 @@
++part of 'host.dart';
++
++bool _validActionId(dynamic id) =>
++    id is String && RegExp(r'^t_[0-9A-HJKMNP-TV-Z]{26}$').hasMatch(id);
++
++String _localTime(dynamic stamp) => stamp is int
++    ? DateTime.fromMillisecondsSinceEpoch(stamp * 1000)
++        .toLocal()
++        .toString()
++        .split('.')
++        .first
++    : '';
++
++Future<T?> _guardedDialog<T>(BuildContext context, bool Function() current,
++    Widget Function(BuildContext) builder) async {
++  if (!current()) return null;
++  Route<dynamic>? route;
++  final timer = Timer.periodic(const Duration(milliseconds: 500), (_) {
++    final shown = route;
++    if (!current() && shown != null && shown.isActive) {
++      shown.navigator?.removeRoute(shown);
++    }
++  });
++  try {
++    return await showDialog<T>(
++        context: context,
++        builder: (ctx) {
++          route = ModalRoute.of(ctx);
++          return current() ? builder(ctx) : const SizedBox.shrink();
++        });
++  } finally {
++    timer.cancel();
++  }
++}
++
++Future<void> _previewAttachment(
++    BuildContext context, ToolbarJson result, bool Function() current) async {
++  Widget content;
++  MemoryImage? image;
++  if (result['action'] == 'screenshot') {
++    final bytes = base64Decode(result['data'] as String);
++    if (bytes.length > toolbarPngLimit) {
++      throw const FormatException('附件超过大小限制。');
++    }
++    image = MemoryImage(bytes);
++    content = Image(image: image, fit: BoxFit.contain);
++  } else if (result['action'] == 'collect_logs') {
++    final rows = List<ToolbarJson>.from(result['data'] as List);
++    content = ListView.builder(
++        itemCount: rows.length,
++        itemBuilder: (_, i) =>
++            Text("${rows[i]['source']} · ${rows[i]['event']}"));
++  } else {
++    throw const FormatException('无效的附件类型。');
++  }
++  try {
++    await _guardedDialog<void>(
++        context,
++        current,
++        (ctx) => AlertDialog(
++                title: const Text('工单附件'),
++                content: SizedBox(width: 640, height: 420, child: content),
++                actions: [
++                  TextButton(
++                      onPressed: () => Navigator.pop(ctx),
++                      child: const Text('关闭'))
++                ]));
++  } finally {
++    await image?.evict();
++  }
++}
++
++Widget toolbarCaseAttachments(
++        {required String account,
++        required String peer,
++        required String caseId,
++        String? ticket,
++        String? origin}) =>
++    Builder(
++        builder: (ctx) => TextButton.icon(
++            icon: const Icon(Icons.attachment, size: 16),
++            label: const Text('会话附件'),
++            onPressed: () =>
++                _readCase(ctx, account, peer, caseId, ticket, origin)));
++
++Future<void> _readCase(BuildContext ctx, String account, String peer,
++    String caseId, String? ticket, String? origin) async {
++  final owner = _login();
++  bool current() =>
++      ctx.mounted &&
++      owner != null &&
++      owner.name == account &&
++      owner == _login();
++  if (!current()) return;
++  OpsHealthHttp? http;
++  try {
++    final base = opsEndpoint(Uri.parse(await bind.mainGetApiServer()));
++    if (!current() ||
++        origin != null && opsEndpoint(Uri.parse(origin)) != base) {
++      return;
++    }
++    String listPath, attachmentPath;
++    if (ticket != null) {
++      if (!RegExp(r'^[hu]_[a-f0-9]{32}$').hasMatch(ticket)) return;
++      listPath = 'help/requests/$ticket';
++      attachmentPath = '$listPath/toolbar';
++    } else {
++      if (!RegExp(r'^[0-9]{9,10}$').hasMatch(peer) ||
++          !Uuid.isValidUUID(fromString: caseId)) return;
++      listPath = 'toolbar/$peer/$caseId';
++      attachmentPath = listPath;
++    }
++    http = OpsHealthHttp(base, owner!.token);
++    final detail = await http.request('GET', listPath);
++    if (!current()) return;
++    final rows = List<ToolbarJson>.from(
++        detail[ticket == null ? 'actions' : 'toolbar_actions'] as List? ?? []);
++    final attachments = rows
++        .where((r) =>
++            r['state'] == 'completed' &&
++            {'screenshot', 'collect_logs'}.contains(r['action']) &&
++            _validActionId(r['id']))
++        .toList();
++    final selected = await _guardedDialog<ToolbarJson>(
++        ctx,
++        current,
++        (dialog) => AlertDialog(
++                title: const Text('会话附件'),
++                content: SizedBox(
++                    width: 480,
++                    height: 280,
++                    child: attachments.isEmpty
++                        ? const Text('暂无可查看的附件。')
++                        : ListView(children: [
++                            for (final r in attachments)
++                              ListTile(
++                                  title: Text(_actionLabel(r['action'])),
++                                  subtitle: Text(_localTime(r['created_at'])),
++                                  onTap: () => Navigator.pop(dialog, r))
++                          ])),
++                actions: [
++                  TextButton(
++                      onPressed: () => Navigator.pop(dialog),
++                      child: const Text('关闭'))
++                ]));
++    if (selected == null ||
++        !current() ||
++        opsEndpoint(Uri.parse(await bind.mainGetApiServer())) != base ||
++        !current()) return;
++    final result = await http.request(
++        'GET', "$attachmentPath/${selected['id']}/attachment");
++    if (current() && result['action'] == selected['action']) {
++      await _previewAttachment(ctx, result, current);
++    }
++  } catch (e) {
++    if (current()) {
++      ScaffoldMessenger.maybeOf(ctx)?.showSnackBar(SnackBar(
++          content: Text(e is HealthFailure ? e.toString() : '暂时无法读取附件。')));
++    }
++  } finally {
++    http?.close();
++  }
++}
+diff --git a/flutter/lib/steaddesk/toolbar/frame.dart b/flutter/lib/steaddesk/toolbar/frame.dart
+new file mode 100644
+index 0000000..b5bbf9a
+--- /dev/null
++++ b/flutter/lib/steaddesk/toolbar/frame.dart
+@@ -0,0 +1,125 @@
++import 'dart:math' as math;
++import 'dart:typed_data';
++import 'dart:ui' as ui;
++
++import 'package:flutter/rendering.dart';
++import 'package:flutter/widgets.dart';
++
++const toolbarPngLimit = 512 * 1024;
++
++class _PixelLayer extends RenderRepaintBoundary {
++  Future<ui.Image?> snapshot(Rect bounds, double scale) async {
++    final raster = layer;
++    return raster is OffsetLayer
++        ? raster.toImage(bounds, pixelRatio: scale)
++        : null;
++  }
++}
++
++class _Pixels extends SingleChildRenderObjectWidget {
++  const _Pixels({required super.key, required super.child});
++  @override
++  RenderRepaintBoundary createRenderObject(BuildContext context) =>
++      _PixelLayer();
++}
++
++class ToolbarFrame {
++  final viewport = GlobalKey();
++  final pixels = GlobalKey();
++
++  // The boundary contains only the remote image painter or its texture layers.
++  // Crop against the visible viewport when scrollbars expose only part of it.
++  Widget view(Widget child) => SizedBox(key: viewport, child: child);
++  Widget paint(Widget child) => _Pixels(key: pixels, child: child);
++
++  Future<ui.Image?> readVisible() async {
++    final view = viewport.currentContext?.findRenderObject();
++    final paint = pixels.currentContext?.findRenderObject();
++    if (view is! RenderBox ||
++        paint is! _PixelLayer ||
++        !view.attached ||
++        !paint.attached ||
++        !view.hasSize ||
++        !paint.hasSize) {
++      return null;
++    }
++    final bounds = (Offset.zero & paint.size).intersect(Rect.fromPoints(
++        paint.globalToLocal(view.localToGlobal(Offset.zero)),
++        paint.globalToLocal(
++            view.localToGlobal(view.size.bottomRight(Offset.zero)))));
++    if (bounds.isEmpty || !bounds.isFinite) return null;
++    final scale = math.min(
++        1.0,
++        math.min(1599 / bounds.longestSide,
++            math.sqrt(1597000 / (bounds.width * bounds.height))));
++    return paint.snapshot(bounds, scale);
++  }
++
++  Future<Uint8List> capture(bool Function() current) async {
++    final deadline = Stopwatch()..start();
++    while (current() && deadline.elapsed < const Duration(seconds: 3)) {
++      await WidgetsBinding.instance.endOfFrame
++          .timeout(const Duration(seconds: 2));
++      if (!current()) break;
++      final image = await readVisible();
++      if (image != null) {
++        try {
++          final png = await toolbarPng(image);
++          if (png != null && current()) return png;
++        } finally {
++          image.dispose();
++        }
++      }
++      await Future<void>.delayed(const Duration(milliseconds: 80));
++    }
++    throw const FormatException('当前远程画面尚不可用。');
++  }
++}
++
++Future<Uint8List?> toolbarPng(ui.Image source) async {
++  final rgba = await source.toByteData(format: ui.ImageByteFormat.rawRgba);
++  if (rgba == null) return null;
++  // Missing external textures can rasterize transparent or solid black.
++  int? first;
++  bool hasDetail = false;
++  for (int i = 0; i < rgba.lengthInBytes; i += 4) {
++    if (rgba.getUint8(i + 3) != 255) continue;
++    final pixel = rgba.getUint32(i);
++    first ??= pixel;
++    if (pixel != first) {
++      hasDetail = true;
++      break;
++    }
++  }
++  if (!hasDetail) return null;
++  ui.Image image = source;
++  try {
++    while (true) {
++      final bytes = await image.toByteData(format: ui.ImageByteFormat.png);
++      if (bytes == null) return null;
++      if (bytes.lengthInBytes <= toolbarPngLimit) {
++        return bytes.buffer
++            .asUint8List(bytes.offsetInBytes, bytes.lengthInBytes);
++      }
++      final w = (image.width * .7).floor().clamp(1, image.width);
++      final h = (image.height * .7).floor().clamp(1, image.height);
++      final recorder = ui.PictureRecorder();
++      final canvas = ui.Canvas(recorder);
++      canvas.drawImageRect(
++          source,
++          Offset.zero & Size(source.width.toDouble(), source.height.toDouble()),
++          Offset.zero & Size(w.toDouble(), h.toDouble()),
++          ui.Paint()..filterQuality = ui.FilterQuality.medium);
++      final picture = recorder.endRecording();
++      try {
++        final resized = await picture.toImage(w, h);
++        if (!identical(image, source)) image.dispose();
++        image = resized;
++      } finally {
++        picture.dispose();
++      }
++    }
++  } finally {
++    if (!identical(image, source)) image.dispose();
++  }
++}
+diff --git a/flutter/lib/steaddesk/toolbar/host.dart b/flutter/lib/steaddesk/toolbar/host.dart
+new file mode 100644
+index 0000000..bb56e41
+--- /dev/null
++++ b/flutter/lib/steaddesk/toolbar/host.dart
+@@ -0,0 +1,299 @@
++import 'dart:async';
++import 'dart:convert';
++
++import 'package:flutter/material.dart';
++import 'package:uuid/uuid.dart';
++import '../../models/platform_model.dart' show bind;
++import '../case_session_api.dart';
++import '../ops_groups.dart' show opsEndpoint;
++import '../ops_health.dart' show HealthFailure, OpsHealthHttp;
++import 'actions.dart';
++import 'frame.dart';
++export 'frame.dart' show ToolbarFrame;
++part 'archive.dart';
++
++const toolbarEnabled = true;
++typedef _Login = ({String name, String token});
++_Login? _login() {
++  try {
++    final token = bind.mainGetLocalOption(key: 'access_token');
++    final name = jsonDecode(bind.mainGetLocalOption(key: 'user_info'))['name'];
++    if (name is String && name.isNotEmpty && token.isNotEmpty) {
++      return (name: name, token: token);
++    }
++  } catch (_) {}
++  return null;
++}
++
++Widget sessionToolbar(
++        {required Key key,
++        required String peer,
++        required String session,
++        required String connection,
++        required bool cases,
++        required String platform,
++        required bool Function() active,
++        required bool Function() screenshotAllowed,
++        required ToolbarFrame frame,
++        required Widget Function(Widget?, Widget?) builder}) =>
++    _Toolbar(
++        key: key,
++        peer: peer,
++        session: session,
++        connection: connection,
++        cases: cases,
++        platform: platform,
++        active: active,
++        screenshotAllowed: screenshotAllowed,
++        frame: frame,
++        builder: builder);
++
++class _Toolbar extends StatefulWidget {
++  const _Toolbar(
++      {required super.key,
++      required this.peer,
++      required this.session,
++      required this.connection,
++      required this.cases,
++      required this.platform,
++      required this.active,
++      required this.screenshotAllowed,
++      required this.frame,
++      required this.builder});
++  final String peer, session, connection, platform;
++  final bool cases;
++  final bool Function() active, screenshotAllowed;
++  final ToolbarFrame frame;
++  final Widget Function(Widget?, Widget?) builder;
++  @override
++  State<_Toolbar> createState() => _ToolbarState();
++}
++
++class _ToolbarState extends State<_Toolbar> {
++  late final _Login? owner;
++  Uri? origin;
++  OpsHealthHttp? http;
++  String? route, ticket, error;
++  bool authorized = false, reading = false, busy = false;
++  List<ToolbarJson> history = [];
++  late final Timer timer;
++  bool get current =>
++      mounted && owner != null && owner == _login() && widget.active();
++  @override
++  void initState() {
++    super.initState();
++    owner = _login();
++    scheduleMicrotask(refresh);
++    timer = Timer.periodic(const Duration(seconds: 3), (_) => refresh());
++  }
++
++  @override
++  void dispose() {
++    timer.cancel();
++    http?.close();
++    super.dispose();
++  }
++
++  Future<void> open({bool rebind = false}) async {
++    final target = opsEndpoint(Uri.parse(await bind.mainGetApiServer()));
++    if (!current || origin != null && origin != target) {
++      throw const FormatException('会话或服务地址已变化。');
++    }
++    origin = target;
++    if (route != null && !rebind) return;
++    final record = widget.cases
++        ? await CaseSession.historyRequest(widget.connection, 'bind')
++        : null;
++    if (!current) throw const FormatException('会话已变化。');
++    if (record != null &&
++        (record['device_id'] != widget.peer ||
++            record['agent'] != owner!.name ||
++            record['help_origin'] != null &&
++                opsEndpoint(Uri.parse(record['help_origin'])) != target)) {
++      throw const FormatException('工单与当前会话不匹配。');
++    }
++    final path = toolbarSessionRoute(
++        peer: widget.peer,
++        session: widget.session,
++        connection: widget.connection,
++        cases: widget.cases,
++        caseId: record?['id'] as String?);
++    if (route != null && route != path) throw const FormatException('会话编号已变化。');
++    ticket = record?['help_id'] as String?;
++    route = path;
++    http ??= OpsHealthHttp(target, owner!.token);
++  }
++
++  Future<ToolbarJson> request(String method, String path,
++      [ToolbarJson? body]) async {
++    final target = opsEndpoint(Uri.parse(await bind.mainGetApiServer()));
++    if (!current || target != origin) {
++      throw const FormatException('会话或登录状态已变化。');
++    }
++    return http!.request(method, path, body);
++  }
++
++  String message(Object e) => e is FormatException
++      ? e.message
++      : e is HealthFailure
++          ? e.toString()
++          : '操作未确认。请刷新会话历史。';
++
++  Future<void> refresh() async {
++    if (!mounted || reading || busy) return;
++    if (!current) {
++      if (authorized || history.isNotEmpty) {
++        setState(() {
++          authorized = false;
++          history = [];
++          error = null;
++        });
++      }
++      return;
++    }
++    reading = true;
++    try {
++      await open();
++      final result = await request('GET', route!);
++      if (current && !busy) {
++        final actions = List<ToolbarJson>.from(result['actions'] as List);
++        setState(() {
++          if (!authorized) error = null;
++          authorized = true;
++          history = actions;
++        });
++      }
++    } catch (e) {
++      if (mounted && !busy) {
++        setState(() {
++          authorized = false;
++          history = [];
++          error = message(e);
++        });
++      }
++    } finally {
++      reading = false;
++    }
++  }
++
++  Future<void> run(ToolbarAction action) async {
++    if (!authorized || !current || busy) return;
++    final allowed = widget.screenshotAllowed;
++    bool valid() =>
++        current && (action != ToolbarAction.screenshot || allowed());
++    if (!valid()) return;
++    setState(() {
++      busy = true;
++      error = null;
++    });
++    try {
++      await open(rebind: widget.cases);
++      if (!valid()) return;
++      final png = action == ToolbarAction.screenshot
++          ? await widget.frame.capture(valid)
++          : null;
++      await submitToolbarAction(request, route!, action, valid,
++          ticket: ticket, png: png);
++    } catch (e) {
++      if (mounted) setState(() => error = message(e));
++    } finally {
++      if (mounted) {
++        setState(() => busy = false);
++        await refresh();
++      }
++    }
++  }
++
++  Future<void> preview(ToolbarJson row) async {
++    if (!current || !authorized || busy || row['state'] != 'completed') return;
++    final id = row['id'];
++    if (!_validActionId(id)) return;
++    setState(() {
++      busy = true;
++      error = null;
++    });
++    try {
++      final result = await request('GET', '$route/$id/attachment');
++      if (!current || result['action'] != row['action']) return;
++      await _previewAttachment(context, result, () => current);
++    } catch (e) {
++      if (mounted) setState(() => error = message(e));
++    } finally {
++      if (mounted) setState(() => busy = false);
++    }
++  }
++
++  @override
++  Widget build(BuildContext context) {
++    final ready = authorized && current && !busy;
++    final menu = PopupMenuButton<ToolbarAction>(
++        enabled: ready,
++        tooltip: '会话快捷操作',
++        onSelected: run,
++        itemBuilder: (_) => [
++              for (final a in ToolbarAction.values)
++                PopupMenuItem(
++                    value: a,
++                    enabled: (a != ToolbarAction.screenshot ||
++                            widget.screenshotAllowed()) &&
++                        (a != ToolbarAction.logs ||
++                            {'Windows', 'Android'}.contains(widget.platform)),
++                    child: Text(a.label))
++            ],
++        child:
++            const Padding(padding: EdgeInsets.all(8), child: Text('快捷操作 ▾')));
++    final sidebar = Padding(
++        padding: const EdgeInsets.symmetric(horizontal: 10),
++        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
++          Row(children: [
++            const Expanded(child: Text('会话操作历史')),
++            IconButton(
++                onPressed: !busy && current ? refresh : null,
++                tooltip: '刷新',
++                icon: const Icon(Icons.refresh, size: 16))
++          ]),
++          if (busy) const LinearProgressIndicator(),
++          if (error != null && owner == _login()) Text(error!),
++          if (!current)
++            const Text('请在已登录的当前会话中查看。')
++          else if (authorized && history.isEmpty)
++            const Text('暂无操作'),
++          if (current)
++            for (final row in history) ...[
++              Text(
++                  '${_actionLabel(row['action'])} · ${_states[row['state']] ?? row['state']}'),
++              Text(
++                  "${row['case_kind'] == 'pending' ? '待补结案' : '关联工单'} · ${row['case_id']}"),
++              Text(_localTime(row['created_at'])),
++              for (final r
++                  in (row['results'] as List? ?? const []).whereType<Map>())
++                Text(
++                    "${r['name']} · ${r['outcome']}${r['latency_ms'] == null ? '' : ' · ${r['latency_ms']} ms'}"),
++              if (row['state'] == 'completed' &&
++                  {'screenshot', 'collect_logs'}.contains(row['action']))
++                TextButton(
++                    onPressed: ready ? () => preview(row) : null,
++                    child: const Text('查看附件')),
++              const Divider(),
++            ],
++        ]));
++    return widget.builder(menu, sidebar);
++  }
++}
++
++String _actionLabel(dynamic value) {
++  for (final a in ToolbarAction.values) {
++    if (a.wire == value) return a.label;
++  }
++  return '操作';
++}
++
++const _states = {
++  'queued': '已排队',
++  'running': '进行中',
++  'uploading': '上传中',
++  'completed': '已完成',
++  'failed': '失败',
++  'timeout': '超时',
++  'cancelled': '已取消'
++};
+diff --git a/flutter/lib/steaddesk/toolbar/off.dart b/flutter/lib/steaddesk/toolbar/off.dart
+new file mode 100644
+index 0000000..253b70b
+--- /dev/null
++++ b/flutter/lib/steaddesk/toolbar/off.dart
+@@ -0,0 +1,32 @@
++import 'dart:typed_data';
++import 'package:flutter/widgets.dart';
++
++const toolbarEnabled = false;
++
++class ToolbarFrame {
++  Widget view(Widget child) => child;
++  Widget paint(Widget child) => child;
++  Future<Uint8List> capture(bool Function() current) =>
++      Future.error(StateError('Toolbar disabled'));
++}
++
++Widget sessionToolbar(
++        {required Key key,
++        required String peer,
++        required String session,
++        required String connection,
++        required bool cases,
++        required String platform,
++        required bool Function() active,
++        required bool Function() screenshotAllowed,
++        required ToolbarFrame frame,
++        required Widget Function(Widget?, Widget?) builder}) =>
++    builder(null, null);
++
++Widget toolbarCaseAttachments(
++        {required String account,
++        required String peer,
++        required String caseId,
++        String? ticket,
++        String? origin}) =>
++    const SizedBox.shrink();
+diff --git a/flutter/lib/steaddesk/toolbar_api.dart b/flutter/lib/steaddesk/toolbar_api.dart
+new file mode 100644
+index 0000000..3872b24
+--- /dev/null
++++ b/flutter/lib/steaddesk/toolbar_api.dart
+@@ -0,0 +1 @@
++export 'toolbar/off.dart';
+diff --git a/flutter/test/steaddesk/session_toolbar_test.dart b/flutter/test/steaddesk/session_toolbar_test.dart
+new file mode 100644
+index 0000000..5bba570
+--- /dev/null
++++ b/flutter/test/steaddesk/session_toolbar_test.dart
+@@ -0,0 +1,166 @@
++import 'dart:async';
++import 'dart:convert';
++import 'dart:math';
++import 'dart:typed_data';
++import 'dart:ui' as ui;
++import 'package:crypto/crypto.dart';
++import 'package:flutter/widgets.dart';
++import 'package:flutter_test/flutter_test.dart';
++import 'package:flutter_hbb/steaddesk/toolbar/actions.dart';
++import 'package:flutter_hbb/steaddesk/toolbar/frame.dart';
++
++void main() {
++  test('a delayed H-1 binding never gets replaced by a standalone case', () {
++    String route(bool cases, String connection, [String? id]) =>
++        toolbarSessionRoute(
++            peer: '123456789',
++            session: 'e6295b7a-c04d-436b-9cfa-0c607896fd81',
++            connection: connection,
++            cases: cases,
++            caseId: id);
++    expect(() => route(true, '1'), throwsFormatException);
++    const id = 'adfc9434-2ae5-4fe7-aa66-5f29ad781285';
++    expect(route(true, '1', id), 'toolbar/123456789/$id');
++    expect(route(false, '1'), route(false, '1'));
++    expect(route(false, '1'), isNot(route(false, '2')));
++  });
++
++  testWidgets('high entropy PNG is reduced to the attachment budget',
++      (tester) async {
++    await tester.runAsync(() async {
++      const size = 640;
++      final pixels = Uint8List(size * size * 4);
++      final rng = Random(17);
++      for (int i = 0; i < pixels.length; i += 4) {
++        pixels[i] = rng.nextInt(256);
++        pixels[i + 1] = rng.nextInt(256);
++        pixels[i + 2] = rng.nextInt(256);
++        pixels[i + 3] = 255;
++      }
++      final decoded = Completer<ui.Image>();
++      ui.decodeImageFromPixels(
++          pixels, size, size, ui.PixelFormat.rgba8888, decoded.complete);
++      final image = await decoded.future;
++      try {
++        final png = (await toolbarPng(image))!;
++        expect(png.length, lessThanOrEqualTo(toolbarPngLimit));
++        final header = ByteData.sublistView(png);
++        expect(header.getUint32(16), lessThan(size));
++        expect(header.getUint32(20), header.getUint32(16));
++      } finally {
++        image.dispose();
++      }
++    });
++  });
++  test('a stale session cannot upload any further screenshot chunks', () async {
++    final png = Uint8List(chunkSize + 1);
++    final calls = <String>[];
++    var active = true;
++    Future<ToolbarJson> send(String method, String path,
++        [ToolbarJson? body]) async {
++      calls.add('$method $path');
++      if (method == 'POST') {
++        expect(body, {
++          'action': 'screenshot',
++          'ticket_id': 'help-1',
++          'size': png.length,
++          'sha256': sha256.convert(png).toString()
++        });
++        return {'id': 't_1'};
++      }
++      expect(base64Decode(body!['data']).length, chunkSize);
++      active = false;
++      return {};
++    }
++
++    await expectLater(
++        submitToolbarAction(send, 'toolbar/device/session',
++            ToolbarAction.screenshot, () => active,
++            ticket: 'help-1', png: png),
++        throwsFormatException);
++    expect(calls, [
++      'POST toolbar/device/session',
++      'PUT toolbar/device/session/t_1/chunks/0'
++    ]);
++  });
++
++  test('only fixed quick check and own-log requests may omit an attachment',
++      () async {
++    final bodies = <ToolbarJson>[];
++    Future<ToolbarJson> send(String method, String path,
++        [ToolbarJson? body]) async {
++      expect(method, 'POST');
++      bodies.add(body!);
++      return {};
++    }
++
++    for (final action in [ToolbarAction.quick, ToolbarAction.logs]) {
++      await submitToolbarAction(
++          send, 'toolbar/device/session', action, () => true);
++    }
++    await expectLater(
++        submitToolbarAction(send, 'toolbar/device/session',
++            ToolbarAction.screenshot, () => true,
++            png: Uint8List(toolbarPngLimit + 1)),
++        throwsFormatException);
++    expect(bodies, [
++      {'action': 'quick_check'},
++      {'action': 'collect_logs'}
++    ]);
++  });
++
++  testWidgets(
++      'capture reads the scoped image beneath a separate operator overlay',
++      (tester) async {
++    final frame = ToolbarFrame();
++    const red = Color(0xffff0000),
++        blue = Color(0xff0000ff),
++        green = Color(0xff00ff00);
++    await tester.pumpWidget(Directionality(
++        textDirection: TextDirection.ltr,
++        child: Center(
++            child: SizedBox(
++                width: 80,
++                height: 40,
++                child: frame.view(Stack(fit: StackFit.expand, children: [
++                  frame.paint(const Row(children: [
++                    Expanded(child: ColoredBox(color: red)),
++                    Expanded(child: ColoredBox(color: blue))
++                  ], crossAxisAlignment: CrossAxisAlignment.stretch)),
++                  const ColoredBox(color: green),
++                ]))))));
++    await tester.runAsync(() async {
++      final image = (await frame.readVisible())!;
++      try {
++        final raw =
++            (await image.toByteData(format: ui.ImageByteFormat.rawRgba))!;
++        expect(image.width, 80);
++        expect(raw.getUint32(0), 0xff0000ff);
++        expect(raw.getUint32(79 * 4), 0x0000ffff);
++        final png = (await toolbarPng(image))!;
++        expect(png.take(8), [137, 80, 78, 71, 13, 10, 26, 10]);
++        expect(png.length, lessThanOrEqualTo(toolbarPngLimit));
++      } finally {
++        image.dispose();
++      }
++    });
++  });
++
++  testWidgets('unregistered external texture cannot produce an attachment',
++      (tester) async {
++    final frame = ToolbarFrame();
++    await tester.pumpWidget(Center(
++        child: SizedBox(
++            width: 48,
++            height: 24,
++            child: frame.view(frame.paint(const Texture(textureId: 456789))))));
++    await tester.runAsync(() async {
++      final image = (await frame.readVisible())!;
++      try {
++        expect(await toolbarPng(image), isNull);
++      } finally {
++        image.dispose();
++      }
++    });
++  });
++}

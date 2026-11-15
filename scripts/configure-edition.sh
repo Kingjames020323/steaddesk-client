@@ -38,6 +38,13 @@ for role in ("merchant", "support"):
     (lib / f"quick_{role}_api.dart").write_text(f"export 'quick/{selected}.dart';\n", encoding="utf-8")
 (tree / "src").mkdir(exist_ok=True)
 (tree / "src/steaddesk_qc2.rs").write_text(str(quick_enabled and merchant).lower() + "\n", encoding="utf-8")
+toolbar = os.environ.get("STEADDESK_TOOLBAR", "").strip().lower()
+if toolbar not in ("", "0", "1", "false", "true"):
+    raise ValueError("STEADDESK_TOOLBAR must be true, false, 1 or 0")
+toolbar_enabled = toolbar in ("true", "1")
+module = "host" if toolbar_enabled and not merchant else "off"
+(lib / "toolbar_api.dart").write_text(f"export 'toolbar/{module}.dart';\n", encoding="utf-8")
+(tree / "src/steaddesk_tb.rs").write_text(str(toolbar_enabled and merchant).lower() + "\n", encoding="utf-8")
 fleet_admin = os.environ.get("STEADDESK_FLEET_ADMIN", "").strip().lower()
 if fleet_admin not in ("", "0", "1", "false", "true"):
     raise ValueError("STEADDESK_FLEET_ADMIN must be true, false, 1 or 0")
