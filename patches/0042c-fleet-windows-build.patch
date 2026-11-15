@@ -16,10 +16,10 @@ index 7df00f3..6bcac78 100755
          features.append('hwcodec')
      if args.vram:
 diff --git a/build.rs b/build.rs
-index eebc20f..c6a1262 100644
+index eebc20f..4bc2c43 100644
 --- a/build.rs
 +++ b/build.rs
-@@ -119,9 +119,32 @@ fn main() {
+@@ -119,9 +119,35 @@ fn main() {
          Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
          _ => panic!("invalid SteadDesk fleet selector"),
      };
@@ -35,8 +35,11 @@ index eebc20f..c6a1262 100644
 +            assert!(std::env::var_os("CARGO_FEATURE_STEADDESK_FLEET_WINDOWS").is_some(),
 +                "Opt-in Windows merchant builds require --features steaddesk-fleet-windows");
 +            let dir = "src/platform/steaddesk_fleet";
-+            cc::Build::new()
-+                .cpp(true)
++            let mut compiler = cc::Build::new();
++            if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
++                compiler.flag("/EHsc");
++            }
++            compiler.cpp(true)
 +                .std("c++17")
 +                .define("UNICODE", None)
 +                .define("_UNICODE", None)
