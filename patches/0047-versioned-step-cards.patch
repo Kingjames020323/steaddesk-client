@@ -1,0 +1,1653 @@
+diff --git a/flutter/lib/steaddesk/help/merchant_help_client.dart b/flutter/lib/steaddesk/help/merchant_help_client.dart
+index d6cbef6..b530a78 100644
+--- a/flutter/lib/steaddesk/help/merchant_help_client.dart
++++ b/flutter/lib/steaddesk/help/merchant_help_client.dart
+@@ -54,8 +54,9 @@ Future<HelpJson> sendHelp(Uri origin, String method, String path,
+     }
+     final response = await request.close();
+     final bytes = BytesBuilder(copy: false);
+-    await for (final chunk in response) {
+-      if (bytes.length + chunk.length > 65536) {
++    final limit = method == 'GET' && path == 'me/kb-cards' ? 256 * 1024 : 65536;
++    await for (final chunk in response.timeout(const Duration(seconds: 8))) {
++      if (bytes.length + chunk.length > limit) {
+         throw HelpFailure(response.statusCode);
+       }
+       bytes.add(chunk);
+@@ -89,9 +90,11 @@ class MerchantHelpClient {
+   final HelpSign sign;
+   final HelpSend send;
+   final String merchantVersion;
++  final bool useKb;
++  bool? kbAvailable;
+   final int Function() now;
+   MerchantHelpClient(this.journal, this.scope, this.sign, this.merchantVersion,
+-      {this.send = sendHelp, int Function()? clock})
++      {this.send = sendHelp, this.useKb = false, int Function()? clock})
+       : now = clock ?? (() => DateTime.now().millisecondsSinceEpoch ~/ 1000);
+ 
+   HelpJson? record, view;
+@@ -148,6 +151,7 @@ class MerchantHelpClient {
+   Future<void> capabilities() async {
+     screenshots = false;
+     callbackAvailable = null;
++    kbAvailable = null;
+     final current = await owner();
+     try {
+       final data = await send(
+@@ -155,6 +159,7 @@ class MerchantHelpClient {
+       await owner();
+       screenshots = data['screenshots'] == true;
+       callbackAvailable = data['callback'] == true;
++      kbAvailable = data['kb'] == true;
+     } on HelpFailure catch (e) {
+       if (e.status == 404) callbackAvailable = false;
+     } catch (_) {/* Older or unreachable servers default to text only. */}
+@@ -314,13 +319,26 @@ class MerchantHelpClient {
+     }
+     if (record?['action'] != null) await sendAction();
+     if (view?['state'] == 'queued') {
+-      final list = (await call('GET', 'me/step-cards'))['cards'] as List;
++      List? offered;
++      if (useKb && kbAvailable != false) {
++        try {
++          offered = (await call('GET', 'me/kb-cards'))['cards'] as List;
++          kbAvailable = true;
++        } on HelpFailure catch (e) {
++          if (e.status != 404) rethrow;
++          kbAvailable = false;
++        }
++      }
++      final list =
++          offered ?? (await call('GET', 'me/step-cards'))['cards'] as List;
+       cards = list
+           .whereType<HelpJson>()
+           .where((c) =>
+               c['card_id'] is String &&
+               c['card_version'] is int &&
+-              c['steps'] is List)
++              (offered == null
++                  ? c['steps'] is List
++                  : c['locales'] is Map && c['offer_id'] is String))
+           .take(3)
+           .toList();
+     }
+@@ -398,6 +416,28 @@ class MerchantHelpClient {
+     }
+   }
+ 
++  Future<void> confirmCard(String ticket, HelpJson card, bool expanded) async {
++    final offer = card['offer_id'];
++    bool current() =>
++        useKb &&
++        kbAvailable == true &&
++        view?['state'] == 'queued' &&
++        view?['id'] == ticket &&
++        offer is String &&
++        cards.any((c) =>
++            c['offer_id'] == offer &&
++            c['card_id'] == card['card_id'] &&
++            c['card_version'] == card['card_version']);
++    if (!current()) throw HelpFailure(409);
++    final result =
++        await call('POST', expanded ? 'me/kb-used' : 'me/kb-shown', body: {
++      'card_id': card['card_id'],
++      'card_version': card['card_version'],
++      'offer_id': offer,
++    });
++    if (!current() || result['accepted'] != true) throw HelpFailure(409);
++  }
++
+   Future<void> act(String action, HelpJson body) async {
+     if (action == 'callback' && body.isNotEmpty) throw HelpFailure(400);
+     if (record!['action'] != null) {
+diff --git a/flutter/lib/steaddesk/help/merchant_help_host.dart b/flutter/lib/steaddesk/help/merchant_help_host.dart
+index 6693363..645b729 100644
+--- a/flutter/lib/steaddesk/help/merchant_help_host.dart
++++ b/flutter/lib/steaddesk/help/merchant_help_host.dart
+@@ -7,6 +7,7 @@ import 'package:path_provider/path_provider.dart';
+ import '../../common.dart' show translate;
+ import '../../models/native_model.dart' show PlatformFFI;
+ import '../../models/platform_model.dart' show bind;
++import '../kb_build.dart';
+ import '../merchant_build.dart' show merchantVersion;
+ import 'merchant_help_client.dart';
+ import 'merchant_help_image.dart';
+@@ -15,6 +16,12 @@ import 'merchant_help_widget.dart';
+ Widget merchantHelpEntry() => MerchantHelpEntry(
+     label: translate,
+     pick: pickHelpScreenshot,
++    language: () {
++      final saved = Platform.isWindows
++          ? bind.mainGetCommonSync(key: 'merchant-language')
++          : bind.mainGetLocalOption(key: 'lang');
++      return saved.isEmpty ? Platform.localeName : saved;
++    },
+     callbackProfile: () {
+       final raw = bind.mainGetLocalOption(key: 'user_info');
+       final profile = raw.isEmpty ? null : jsonDecode(raw);
+@@ -50,5 +57,5 @@ Widget merchantHelpEntry() => MerchantHelpEntry(
+             screenshotSha256: digest,
+             receiptSecret: secret);
+         return (secret: signed.receiptSecret, request: signed.request);
+-      }, merchantVersion);
++      }, merchantVersion, useKb: merchantKbEnabled);
+     });
+diff --git a/flutter/lib/steaddesk/help/merchant_help_widget.dart b/flutter/lib/steaddesk/help/merchant_help_widget.dart
+index 517e52d..05c90bd 100644
+--- a/flutter/lib/steaddesk/help/merchant_help_widget.dart
++++ b/flutter/lib/steaddesk/help/merchant_help_widget.dart
+@@ -4,6 +4,7 @@ import 'dart:typed_data';
+ 
+ import 'package:flutter/material.dart';
+ import '../callback_build.dart';
++import '../kb/card_tile.dart';
+ import 'merchant_callback.dart';
+ import 'merchant_help_client.dart';
+ 
+@@ -21,6 +22,7 @@ class MerchantHelpEntry extends StatefulWidget {
+   final String Function(String) label;
+   final Future<Uint8List?> Function() pick;
+   final bool callbacksEnabled;
++  final String Function()? language;
+   final HelpJson Function()? callbackProfile;
+   const MerchantHelpEntry(
+       {super.key,
+@@ -28,6 +30,7 @@ class MerchantHelpEntry extends StatefulWidget {
+       required this.label,
+       required this.pick,
+       this.callbackProfile,
++      this.language,
+       this.callbacksEnabled = merchantCallbacksEnabled});
+   @override
+   State<MerchantHelpEntry> createState() => _MerchantHelpEntryState();
+@@ -156,6 +159,11 @@ class _MerchantHelpEntryState extends State<MerchantHelpEntry> {
+           HelpWaiting(
+               view: v,
+               cards: c.cards,
++              language: widget.language?.call() ??
++                  WidgetsBinding.instance.platformDispatcher.locale
++                      .toLanguageTag(),
++              confirmCard: (card, expanded) =>
++                  c.confirmCard(v['id'], card, expanded),
+               label: t,
+               now: c.now(),
+               online: online,
+@@ -319,6 +327,8 @@ class HelpWaiting extends StatelessWidget {
+   final void Function(String, HelpJson) act;
+   final VoidCallback? again;
+   final Widget? callbackEntry;
++  final String language;
++  final Future<void> Function(HelpJson, bool)? confirmCard;
+   const HelpWaiting(
+       {super.key,
+       required this.view,
+@@ -329,6 +339,8 @@ class HelpWaiting extends StatelessWidget {
+       required this.label,
+       required this.act,
+       this.again,
++      this.language = 'en',
++      this.confirmCard,
+       this.callbackEntry});
+   @override
+   Widget build(BuildContext context) {
+@@ -371,21 +383,48 @@ class HelpWaiting extends StatelessWidget {
+               .replaceFirst('%s', '${eta[1]}')),
+         if (!online && view['queue_updated_at'] is int)
+           Text(format('Last updated %s', time(view['queue_updated_at']))),
++        if (cards.any((c) => c['locales'] is Map))
++          Text(t('Suggested steps'),
++              style: Theme.of(context).textTheme.titleMedium),
+         for (final card in cards.take(3))
+-          Card(
+-              child: Padding(
+-                  padding: const EdgeInsets.all(8),
+-                  child: Column(
+-                      crossAxisAlignment: CrossAxisAlignment.stretch,
+-                      children: [
+-                        for (final step
+-                            in (card['steps'] as List).whereType<String>())
+-                          Text(step),
+-                        button('This solved my problem', 'self-resolve', {
+-                          'card_id': card['card_id'],
+-                          'card_version': card['card_version']
+-                        }),
+-                      ]))),
++          if (card['locales'] is Map) ...[
++            if (card['locales'][cardLanguage(language)]
++                case {'title': final String title, 'steps': final List steps})
++              StepCardTile(
++                  key: ValueKey((
++                    view['id'],
++                    card['card_id'],
++                    card['card_version'],
++                    card['offer_id']
++                  )),
++                  title: title,
++                  steps: steps.whereType<String>().toList(),
++                  label: t,
++                  online: online,
++                  acknowledge: confirmCard == null
++                      ? null
++                      : (expanded) => confirmCard!(card, expanded),
++                  solve: busy || confirmCard == null
++                      ? null
++                      : () => act('self-resolve', {
++                            'card_id': card['card_id'],
++                            'card_version': card['card_version'],
++                          })),
++          ] else
++            Card(
++                child: Padding(
++                    padding: const EdgeInsets.all(8),
++                    child: Column(
++                        crossAxisAlignment: CrossAxisAlignment.stretch,
++                        children: [
++                          for (final step
++                              in (card['steps'] as List).whereType<String>())
++                            Text(step),
++                          button('This solved my problem', 'self-resolve', {
++                            'card_id': card['card_id'],
++                            'card_version': card['card_version']
++                          }),
++                        ]))),
+         callbackEntry ?? button('Request a callback', 'callback'),
+       ] else if (state == 'claimed') ...[
+         Text(format('Handled by %s', view['handler'] ?? '—'),
+diff --git a/flutter/lib/steaddesk/kb/admin_host.dart b/flutter/lib/steaddesk/kb/admin_host.dart
+new file mode 100644
+index 0000000..81e9acf
+--- /dev/null
++++ b/flutter/lib/steaddesk/kb/admin_host.dart
+@@ -0,0 +1,119 @@
++import 'dart:async';
++import 'package:flutter/material.dart';
++import 'package:get/get.dart';
++import '../../common.dart' show gFFI;
++import '../../models/platform_model.dart' show bind;
++import '../support_help.dart';
++import 'admin_panel.dart';
++
++class KbAdminHost extends StatelessWidget {
++  const KbAdminHost({super.key});
++  @override
++  Widget build(BuildContext context) => Obx(() {
++        final account = gFFI.userModel.userName.value;
++        if (account.isEmpty) return const SizedBox.shrink();
++        return _BoundAdmin(key: ValueKey(account), account: account);
++      });
++}
++
++class _BoundAdmin extends StatefulWidget {
++  final String account;
++  const _BoundAdmin({super.key, required this.account});
++  @override
++  State<_BoundAdmin> createState() => _BoundAdminState();
++}
++
++class _BoundAdminState extends State<_BoundAdmin> {
++  SupportHelpApi? api;
++  Uri? origin;
++  String? token;
++  Timer? timer;
++  bool allowed = false, checking = false;
++  Route<void>? opened;
++
++  bool current() =>
++      mounted &&
++      gFFI.userModel.userName.value == widget.account &&
++      token == bind.mainGetLocalOption(key: 'access_token') &&
++      origin == Uri.tryParse(bind.mainGetOptionSync(key: 'api-server'));
++
++  @override
++  void initState() {
++    super.initState();
++    scheduleMicrotask(check);
++    timer = Timer.periodic(const Duration(seconds: 12), (_) => check());
++  }
++
++  void revoke() {
++    allowed = false;
++    final route = opened;
++    opened = null;
++    if (route != null && route.isActive) route.navigator?.removeRoute(route);
++  }
++
++  Future<void> check() async {
++    if (!mounted || checking) return;
++    checking = true;
++    try {
++      if (api == null || !current()) {
++        revoke();
++        api?.dispose();
++        api = null;
++        token = bind.mainGetLocalOption(key: 'access_token');
++        origin = Uri.tryParse(bind.mainGetOptionSync(key: 'api-server'));
++        if (token!.isEmpty || origin?.scheme != 'https') return;
++        final expectedOrigin = origin, expectedToken = token;
++        api = SupportHelpApi(
++            origin!,
++            widget.account,
++            token!,
++            () =>
++                current() &&
++                origin == expectedOrigin &&
++                token == expectedToken);
++      }
++      final active = api!;
++      final access = await active.kb('GET', 'access');
++      if (access['manage'] != true) {
++        revoke();
++        return;
++      }
++      if (mounted && active == api && current()) allowed = true;
++    } catch (_) {
++      revoke();
++    } finally {
++      checking = false;
++      if (mounted) setState(() {});
++    }
++  }
++
++  Future<void> open() async {
++    final active = api;
++    if (!allowed || opened != null || active == null || !current()) return;
++    final route = DialogRoute<void>(
++        context: context,
++        builder: (_) => Dialog(
++            child: KbAdminPanel(
++                call: active.kb,
++                current: () => mounted && allowed && active == api && current(),
++                denied: () {
++                  if (mounted) setState(revoke);
++                })));
++    opened = route;
++    await Navigator.of(context, rootNavigator: true).push(route);
++    if (identical(opened, route)) opened = null;
++  }
++
++  @override
++  void dispose() {
++    timer?.cancel();
++    revoke();
++    api?.dispose();
++    super.dispose();
++  }
++
++  @override
++  Widget build(BuildContext context) => allowed && current()
++      ? TextButton(onPressed: open, child: const Text('步骤卡'))
++      : const SizedBox.shrink();
++}
+diff --git a/flutter/lib/steaddesk/kb/admin_off.dart b/flutter/lib/steaddesk/kb/admin_off.dart
+new file mode 100644
+index 0000000..373d822
+--- /dev/null
++++ b/flutter/lib/steaddesk/kb/admin_off.dart
+@@ -0,0 +1,7 @@
++import 'package:flutter/widgets.dart';
++
++class KbAdminHost extends StatelessWidget {
++  const KbAdminHost({super.key});
++  @override
++  Widget build(BuildContext context) => const SizedBox.shrink();
++}
+diff --git a/flutter/lib/steaddesk/kb/admin_panel.dart b/flutter/lib/steaddesk/kb/admin_panel.dart
+new file mode 100644
+index 0000000..94018e8
+--- /dev/null
++++ b/flutter/lib/steaddesk/kb/admin_panel.dart
+@@ -0,0 +1,551 @@
++import 'dart:async';
++import 'dart:convert';
++import 'dart:math' as math;
++import 'package:flutter/material.dart';
++import 'package:uuid/uuid.dart';
++import '../help/merchant_help_widget.dart' show HelpWaiting;
++import '../support_help.dart' show HelpRow, HelpStaffError, helpReasons;
++
++typedef KbCall = Future<HelpRow> Function(String method, String route,
++    {HelpRow? body, int? version, String? key, Map<String, String>? query});
++const _languages = {'zh': '中文', 'en': 'English', 'es': 'Español'};
++const _states = {'draft': '草稿', 'published': '已发布', 'withdrawn': '已下架'};
++final _codes = [
++  'unreachable',
++  'timeout',
++  for (final kind in ['printer', 'host', 'secondary', 'payment', 'other'])
++    for (final outcome in ['unreachable', 'timeout']) '${kind}_$outcome'
++];
++
++class KbAdminPanel extends StatefulWidget {
++  final KbCall call;
++  final bool Function() current;
++  final VoidCallback denied;
++  const KbAdminPanel(
++      {super.key,
++      required this.call,
++      required this.current,
++      required this.denied});
++  @override
++  State<KbAdminPanel> createState() => _KbAdminPanelState();
++}
++
++class _KbAdminPanelState extends State<KbAdminPanel> {
++  final titles = {
++    for (final lang in _languages.keys) lang: TextEditingController()
++  };
++  final steps = {
++    for (final lang in _languages.keys)
++      lang: List.generate(12, (_) => TextEditingController())
++  };
++  final stepCount = {for (final lang in _languages.keys) lang: 1};
++  final reason = TextEditingController();
++  Set<String> categories = {}, codes = {};
++  List<HelpRow> cards = [], history = [];
++  HelpRow? selected, historical;
++  String? nextCard;
++  int? nextVersion;
++  String language = 'zh', original = '', message = '';
++  String? lastWrite, writeKey;
++  bool busy = true, loaded = false, preview = false;
++
++  @override
++  void initState() {
++    super.initState();
++    scheduleMicrotask(() async {
++      busy = false;
++      await run(() async {
++        await list();
++        if (!alive) return;
++        if (cards.isNotEmpty) {
++          await detail(cards.first['id']);
++        } else {
++          load(null);
++        }
++        loaded = true;
++      });
++    });
++  }
++
++  @override
++  void dispose() {
++    for (final c in [
++      ...titles.values,
++      ...steps.values.expand((items) => items),
++      reason
++    ]) {
++      c.dispose();
++    }
++    super.dispose();
++  }
++
++  bool get alive => mounted && widget.current();
++  List<String> lines(String lang) => [
++        for (final field in steps[lang]!.take(stepCount[lang]!))
++          if (field.text.trim().isNotEmpty) field.text.trim()
++      ];
++  void removeStep(int index) {
++    final fields = steps[language]!;
++    final count = stepCount[language]!;
++    for (var i = index; i < count - 1; i++) {
++      fields[i].text = fields[i + 1].text;
++    }
++    fields[count - 1].clear();
++    setState(() => stepCount[language] = math.max(1, count - 1));
++  }
++
++  HelpRow edit() => {
++        'locales': {
++          for (final lang in _languages.keys)
++            lang: {'title': titles[lang]!.text.trim(), 'steps': lines(lang)}
++        },
++        'reasons': [
++          for (final key in helpReasons.keys)
++            if (categories.contains(key)) key
++        ],
++        'check_codes': [
++          for (final key in _codes)
++            if (codes.contains(key)) key
++        ],
++      };
++  bool get valid =>
++      categories.isNotEmpty &&
++      _languages.keys.every((lang) =>
++          titles[lang]!.text.trim().runes.length <= 120 &&
++          lines(lang).length <= 12 &&
++          lines(lang).every((s) => s.runes.length <= 400));
++  bool get complete =>
++      valid &&
++      _languages.keys.every((lang) =>
++          titles[lang]!.text.trim().isNotEmpty && lines(lang).isNotEmpty);
++
++  Future<void> run(Future<void> Function() work) async {
++    if (busy || !alive) return;
++    setState(() {
++      busy = true;
++      message = '';
++    });
++    try {
++      await work();
++    } catch (e) {
++      if (!mounted) return;
++      if (!widget.current() ||
++          e is HelpStaffError && (e.status == 401 || e.status == 403)) {
++        widget.denied();
++        return;
++      }
++      message = e is HelpStaffError && (e.status == 409 || e.status == 412)
++          ? '服务端版本已变化。请重新载入后审核。'
++          : e is HelpStaffError && (e.status == 400 || e.status == 422)
++              ? '请核对步骤、三种语言及审核原因。'
++              : '无法确认操作结果，请重试。';
++    } finally {
++      if (mounted) setState(() => busy = false);
++    }
++  }
++
++  Future<void> list({bool more = false}) async {
++    final cursor = more ? nextCard : null;
++    final result = await widget.call('GET', 'cards',
++        query: cursor == null ? null : {'after': cursor});
++    if (!alive) return;
++    final next = result['next'] as String?;
++    if (next != null && cursor != null && next.compareTo(cursor) <= 0) {
++      throw const HelpStaffError(500);
++    }
++    final rows = List<HelpRow>.from(result['cards']);
++    final distinct = <String, HelpRow>{
++      if (more)
++        for (final r in cards) r['id']: r,
++      for (final r in rows) r['id']: r
++    };
++    if (selected != null) {
++      distinct.putIfAbsent(selected!['id'], () => selected!);
++    }
++    cards = distinct.values.toList();
++    nextCard = next;
++  }
++
++  Future<void> detail(String id, {bool more = false}) async {
++    final cursor = more ? nextVersion : null;
++    final result = await widget.call('GET', 'cards/$id',
++        query: cursor == null ? null : {'before': '$cursor'});
++    if (!alive) return;
++    final next = result['next'] as int?;
++    if (next != null && cursor != null && next >= cursor) {
++      throw const HelpStaffError(500);
++    }
++    if (!more) load(result['card']);
++    history = [if (more) ...history, ...List<HelpRow>.from(result['history'])];
++    nextVersion = next;
++  }
++
++  void load(HelpRow? card) {
++    selected = card;
++    for (final lang in _languages.keys) {
++      final copy = card?['locales']?[lang];
++      titles[lang]!.text = copy?['title'] ?? '';
++      final items = List<String>.from(copy?['steps'] ?? []);
++      if (items.length > 12) throw const HelpStaffError(500);
++      stepCount[lang] = math.max(1, items.length);
++      for (var i = 0; i < 12; i++) {
++        steps[lang]![i].text = i < items.length ? items[i] : '';
++      }
++    }
++    categories = Set<String>.from(card?['reasons'] ?? []);
++    codes = Set<String>.from(card?['check_codes'] ?? []);
++    history = [];
++    nextVersion = null;
++    original = jsonEncode(edit());
++    reason.clear();
++    historical = null;
++    preview = false;
++    lastWrite = writeKey = null;
++  }
++
++  Future<void> write(String operation) => run(() async {
++        final id = selected?['id'];
++        final version = selected?['version'] as int?;
++        final drafting = operation == 'draft';
++        final data = drafting ? edit() : {'reason': reason.text.trim()};
++        final method = drafting && id != null ? 'PUT' : 'POST';
++        final path = id == null
++            ? 'cards'
++            : drafting
++                ? 'cards/$id'
++                : 'cards/$id/$operation';
++        final fingerprint = jsonEncode([method, path, version, data]);
++        if (fingerprint != lastWrite) {
++          lastWrite = fingerprint;
++          writeKey = const Uuid().v4();
++        }
++        final card = await widget.call(method, path,
++            version: version, body: data, key: writeKey);
++        if (!alive) return;
++        load(card);
++        cards = [...cards.where((row) => row['id'] != card['id']), card];
++        await detail(card['id']);
++      });
++  void change() => setState(() {});
++  @override
++  Widget build(BuildContext context) {
++    if (!widget.current()) return const SizedBox.shrink();
++    final dirty = jsonEncode(edit()) != original;
++    final ready = loaded && !busy;
++    final selectedId = selected?['id'];
++    final stats = selected?['stats'];
++    final rate = stats?['rate_30d'];
++    final review = selectedId != null &&
++        !dirty &&
++        ready &&
++        reason.text.trim().isNotEmpty &&
++        reason.text.trim().runes.length <= 240;
++    return ConstrainedBox(
++        constraints: const BoxConstraints(maxWidth: 1040, maxHeight: 800),
++        child:
++            Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
++          Padding(
++              padding: const EdgeInsets.fromLTRB(16, 8, 8, 0),
++              child: Row(children: [
++                Expanded(
++                    child: Text('步骤卡',
++                        style: Theme.of(context).textTheme.titleLarge)),
++                IconButton(
++                    tooltip: '关闭',
++                    icon: const Icon(Icons.close),
++                    onPressed: () => Navigator.maybePop(context)),
++              ])),
++          if (busy) const LinearProgressIndicator(),
++          Expanded(
++              child: SingleChildScrollView(
++                  padding: const EdgeInsets.all(16),
++                  child: Column(
++                      crossAxisAlignment: CrossAxisAlignment.stretch,
++                      children: [
++                        Wrap(
++                            spacing: 12,
++                            runSpacing: 8,
++                            crossAxisAlignment: WrapCrossAlignment.center,
++                            children: [
++                              DropdownButton<String>(
++                                  hint: const Text('选择步骤卡'),
++                                  value: selectedId,
++                                  items: [
++                                    for (final row in cards)
++                                      DropdownMenuItem<String>(
++                                          value: row['id'],
++                                          child: SizedBox(
++                                              width: 220,
++                                              child: Text(
++                                                  '${row['locales']['zh']['title']} · ${_states[row['status']]}',
++                                                  overflow:
++                                                      TextOverflow.ellipsis))),
++                                  ],
++                                  onChanged: ready
++                                      ? (id) {
++                                          if (id != null) run(() => detail(id));
++                                        }
++                                      : null),
++                              OutlinedButton(
++                                  onPressed: ready
++                                      ? () => setState(() => load(null))
++                                      : null,
++                                  child: const Text('新建草稿')),
++                              if (nextCard != null)
++                                TextButton(
++                                    onPressed: ready
++                                        ? () => run(() => list(more: true))
++                                        : null,
++                                    child: const Text('加载更多步骤卡')),
++                              TextButton(
++                                  onPressed: busy
++                                      ? null
++                                      : () => run(() async {
++                                            await list();
++                                            if (!alive) return;
++                                            if (selectedId != null) {
++                                              await detail(selectedId);
++                                            } else if (!loaded &&
++                                                cards.isNotEmpty) {
++                                              await detail(cards.first['id']);
++                                            }
++                                            loaded = true;
++                                          }),
++                                  child: const Text('重新载入')),
++                            ]),
++                        if (message.isNotEmpty)
++                          Text(message,
++                              style: TextStyle(
++                                  color: Theme.of(context).colorScheme.error)),
++                        if (loaded) ...[
++                          if (selected != null)
++                            Text(
++                                '当前 v${selected!['version']} · ${_states[selected!['status']]} · 商户可见版本 ${selected!['published_version'] ?? '—'}'),
++                          if (stats != null)
++                            Text(
++                                '累计展示 ${stats['shown']} · 解决 ${stats['solved']}\n近 30 天展示 ${stats['shown_30d']} · 解决 ${stats['solved_30d']} · 解决率 ${rate is num ? '${(rate * 100).toStringAsFixed(1)}%' : '—'}'),
++                          const SizedBox(height: 8),
++                          Wrap(spacing: 8, children: [
++                            for (final l in _languages.entries)
++                              ChoiceChip(
++                                  label: Text(l.value),
++                                  selected: language == l.key,
++                                  onSelected: busy
++                                      ? null
++                                      : (_) => setState(() => language = l.key))
++                          ]),
++                          if (preview || historical != null) ...[
++                            Text(historical == null
++                                ? '商户预览 · 1024 × 640'
++                                : '历史版本 v${historical!['version']} · 1024 × 640'),
++                            KbMerchantPreview(
++                                locales:
++                                    historical?['locales'] ?? edit()['locales'],
++                                language: language),
++                            TextButton(
++                                onPressed: () => setState(() {
++                                      historical = null;
++                                      preview = false;
++                                    }),
++                                child: const Text('返回编辑')),
++                          ] else ...[
++                            TextField(
++                                key: ValueKey('title-$language'),
++                                controller: titles[language],
++                                enabled: ready,
++                                decoration:
++                                    const InputDecoration(labelText: '标题'),
++                                maxLength: 120,
++                                onChanged: (_) => change()),
++                            for (var i = 0; i < stepCount[language]!; i++)
++                              Row(children: [
++                                Expanded(
++                                    child: TextField(
++                                        key: ValueKey('step-$language-$i'),
++                                        controller: steps[language]![i],
++                                        enabled: ready,
++                                        minLines: 1,
++                                        maxLines: 4,
++                                        maxLength: 400,
++                                        decoration: InputDecoration(
++                                            labelText: '步骤 ${i + 1}'),
++                                        onChanged: (_) => change())),
++                                IconButton(
++                                    tooltip: '移除步骤 ${i + 1}',
++                                    icon:
++                                        const Icon(Icons.remove_circle_outline),
++                                    onPressed:
++                                        ready ? () => removeStep(i) : null),
++                              ]),
++                            Align(
++                                alignment: Alignment.centerLeft,
++                                child: TextButton.icon(
++                                    icon: const Icon(Icons.add),
++                                    label: const Text('添加步骤'),
++                                    onPressed:
++                                        ready && stepCount[language]! < 12
++                                            ? () => setState(() =>
++                                                stepCount[language] =
++                                                    stepCount[language]! + 1)
++                                            : null)),
++                            const Text('适用求助原因'),
++                            Wrap(spacing: 6, children: [
++                              for (final category in helpReasons.entries)
++                                FilterChip(
++                                    label: Text(category.value),
++                                    selected: categories.contains(category.key),
++                                    onSelected: ready
++                                        ? (on) => setState(() {
++                                              if (on) {
++                                                categories.add(category.key);
++                                              } else {
++                                                categories.remove(category.key);
++                                              }
++                                            })
++                                        : null)
++                            ]),
++                            ExpansionTile(
++                                title: Text('快速检查结果（${codes.length}）'),
++                                children: [
++                                  Wrap(spacing: 6, children: [
++                                    for (final code in _codes)
++                                      FilterChip(
++                                          label: Text(code),
++                                          selected: codes.contains(code),
++                                          onSelected: ready
++                                              ? (on) => setState(() {
++                                                    if (on) {
++                                                      codes.add(code);
++                                                    } else {
++                                                      codes.remove(code);
++                                                    }
++                                                  })
++                                              : null)
++                                  ])
++                                ]),
++                            Wrap(spacing: 12, children: [
++                              OutlinedButton(
++                                  onPressed: ready
++                                      ? () => setState(() => preview = true)
++                                      : null,
++                                  child: const Text('商户预览')),
++                              FilledButton(
++                                  onPressed: ready && dirty && valid
++                                      ? () => write('draft')
++                                      : null,
++                                  child: const Text('保存草稿')),
++                            ]),
++                            if (selectedId != null) ...[
++                              TextField(
++                                  controller: reason,
++                                  enabled: ready,
++                                  decoration:
++                                      const InputDecoration(labelText: '审核原因'),
++                                  maxLength: 240,
++                                  onChanged: (_) => change()),
++                              Wrap(spacing: 12, children: [
++                                FilledButton(
++                                    onPressed: review &&
++                                            complete &&
++                                            selected!['status'] == 'draft'
++                                        ? () => write('publish')
++                                        : null,
++                                    child: const Text('发布')),
++                                OutlinedButton(
++                                    onPressed: review &&
++                                            selected!['published_version'] !=
++                                                null
++                                        ? () => write('withdraw')
++                                        : null,
++                                    child: const Text('下架')),
++                              ]),
++                              ExpansionTile(
++                                  title: Text('版本记录（${history.length}）'),
++                                  children: [
++                                    for (final rev in history)
++                                      ListTile(
++                                          title: Text(
++                                              "v${rev['version']} · ${_states[rev['status']]} · ${rev['author']}"),
++                                          subtitle: Text(rev['reason'] ?? ''),
++                                          onTap: () =>
++                                              setState(() => historical = rev)),
++                                    if (nextVersion != null)
++                                      TextButton(
++                                          onPressed: ready
++                                              ? () => run(() => detail(
++                                                  selectedId,
++                                                  more: true))
++                                              : null,
++                                          child: const Text('加载更早版本')),
++                                  ]),
++                            ],
++                          ],
++                        ],
++                      ]))),
++        ]));
++  }
++}
++
++class KbMerchantPreview extends StatelessWidget {
++  final Map locales;
++  final String language;
++  const KbMerchantPreview(
++      {super.key, required this.locales, required this.language});
++  @override
++  Widget build(BuildContext context) {
++    const labels = {
++      'zh': {
++        'Waiting for %s min': '已等待 %s 分钟',
++        'Suggested steps': '建议步骤',
++        'This solved my problem': '这个解决了我的问题',
++        'Request a callback': '改为预约回电',
++        'Cancel help request': '取消求助'
++      },
++      'es': {
++        'Waiting for %s min': 'Llevas %s min esperando',
++        'Suggested steps': 'Pasos sugeridos',
++        'This solved my problem': 'Esto resolvió mi problema',
++        'Request a callback': 'Solicitar una llamada',
++        'Cancel help request': 'Cancelar solicitud'
++      }
++    };
++    return LayoutBuilder(builder: (_, bounds) {
++      final width = math.min(1024.0, bounds.maxWidth);
++      return Align(
++          alignment: Alignment.topLeft,
++          child: SizedBox(
++              width: width,
++              height: width * 640 / 1024,
++              child: FittedBox(
++                  fit: BoxFit.contain,
++                  alignment: Alignment.topLeft,
++                  child: SizedBox(
++                      key: const ValueKey('merchant-preview-canvas'),
++                      width: 1024,
++                      height: 640,
++                      child: Material(
++                          color: Theme.of(context).colorScheme.surface,
++                          child: SingleChildScrollView(
++                              padding: const EdgeInsets.all(20),
++                              child: HelpWaiting(
++                                  view: const {
++                                    'state': 'queued',
++                                    'queued_at': 0,
++                                    'id': 'preview'
++                                  },
++                                  now: 0,
++                                  busy: true,
++                                  online: true,
++                                  cards: [
++                                    {
++                                      'card_id': 'preview',
++                                      'card_version': 1,
++                                      'locales': locales
++                                    }
++                                  ],
++                                  language: language,
++                                  label: (s) => labels[language]?[s] ?? s,
++                                  act: (_, __) {})))))));
++    });
++  }
++}
+diff --git a/flutter/lib/steaddesk/kb/card_tile.dart b/flutter/lib/steaddesk/kb/card_tile.dart
+new file mode 100644
+index 0000000..6879a06
+--- /dev/null
++++ b/flutter/lib/steaddesk/kb/card_tile.dart
+@@ -0,0 +1,144 @@
++import 'dart:async';
++import 'package:flutter/material.dart';
++import 'package:visibility_detector/visibility_detector.dart';
++
++String cardLanguage(String value) {
++  final language = value.trim().toLowerCase().split(RegExp('[-_]')).first;
++  return const {'zh', 'es'}.contains(language) ? language : 'en';
++}
++
++class StepCardTile extends StatefulWidget {
++  final String title;
++  final List<String> steps;
++  final String Function(String) label;
++  final Future<void> Function(bool expanded)? acknowledge;
++  final VoidCallback? solve;
++  final bool online;
++  const StepCardTile(
++      {super.key,
++      required this.title,
++      required this.steps,
++      required this.label,
++      this.acknowledge,
++      this.solve,
++      this.online = true});
++
++  @override
++  State<StepCardTile> createState() => _StepCardTileState();
++}
++
++class _StepCardTileState extends State<StepCardTile>
++    with WidgetsBindingObserver {
++  final visibility = UniqueKey();
++  bool currentRoute = true;
++  @override
++  void didChangeDependencies() {
++    super.didChangeDependencies();
++    final next = ModalRoute.of(context)?.isCurrent ?? true;
++    if (next && !currentRoute) {
++      WidgetsBinding.instance.addPostFrameCallback((_) {
++        if (mounted) unawaited(confirm());
++      });
++    }
++    currentRoute = next;
++  }
++
++  bool visible = false, shown = false, expanded = false, used = false;
++  bool sending = false, failed = false;
++
++  @override
++  void initState() {
++    super.initState();
++    WidgetsBinding.instance.addObserver(this);
++  }
++
++  @override
++  void dispose() {
++    WidgetsBinding.instance.removeObserver(this);
++    super.dispose();
++  }
++
++  @override
++  void didChangeAppLifecycleState(AppLifecycleState state) {
++    if (state == AppLifecycleState.resumed) unawaited(confirm());
++  }
++
++  @override
++  void didUpdateWidget(covariant StepCardTile old) {
++    super.didUpdateWidget(old);
++    if (widget.online && !old.online) {
++      WidgetsBinding.instance.addPostFrameCallback((_) {
++        if (mounted) unawaited(confirm());
++      });
++    }
++  }
++
++  bool get onScreen =>
++      mounted &&
++      visible &&
++      widget.online &&
++      currentRoute &&
++      (WidgetsBinding.instance.lifecycleState == null ||
++          WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed);
++
++  Future<void> confirm() async {
++    final report = widget.acknowledge;
++    if (!onScreen ||
++        sending ||
++        report == null ||
++        (shown && (!expanded || used))) return;
++    sending = true;
++    try {
++      if (!shown) {
++        await report(false);
++        if (!mounted) return;
++        shown = true;
++      }
++      if (onScreen && expanded && !used) {
++        await report(true);
++        if (!mounted) return;
++        used = true;
++      }
++      failed = false;
++    } catch (_) {
++      failed = true;
++    } finally {
++      sending = false;
++      if (mounted) setState(() {});
++    }
++  }
++
++  @override
++  Widget build(BuildContext context) {
++    final content = Card(
++        child: ExpansionTile(
++            title: Text(widget.title),
++            onExpansionChanged: (value) {
++              setState(() => expanded = value);
++              if (value) unawaited(confirm());
++            },
++            childrenPadding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
++            expandedCrossAxisAlignment: CrossAxisAlignment.stretch,
++            children: [
++          for (var i = 0; i < widget.steps.length; i++)
++            Padding(
++                padding: const EdgeInsets.only(bottom: 6),
++                child: Text('${i + 1}. ${widget.steps[i]}')),
++          if (failed)
++            TextButton(
++                onPressed: widget.online ? confirm : null,
++                child: Text(widget.label('Confirm card display'))),
++          OutlinedButton(
++              onPressed: widget.online && shown ? widget.solve : null,
++              child: Text(widget.label('This solved my problem'))),
++        ]));
++    if (widget.acknowledge == null) return content;
++    return VisibilityDetector(
++        key: visibility,
++        onVisibilityChanged: (info) {
++          visible = info.visibleFraction > 0;
++          if (visible) unawaited(confirm());
++        },
++        child: content);
++  }
++}
+diff --git a/flutter/lib/steaddesk/kb_admin_api.dart b/flutter/lib/steaddesk/kb_admin_api.dart
+new file mode 100644
+index 0000000..5c2ccab
+--- /dev/null
++++ b/flutter/lib/steaddesk/kb_admin_api.dart
+@@ -0,0 +1 @@
++export 'kb/admin_off.dart';
+diff --git a/flutter/lib/steaddesk/kb_build.dart b/flutter/lib/steaddesk/kb_build.dart
+new file mode 100644
+index 0000000..ad47186
+--- /dev/null
++++ b/flutter/lib/steaddesk/kb_build.dart
+@@ -0,0 +1,2 @@
++const merchantKbEnabled = false;
++const supportKbEnabled = false;
+diff --git a/flutter/lib/steaddesk/support_help.dart b/flutter/lib/steaddesk/support_help.dart
+index 724d1e0..e9e74f1 100644
+--- a/flutter/lib/steaddesk/support_help.dart
++++ b/flutter/lib/steaddesk/support_help.dart
+@@ -57,38 +57,49 @@ class SupportHelpApi {
+       {Map<String, String>? query,
+       HelpRow? body,
+       int? version,
++      String? method,
+       String? key}) async {
+     check();
++    final payload = body == null ? null : utf8.encode(jsonEncode(body));
++    if (method != null && (payload?.length ?? 0) > 65536) { throw const HelpStaffError(422); }
+     final url = base.resolve(path).replace(queryParameters: query);
+     final req = await _http
+-        .openUrl(body == null ? 'GET' : 'POST', url)
++        .openUrl(method ?? (body == null ? 'GET' : 'POST'), url)
+         .timeout(const Duration(seconds: 8));
+     check();
+     req.followRedirects = false;
+     req.headers.set(HttpHeaders.authorizationHeader, 'Bearer $_token');
+-    if (body != null) {
++    if (payload != null) {
+       req.headers.contentType = ContentType.json;
+       req.headers.set('Idempotency-Key', key ?? const Uuid().v4());
+-      req.headers.set('If-Match', '"$version"');
+-      final payload = utf8.encode(jsonEncode(body));
++      if (version != null || method == null) {
++        req.headers.set('If-Match', '"$version"');
++      }
+       req.contentLength = payload.length;
+       req.add(payload);
+     }
+     final response = await req.close().timeout(const Duration(seconds: 12));
+-    if (response.statusCode != 200) {
++    if (response.statusCode != 200 && !(method == 'POST' && response.statusCode == 201)) {
+       await response.listen((_) {}).cancel();
+       throw HelpStaffError(response.statusCode);
+     }
+     final bytes = <int>[];
+     await for (final part in response.timeout(const Duration(seconds: 8))) {
+-      if (bytes.length + part.length > 4 * 1024 * 1024)
+-        throw const HelpStaffError(500);
++      final limit = method == null ? 4 * 1024 * 1024 : 256 * 1024;
++      if (bytes.length + part.length > limit) { throw const HelpStaffError(500); }
+       bytes.addAll(part);
+     }
+     check();
+     return jsonDecode(utf8.decode(bytes)) as HelpRow;
+   }
+ 
++  Future<HelpRow> kb(String method, String route, {HelpRow? body, int? version, String? key, Map<String,String>? query}) {
++    if (route != 'access' && !RegExp(r'^cards(?:/[A-Za-z0-9_-]{1,100}(?:/(?:publish|withdraw))?)?$').hasMatch(route)) {
++      throw const HelpStaffError(400);
++    }
++    return _request('help/kb/$route', method: method, body: body, version: version, key: key, query: query);
++  }
++
+   // SSE carries only a hint. Re-read the authorized queue to decide who may
+   // see a reminder, including after a new connection with no event backlog.
+   Future<void> callbackEvents(void Function() refresh) async {
+diff --git a/flutter/lib/steaddesk/support_home.dart b/flutter/lib/steaddesk/support_home.dart
+index bfbf4c8..e98fa66 100644
+--- a/flutter/lib/steaddesk/support_home.dart
++++ b/flutter/lib/steaddesk/support_home.dart
+@@ -21,6 +21,8 @@ import '../models/ab_model.dart';
+ import 'ops_health_host.dart';
+ import 'quick_support_api.dart' show supportQuickEnabled;
+ import 'fleet_admin_api.dart';
++import 'kb_admin_api.dart';
++import 'kb_build.dart' show supportKbEnabled;
+ import 'support_help_header_api.dart';
+ import 'case_inbox_api.dart' show PendingCasesBar;
+ import 'merchant_build.dart'
+diff --git a/flutter/lib/steaddesk/support_home_bar.dart b/flutter/lib/steaddesk/support_home_bar.dart
+index 0da39c5..a35566e 100644
+--- a/flutter/lib/steaddesk/support_home_bar.dart
++++ b/flutter/lib/steaddesk/support_home_bar.dart
+@@ -45,6 +45,7 @@ class _HomeHeader extends StatelessWidget {
+                 onSearch: onSearch,
+                 directory: directory,
+                 jump: jump)),
++        if (supportKbEnabled && isWindows) const KbAdminHost(),
+         if (helpEnabled && isWindows) const SupportHelpHeader(),
+         if (opsHealthEnabled) const OpsHealthHost(HealthSurface.header),
+         const SizedBox(width: 12),
+diff --git a/flutter/test/steaddesk/kb_cards_test.dart b/flutter/test/steaddesk/kb_cards_test.dart
+new file mode 100644
+index 0000000..80ecbc8
+--- /dev/null
++++ b/flutter/test/steaddesk/kb_cards_test.dart
+@@ -0,0 +1,406 @@
++import 'dart:convert';
++import 'dart:io';
++import 'package:flutter/material.dart';
++import 'package:flutter_test/flutter_test.dart';
++import 'package:visibility_detector/visibility_detector.dart';
++import 'package:flutter_hbb/steaddesk/help/merchant_help_widget.dart';
++import 'package:flutter_hbb/steaddesk/help/merchant_help_client.dart';
++import 'package:flutter_hbb/steaddesk/kb/admin_panel.dart';
++import 'package:flutter_hbb/steaddesk/kb/card_tile.dart';
++import 'package:flutter_hbb/steaddesk/support_help.dart' show HelpStaffError;
++
++const locales = {
++  'zh': {
++    'title': '检查打印机',
++    'steps': ['检查电源']
++  },
++  'en': {
++    'title': 'Check the printer',
++    'steps': ['Check power']
++  },
++  'es': {
++    'title': 'Revisar la impresora',
++    'steps': ['Compruebe la alimentación']
++  },
++};
++const ticket = {
++  'id': 'test-ticket',
++  'version': 3,
++  'state': 'queued',
++  'queued_at': 0
++};
++const offer = {
++  'card_id': 'fixture',
++  'card_version': 2,
++  'offer_id': 'display-fixture',
++  'locales': locales
++};
++
++class _LocalNetwork extends HttpOverrides {}
++
++void main() {
++  testWidgets(
++      'only a visible queued card reports shown and expanded; selected device language and resolution use exact version',
++      (tester) async {
++    final old = VisibilityDetectorController.instance.updateInterval;
++    VisibilityDetectorController.instance.updateInterval = Duration.zero;
++    addTearDown(
++        () => VisibilityDetectorController.instance.updateInterval = old);
++    final scroll = ScrollController(), reports = <String>[];
++    var solves = 0;
++    Future<void> show(String language) => tester.pumpWidget(MaterialApp(
++        home: Scaffold(
++            body: SingleChildScrollView(
++                controller: scroll,
++                child: Column(children: [
++                  const SizedBox(height: 900),
++                  HelpWaiting(
++                      view: ticket,
++                      cards: const [offer],
++                      now: 60,
++                      online: true,
++                      busy: false,
++                      language: language,
++                      label: (k) => k,
++                      confirmCard: (card, used) async {
++                        expect(card['offer_id'], 'display-fixture');
++                        reports.add(used ? 'used' : 'shown');
++                      },
++                      act: (name, body) {
++                        expect(name, 'self-resolve');
++                        expect(body, {'card_id': 'fixture', 'card_version': 2});
++                        solves++;
++                      })
++                ])))));
++    await show('es-MX');
++    await tester.pumpAndSettle();
++    expect(reports, isEmpty);
++    scroll.jumpTo(scroll.position.maxScrollExtent);
++    await tester.pumpAndSettle();
++    expect(reports, ['shown']);
++    await tester.tap(find.text('Revisar la impresora'));
++    await tester.pumpAndSettle();
++    expect(find.text('1. Compruebe la alimentación'), findsOneWidget);
++    expect(reports, ['shown', 'used']);
++    await tester.ensureVisible(find.text('This solved my problem'));
++    await tester.tap(find.text('This solved my problem'));
++    expect(solves, 1);
++    await show('zh-TW');
++    await tester.pumpAndSettle();
++    expect(find.text('检查打印机'), findsOneWidget);
++    await show('fr-CA');
++    await tester.pumpAndSettle();
++    expect(find.text('Check the printer'), findsOneWidget);
++    expect(reports, ['shown', 'used']);
++    expect(cardLanguage('ES_es'), 'es');
++    await tester.pumpWidget(const SizedBox());
++    scroll.dispose();
++  });
++
++  testWidgets(
++      'a lost display acknowledgement can be retried; no solve before acknowledgment',
++      (tester) async {
++    final old = VisibilityDetectorController.instance.updateInterval;
++    VisibilityDetectorController.instance.updateInterval = Duration.zero;
++    addTearDown(
++        () => VisibilityDetectorController.instance.updateInterval = old);
++    var seen = 0;
++    bool offline = true;
++    await tester.pumpWidget(MaterialApp(
++        home: Scaffold(
++            body: StepCardTile(
++                title: 'Fixture',
++                steps: const ['Step'],
++                label: (k) => k,
++                solve: () {},
++                acknowledge: (used) async {
++                  if (!used) {
++                    seen++;
++                    if (offline) throw const SocketException('lost');
++                  }
++                }))));
++    await tester.pumpAndSettle();
++    await tester.tap(find.text('Fixture'));
++    await tester.pumpAndSettle();
++    expect(
++        tester
++            .widget<OutlinedButton>(
++                find.widgetWithText(OutlinedButton, 'This solved my problem'))
++            .onPressed,
++        isNull);
++    offline = false;
++    await tester.tap(find.text('Confirm card display'));
++    await tester.pumpAndSettle();
++    expect(seen, greaterThan(1));
++    expect(
++        tester
++            .widget<OutlinedButton>(
++                find.widgetWithText(OutlinedButton, 'This solved my problem'))
++            .onPressed,
++        isNotNull);
++    await tester.pumpWidget(const SizedBox());
++  });
++
++  testWidgets(
++      'admin reviews previews edits retries same draft and publishes then withdraws with reason',
++      (tester) async {
++    tester.view.physicalSize = const Size(800, 700);
++    tester.view.devicePixelRatio = 1;
++    addTearDown(tester.view.resetPhysicalSize);
++    addTearDown(tester.view.resetDevicePixelRatio);
++    final calls = <List<Object?>>[];
++    var row = <String, dynamic>{
++      'id': 'fixture',
++      'version': 3,
++      'status': 'draft',
++      'published_version': 2,
++      'locales': {
++        ...locales,
++        'en': {
++          'title': 'Check the printer',
++          'steps': ['Check power\nCheck indicator']
++        }
++      },
++      'reasons': ['printer'],
++      'check_codes': ['printer_unreachable'],
++      'stats': {
++        'shown': 8,
++        'solved': 4,
++        'shown_30d': 4,
++        'solved_30d': 1,
++        'rate_30d': 0.25
++      }
++    };
++    bool first = true, allowed = true;
++    Future<HelpJson> call(String method, String path,
++        {HelpJson? body,
++        int? version,
++        String? key,
++        Map<String, String>? query}) async {
++      if (method == 'GET') {
++        return path == 'cards'
++            ? {
++                'cards': [row],
++                'next': null
++              }
++            : {
++                'card': row,
++                'history': [row],
++                'next': null
++              };
++      }
++      calls.add([method, path, version, key, body]);
++      if (first) {
++        first = false;
++        throw const SocketException('lost');
++      }
++      row = {
++        ...row,
++        ...?body,
++        'version': row['version'] + 1,
++        'status': method == 'PUT'
++            ? 'draft'
++            : path.endsWith('publish')
++                ? 'published'
++                : 'withdrawn',
++        'published_version': path.endsWith('withdraw')
++            ? null
++            : path.endsWith('publish')
++                ? row['version'] + 1
++                : row['published_version']
++      };
++      return row;
++    }
++
++    Future<void> show() => tester.pumpWidget(MaterialApp(
++        home: Scaffold(
++            body: KbAdminPanel(
++                call: call,
++                current: () => allowed,
++                denied: () {
++                  allowed = false;
++                }))));
++    await show();
++    await tester.pumpAndSettle();
++    expect(find.textContaining('解决率 25.0%'), findsOneWidget);
++    await tester.tap(find.text('Español'));
++    await tester.pumpAndSettle();
++    await tester.ensureVisible(find.text('商户预览'));
++    await tester.tap(find.text('商户预览'));
++    await tester.pumpAndSettle();
++    expect(
++        tester.getSize(find.byKey(const ValueKey('merchant-preview-canvas'))),
++        const Size(1024, 640));
++    expect(find.text('Revisar la impresora'), findsOneWidget);
++    await tester.ensureVisible(find.text('Revisar la impresora'));
++    await tester.tap(find.text('Revisar la impresora'));
++    await tester.pumpAndSettle();
++    expect(find.text('1. Compruebe la alimentación'), findsOneWidget);
++    await tester.ensureVisible(find.text('返回编辑'));
++    await tester.tap(find.text('返回编辑'));
++    await tester.pumpAndSettle();
++    await tester.enterText(
++        find.byKey(const ValueKey('title-es')), 'Nuevo título');
++    await tester.pumpAndSettle();
++    await tester.ensureVisible(find.text('保存草稿'));
++    await tester.tap(find.text('保存草稿'));
++    await tester.pumpAndSettle();
++    expect(find.text('无法确认操作结果，请重试。'), findsOneWidget);
++    await tester.tap(find.text('保存草稿'));
++    await tester.pumpAndSettle();
++    expect(calls[0], calls[1]);
++    expect(calls[1][2], 3);
++    expect(calls[1][3], isNotNull);
++    expect((calls[1][4] as HelpJson)['locales']['en']['steps'],
++        ['Check power\nCheck indicator']);
++    Future<void> review(String name, String why) async {
++      final field = find.widgetWithText(TextField, '审核原因');
++      await tester.ensureVisible(field);
++      await tester.enterText(field, why);
++      await tester.pumpAndSettle();
++      await tester.ensureVisible(find.text(name));
++      await tester.tap(find.text(name));
++      await tester.pumpAndSettle();
++    }
++
++    expect(
++        tester
++            .widget<FilledButton>(find.widgetWithText(FilledButton, '发布'))
++            .onPressed,
++        isNull);
++    await review('发布', '已审核三种语言');
++    expect(calls.last[1], 'cards/fixture/publish');
++    expect(calls.last[4], {'reason': '已审核三种语言'});
++    await review('下架', '步骤已过时');
++    expect(calls.last[1], 'cards/fixture/withdraw');
++    allowed = false;
++    await show();
++    await tester.pumpAndSettle();
++    expect(find.text('发布'), findsNothing);
++  });
++
++  test(
++      'restored receipt selects legacy when KB is off or missing; KB confirmations remain ticket-bound',
++      () async {
++    final dir = await Directory.systemTemp.createTemp('kb-receipt-fixture');
++    addTearDown(() => dir.delete(recursive: true));
++    final owner = (
++      origin: Uri.https('example.invalid'),
++      device: '123456789',
++      account: 'fixture'
++    );
++    for (final enabled in [false, true]) {
++      var advertised = false, calls = <String>[];
++      Future<HelpJson> send(Uri origin, String method, String path,
++          String? secret, HelpJson? body, String? key, int? version) async {
++        calls.add(path);
++        if (path == 'capabilities') return {'kb': advertised};
++        expect(secret, 'synthetic-receipt');
++        if (path == 'me') return Map<String, dynamic>.from(ticket);
++        if (path == 'me/step-cards') {
++          return {
++            'cards': [
++              {
++                'card_id': 'old',
++                'card_version': 1,
++                'steps': ['Old card']
++              }
++            ]
++          };
++        }
++        if (path == 'me/kb-cards') {
++          if (!advertised) throw HelpFailure(404);
++          return {
++            'cards': [offer]
++          };
++        }
++        expect(body, {
++          'card_id': 'fixture',
++          'card_version': 2,
++          'offer_id': 'display-fixture'
++        });
++        return {'accepted': true};
++      }
++
++      final c = MerchantHelpClient(
++          File('${dir.path}/journal'),
++          () async => owner,
++          (_, __, ___, ____) => throw StateError('unexpected signing'),
++          '1',
++          send: send,
++          useKb: enabled);
++      c.record = {'owner': c.fingerprint(owner), 'secret': 'synthetic-receipt'};
++      await c.refresh();
++      expect(c.cards.single['card_id'], 'old');
++      expect(calls.contains('me/kb-cards'), enabled);
++      advertised = true;
++      calls.clear();
++      await c.capabilities();
++      await c.refresh();
++      if (enabled) {
++        expect(c.cards.single['card_id'], 'fixture');
++        await expectLater(
++            c.confirmCard('different-ticket', c.cards.single, false),
++            throwsA(isA<HelpFailure>()));
++        await c.confirmCard('test-ticket', c.cards.single, false);
++        await c.confirmCard('test-ticket', c.cards.single, true);
++        expect(calls.where((r) => r == 'me/kb-shown').length, 1);
++        expect(calls.last, 'me/kb-used');
++      } else {
++        expect(c.cards.single['card_id'], 'old');
++        expect(calls.contains('me/kb-cards'), isFalse);
++      }
++    }
++  });
++
++  testWidgets('server denies catalog access and the editor never renders',
++      (tester) async {
++    var denied = false;
++    await tester.pumpWidget(MaterialApp(
++        home: Scaffold(
++            body: KbAdminPanel(
++                current: () => !denied,
++                denied: () {
++                  denied = true;
++                },
++                call: (m, p, {body, version, key, query}) async =>
++                    throw const HelpStaffError(403)))));
++    await tester.pumpAndSettle();
++    expect(denied, isTrue);
++    expect(find.byType(TextField), findsNothing);
++  });
++
++  test(
++      'KB UTF-8 response budget accepts three full cards; old routes keep their limit',
++      () async {
++    final three = [
++      for (var i = 0; i < 3; i++)
++        {
++          ...offer,
++          'locales': {
++            for (final l in locales.keys)
++              l: {'title': '台' * 120, 'steps': List.filled(12, '台' * 400)}
++          }
++        }
++    ];
++    final data = utf8.encode(jsonEncode({'cards': three}));
++    expect(data.length, inInclusiveRange(65537, 256 * 1024));
++    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
++    addTearDown(() => server.close(force: true));
++    server.listen((req) async {
++      req.response.headers.contentType = ContentType.json;
++      req.response.add(data);
++      await req.response.close();
++    });
++    await HttpOverrides.runWithHttpOverrides(() async {
++      final origin = Uri.parse('http://127.0.0.1:${server.port}');
++      expect(
++          (await sendHelp(origin, 'GET', 'me/kb-cards', 'fixture', null, null,
++              null))['cards'],
++          three);
++      await expectLater(
++          sendHelp(origin, 'GET', 'me/step-cards', 'fixture', null, null, null),
++          throwsA(isA<HelpFailure>()));
++    }, _LocalNetwork());
++  });
++}
+diff --git a/src/lang/cn.rs b/src/lang/cn.rs
+index c291847..046b539 100644
+--- a/src/lang/cn.rs
++++ b/src/lang/cn.rs
+@@ -1042,6 +1042,8 @@ lazy_static::lazy_static! {
+         ("Waiting for %s min", "已等待 %s 分钟"),
+         ("Estimated wait: %s–%s min", "预计还需 %s–%s 分钟"),
+         ("Last updated %s", "上次更新于 %s"),
++        ("Suggested steps", "建议步骤"),
++        ("Confirm card display", "重试确认显示"),
+         ("This solved my problem", "这个解决了我的问题"),
+         ("Request a callback", "改为预约回电"),
+         ("Cancel help request", "取消求助"),
+diff --git a/src/lang/en.rs b/src/lang/en.rs
+index a3303fe..0a77b2e 100644
+--- a/src/lang/en.rs
++++ b/src/lang/en.rs
+@@ -1,6 +1,8 @@
+ lazy_static::lazy_static! {
+ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
+     [
++        ("Suggested steps", "Suggested steps"),
++        ("Confirm card display", "Confirm card display"),
+         ("Merchant force-stopped the app", "Merchant force-stopped the app"),
+         ("Merchant paused remote support", "Merchant paused remote support"),
+         ("Stop status unavailable", "Stop status unavailable"),
+diff --git a/src/lang/es.rs b/src/lang/es.rs
+index 08db709..b9bd847 100644
+--- a/src/lang/es.rs
++++ b/src/lang/es.rs
+@@ -948,6 +948,8 @@ lazy_static::lazy_static! {
+         ("Waiting for %s min", "Llevas %s min esperando"),
+         ("Estimated wait: %s–%s min", "Espera estimada: %s–%s min"),
+         ("Last updated %s", "Última actualización: %s"),
++        ("Suggested steps", "Pasos sugeridos"),
++        ("Confirm card display", "Reintentar la confirmación"),
+         ("This solved my problem", "Esto resolvió mi problema"),
+         ("Request a callback", "Solicitar una llamada"),
+         ("Cancel help request", "Cancelar solicitud"),

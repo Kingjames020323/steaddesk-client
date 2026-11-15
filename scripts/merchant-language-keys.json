@@ -187,6 +187,10 @@
     "The server declined the check request.",
     "Payment devices use ping only."
   ],
+  "Merchant step cards": [
+    "Suggested steps",
+    "Confirm card display"
+  ],
   "Merchant callback booking": [
     "Contact name",
     "Callback phone number",
