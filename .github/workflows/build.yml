@@ -68,7 +68,7 @@ env:
   STEADDESK_FLEET_WINDOWS_PROFILE: ${{ vars.STEADDESK_FLEET_WINDOWS_PROFILE }}
   STEADDESK_FLEET_SILENT_PROFILE: ${{ vars.STEADDESK_FLEET_SILENT_PROFILE }}
   STEADDESK_HELP: ${{ github.event_name == 'workflow_dispatch' && github.ref_type == 'branch' && inputs.steaddesk_ops_integration && 'true' || vars.STEADDESK_HELP }}
-  STEADDESK_QUICK_CHECK: ${{ vars.STEADDESK_QUICK_CHECK == 'true' && 'true' || 'false' }}
+  STEADDESK_QUICK_CHECK: ${{ github.event_name == 'workflow_dispatch' && github.ref_type == 'branch' && inputs.steaddesk_ops_integration && 'true' || vars.STEADDESK_QUICK_CHECK == 'true' && 'true' || 'false' }}
   STEADDESK_QUALITY: ${{ vars.STEADDESK_QUALITY }}
   STEADDESK_OPS_HEALTH: ${{ github.event_name == 'workflow_dispatch' && github.ref_type == 'branch' && inputs.steaddesk_ops_integration && 'true' || vars.STEADDESK_OPS_HEALTH }}
   STEADDESK_OPS_GROUPS: ${{ github.event_name == 'workflow_dispatch' && github.ref_type == 'branch' && inputs.steaddesk_ops_integration && 'true' || vars.STEADDESK_OPS_GROUPS }}

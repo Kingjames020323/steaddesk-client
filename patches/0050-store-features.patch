@@ -1,0 +1,1676 @@
+diff --git a/flutter/lib/steaddesk/device_card.dart b/flutter/lib/steaddesk/device_card.dart
+index 56ae607..1c5eac7 100644
+--- a/flutter/lib/steaddesk/device_card.dart
++++ b/flutter/lib/steaddesk/device_card.dart
+@@ -6,6 +6,7 @@ enum _DeviceTab {
+       'Peripherals and network',
+       supportQuickEnabled ||
+           bool.fromEnvironment('STEADDESK_DEVICE_PERIPHERALS')),
++  features('门店功能', true),
+   reports(
+       'Historical reports', bool.fromEnvironment('STEADDESK_DEVICE_REPORTS'));
+ 
+@@ -207,10 +208,13 @@ class _DeviceCardState extends State<_DeviceCard> {
+                     child: Text(value, style: const TextStyle(color: _blue))))
+       ]));
+ 
+-  Widget _additionalTab(String device) =>
+-      tab == _DeviceTab.peripherals && supportQuickEnabled
+-          ? OpsHealthHost(HealthSurface.inventory, device: device)
+-          : const SizedBox.shrink();
++  Widget _additionalTab(String device) {
++    if (tab == _DeviceTab.features) return StoreFeatureAdmin(device: device);
++    if (tab == _DeviceTab.peripherals && supportQuickEnabled) {
++      return OpsHealthHost(HealthSurface.inventory, device: device);
++    }
++    return const SizedBox.shrink();
++  }
+ 
+   @override
+   Widget build(BuildContext context) {
+diff --git a/flutter/lib/steaddesk/help/merchant_callback.dart b/flutter/lib/steaddesk/help/merchant_callback.dart
+index b4421f9..7d06ecd 100644
+--- a/flutter/lib/steaddesk/help/merchant_callback.dart
++++ b/flutter/lib/steaddesk/help/merchant_callback.dart
+@@ -65,8 +65,9 @@ class _MerchantCallbackState extends State<MerchantCallback> {
+     }
+   }
+ 
+-  String errorLabel(Object e) {
++  String? errorLabel(Object e) {
+     if (e is HelpFailure) {
++      if (e.code == 'store_feature') return null;
+       if (e.status == 400 || e.status == 422)
+         return 'Check the callback details and store time.';
+       if (e.status == 409 || e.status == 412)
+diff --git a/flutter/lib/steaddesk/help/merchant_help_client.dart b/flutter/lib/steaddesk/help/merchant_help_client.dart
+index b530a78..ea675a2 100644
+--- a/flutter/lib/steaddesk/help/merchant_help_client.dart
++++ b/flutter/lib/steaddesk/help/merchant_help_client.dart
+@@ -91,10 +91,16 @@ class MerchantHelpClient {
+   final HelpSend send;
+   final String merchantVersion;
+   final bool useKb;
++  final Future<bool> Function(String)? canUseStoreFeature;
++  Future<bool> _allowed(String name) async =>
++      canUseStoreFeature == null || await canUseStoreFeature!(name);
+   bool? kbAvailable;
+   final int Function() now;
+   MerchantHelpClient(this.journal, this.scope, this.sign, this.merchantVersion,
+-      {this.send = sendHelp, this.useKb = false, int Function()? clock})
++      {this.send = sendHelp,
++      this.useKb = false,
++      this.canUseStoreFeature,
++      int Function()? clock})
+       : now = clock ?? (() => DateTime.now().millisecondsSinceEpoch ~/ 1000);
+ 
+   HelpJson? record, view;
+@@ -168,6 +174,14 @@ class MerchantHelpClient {
+   Future<HelpJson> call(String method, String path,
+       {HelpJson? body, String? key, int? version}) async {
+     final current = await owner();
++    final feature = path.contains('kb-') ||
++            path == 'me/step-cards' ||
++            path == 'me/self-resolve'
++        ? 'step_cards'
++        : path.contains('callback')
++            ? 'callback'
++            : 'help';
++    if (!await _allowed(feature)) throw HelpFailure(0, 'store_feature');
+     final result = await send(current.origin, method, path,
+         record!['secret'] as String, body, key, version);
+     await owner();
+@@ -176,6 +190,7 @@ class MerchantHelpClient {
+ 
+   Future<void> create(String category, String message, Uint8List? png) async {
+     final current = await owner();
++    if (!await _allowed('help')) throw HelpFailure(0, 'store_feature');
+     if (record != null) throw HelpFailure(409);
+     if (utf8.encode(message).length > 1024) throw HelpFailure(400, 'message');
+     if (png != null && !screenshots) throw HelpFailure(400);
+@@ -318,7 +333,8 @@ class MerchantHelpClient {
+       await submit();
+     }
+     if (record?['action'] != null) await sendAction();
+-    if (view?['state'] == 'queued') {
++    cards = [];
++    if (view?['state'] == 'queued' && await _allowed('step_cards')) {
+       List? offered;
+       if (useKb && kbAvailable != false) {
+         try {
+diff --git a/flutter/lib/steaddesk/help/merchant_help_host.dart b/flutter/lib/steaddesk/help/merchant_help_host.dart
+index 645b729..80357e7 100644
+--- a/flutter/lib/steaddesk/help/merchant_help_host.dart
++++ b/flutter/lib/steaddesk/help/merchant_help_host.dart
+@@ -8,54 +8,85 @@ import '../../common.dart' show translate;
+ import '../../models/native_model.dart' show PlatformFFI;
+ import '../../models/platform_model.dart' show bind;
+ import '../kb_build.dart';
++import '../callback_build.dart';
++import '../store_features.dart';
+ import '../merchant_build.dart' show merchantVersion;
+ import 'merchant_help_client.dart';
+ import 'merchant_help_image.dart';
+ import 'merchant_help_widget.dart';
+ 
+-Widget merchantHelpEntry() => MerchantHelpEntry(
+-    label: translate,
+-    pick: pickHelpScreenshot,
+-    language: () {
+-      final saved = Platform.isWindows
+-          ? bind.mainGetCommonSync(key: 'merchant-language')
+-          : bind.mainGetLocalOption(key: 'lang');
+-      return saved.isEmpty ? Platform.localeName : saved;
+-    },
+-    callbackProfile: () {
+-      final raw = bind.mainGetLocalOption(key: 'user_info');
+-      final profile = raw.isEmpty ? null : jsonDecode(raw);
+-      final lang = bind.mainGetLocalOption(key: 'lang');
+-      return {
+-        if (profile is Map && profile['name'] is String)
+-          'name': profile['name'],
+-        if (profile is Map && profile['phone'] is String)
+-          'phone': profile['phone'],
+-        'language': lang.isEmpty ? Platform.localeName : lang,
+-      };
+-    },
+-    open: () async {
+-      final directory = await getApplicationSupportDirectory();
+-      return MerchantHelpClient(
+-          File('${directory.path}/merchant-help-receipt.json'), () async {
+-        final configured = await bind.mainGetOption(key: 'api-server');
+-        final device = await bind.mainGetMyId();
+-        if (device.isEmpty) throw HelpFailure(0, 'configuration');
+-        final profile = bind.mainGetLocalOption(key: 'user_info');
+-        final account = profile.isEmpty
+-            ? ''
+-            : (jsonDecode(profile)['name'] as String? ?? '');
+-        return (
+-          origin: configuredHelpOrigin(configured),
+-          device: device,
+-          account: account
+-        );
+-      }, (category, message, digest, secret) {
+-        final signed = PlatformFFI.instance.helpSigner!.sign(
+-            category: category,
+-            message: message,
+-            screenshotSha256: digest,
+-            receiptSecret: secret);
+-        return (secret: signed.receiptSecret, request: signed.request);
+-      }, merchantVersion, useKb: merchantKbEnabled);
++Widget merchantHelpEntry() => StoreFeaturesView(builder: (flags) {
++      bool enabled(String name, bool compiled) =>
++          flags?.allows(name, compiled, DateTime.now()) == true;
++      final kb = enabled('step_cards', merchantKbEnabled);
++      final callback = enabled('callback', merchantCallbacksEnabled);
++      return MerchantHelpEntry(
++          cardsEnabled: kb,
++          callbacksEnabled: callback,
++          label: translate,
++          pick: pickHelpScreenshot,
++          language: () {
++            final saved = Platform.isWindows
++                ? bind.mainGetCommonSync(key: 'merchant-language')
++                : bind.mainGetLocalOption(key: 'lang');
++            return saved.isEmpty ? Platform.localeName : saved;
++          },
++          callbackProfile: () {
++            final raw = bind.mainGetLocalOption(key: 'user_info');
++            final profile = raw.isEmpty ? null : jsonDecode(raw);
++            final lang = bind.mainGetLocalOption(key: 'lang');
++            return {
++              if (profile is Map && profile['name'] is String)
++                'name': profile['name'],
++              if (profile is Map && profile['phone'] is String)
++                'phone': profile['phone'],
++              'language': lang.isEmpty ? Platform.localeName : lang,
++            };
++          },
++          open: () async {
++            final directory = await getApplicationSupportDirectory();
++            return MerchantHelpClient(
++                File('${directory.path}/merchant-help-receipt.json'),
++                () async {
++                  final configured =
++                      await bind.mainGetOption(key: 'api-server');
++                  final device = await bind.mainGetMyId();
++                  if (device.isEmpty) throw HelpFailure(0, 'configuration');
++                  final profile = bind.mainGetLocalOption(key: 'user_info');
++                  final account = profile.isEmpty
++                      ? ''
++                      : (jsonDecode(profile)['name'] as String? ?? '');
++                  return (
++                    origin: configuredHelpOrigin(configured),
++                    device: device,
++                    account: account
++                  );
++                },
++                (category, message, digest, secret) {
++                  final signed = PlatformFFI.instance.helpSigner!.sign(
++                      category: category,
++                      message: message,
++                      screenshotSha256: digest,
++                      receiptSecret: secret);
++                  return (
++                    secret: signed.receiptSecret,
++                    request: signed.request
++                  );
++                },
++                merchantVersion,
++                useKb: merchantKbEnabled,
++                canUseStoreFeature: (feature) async {
++                  final flags = await readStoreFeatures(null);
++                  return flags?.allows(
++                          feature,
++                          switch (feature) {
++                            'step_cards' => merchantKbEnabled,
++                            'callback' => merchantCallbacksEnabled,
++                            'help' => true,
++                            _ => false
++                          },
++                          DateTime.now()) ==
++                      true;
++                });
++          });
+     });
+diff --git a/flutter/lib/steaddesk/help/merchant_help_widget.dart b/flutter/lib/steaddesk/help/merchant_help_widget.dart
+index 05c90bd..791a87f 100644
+--- a/flutter/lib/steaddesk/help/merchant_help_widget.dart
++++ b/flutter/lib/steaddesk/help/merchant_help_widget.dart
+@@ -21,7 +21,7 @@ class MerchantHelpEntry extends StatefulWidget {
+   final Future<MerchantHelpClient> Function() open;
+   final String Function(String) label;
+   final Future<Uint8List?> Function() pick;
+-  final bool callbacksEnabled;
++  final bool callbacksEnabled, cardsEnabled;
+   final String Function()? language;
+   final HelpJson Function()? callbackProfile;
+   const MerchantHelpEntry(
+@@ -31,6 +31,7 @@ class MerchantHelpEntry extends StatefulWidget {
+       required this.pick,
+       this.callbackProfile,
+       this.language,
++      this.cardsEnabled = true,
+       this.callbacksEnabled = merchantCallbacksEnabled});
+   @override
+   State<MerchantHelpEntry> createState() => _MerchantHelpEntryState();
+@@ -73,6 +74,10 @@ class _MerchantHelpEntryState extends State<MerchantHelpEntry> {
+       online = true;
+       if (polling && error == 'Connection interrupted. Retrying.') error = null;
+     } catch (e) {
++      if (e is HelpFailure && e.code == 'store_feature') {
++        error = null;
++        return;
++      }
+       online = false;
+       error = e is HelpFailure
+           ? switch (e.status) {
+@@ -158,7 +163,8 @@ class _MerchantHelpEntryState extends State<MerchantHelpEntry> {
+         else
+           HelpWaiting(
+               view: v,
+-              cards: c.cards,
++              cards: widget.cardsEnabled ? c.cards : const [],
++              callbacksAllowed: widget.callbacksEnabled,
+               language: widget.language?.call() ??
+                   WidgetsBinding.instance.platformDispatcher.locale
+                       .toLanguageTag(),
+@@ -327,6 +333,7 @@ class HelpWaiting extends StatelessWidget {
+   final void Function(String, HelpJson) act;
+   final VoidCallback? again;
+   final Widget? callbackEntry;
++  final bool callbacksAllowed;
+   final String language;
+   final Future<void> Function(HelpJson, bool)? confirmCard;
+   const HelpWaiting(
+@@ -341,6 +348,7 @@ class HelpWaiting extends StatelessWidget {
+       this.again,
+       this.language = 'en',
+       this.confirmCard,
++      this.callbacksAllowed = true,
+       this.callbackEntry});
+   @override
+   Widget build(BuildContext context) {
+@@ -425,7 +433,8 @@ class HelpWaiting extends StatelessWidget {
+                             'card_version': card['card_version']
+                           }),
+                         ]))),
+-        callbackEntry ?? button('Request a callback', 'callback'),
++        if (callbacksAllowed)
++          callbackEntry ?? button('Request a callback', 'callback'),
+       ] else if (state == 'claimed') ...[
+         Text(format('Handled by %s', view['handler'] ?? '—'),
+             style: Theme.of(context).textTheme.titleMedium),
+diff --git a/flutter/lib/steaddesk/help_signer.dart b/flutter/lib/steaddesk/help_signer.dart
+index 66b11c9..50f0398 100644
+--- a/flutter/lib/steaddesk/help_signer.dart
++++ b/flutter/lib/steaddesk/help_signer.dart
+@@ -24,7 +24,7 @@ class MerchantHelpSigner {
+ 
+   Map<String, String> signQuickCheck(
+       String operation, int keyVersion, Map<String, dynamic> body) {
+-    if (!const {'identity', 'inventory', 'report'}.contains(operation)) {
++    if (!const {'identity', 'inventory', 'report', 'features'}.contains(operation)) {
+       throw ArgumentError('Unsupported merchant check operation');
+     }
+     return _quickCheckCall(operation, keyVersion, body);
+diff --git a/flutter/lib/steaddesk/merchant_panel.dart b/flutter/lib/steaddesk/merchant_panel.dart
+index 47295dc..e57d0a2 100644
+--- a/flutter/lib/steaddesk/merchant_panel.dart
++++ b/flutter/lib/steaddesk/merchant_panel.dart
+@@ -10,6 +10,8 @@ import '../desktop/pages/desktop_home_page.dart' show setPasswordDialog;
+ import '../models/platform_model.dart';
+ import '../models/server_model.dart';
+ import 'merchant_build.dart';
++import 'store_feature_gate_stub.dart' if (dart.library.io) 'store_features.dart'
++    show storeGate;
+ import 'help/merchant_help_off.dart'
+     if (dart.library.io) 'merchant_help_api.dart';
+ import 'quick/merchant_off.dart' if (dart.library.io) 'quick_merchant_api.dart';
+@@ -413,8 +415,9 @@ class _MerchantPanelState extends State<MerchantPanel>
+         if (merchantQuickEnabled &&
+             !widget.connectionManager &&
+             (merchantAndroid || merchantWindows))
+-          merchantQuickEntry(),
+-        if (helpEnabled && !widget.connectionManager) merchantHelpEntry(),
++          storeGate('quick_check', null, merchantQuickEntry()),
++        if (helpEnabled && !widget.connectionManager)
++          storeGate('help', null, merchantHelpEntry()),
+         if (merchantPhone.trim().isNotEmpty) ...[
+           const SizedBox(height: 12),
+           Text(translate('Support phone')),
+@@ -518,7 +521,7 @@ class _MerchantPanelState extends State<MerchantPanel>
+                     if ((merchantAndroid ||
+                             merchantWindows && widget.connectionManager) &&
+                         sessions.length == 1)
+-                      fixedMerchantNotice(),
++                      storeGate('toolbar_actions', null, fixedMerchantNotice()),
+                     Expanded(child: content()),
+                   ])),
+         bottomNavigationBar: SafeArea(
+diff --git a/flutter/lib/steaddesk/ops_health.dart b/flutter/lib/steaddesk/ops_health.dart
+index f211951..742c4f0 100644
+--- a/flutter/lib/steaddesk/ops_health.dart
++++ b/flutter/lib/steaddesk/ops_health.dart
+@@ -131,8 +131,12 @@ class HealthStore extends ChangeNotifier {
+   final bool Function() isCurrent;
+   final DateTime Function() now;
+   final Duration checkInterval;
++  final Future<Map<String, Set<String>>> Function(Iterable<String>)?
++      storeFeatures;
++  Set<String> healthPeers = {}, quickPeers = {};
+   HealthStore(this.api,
+       {required this.isCurrent,
++      this.storeFeatures,
+       DateTime Function()? now,
+       this.checkInterval = const Duration(seconds: 2)})
+       : now = now ?? DateTime.now;
+@@ -235,9 +239,21 @@ class HealthStore extends ChangeNotifier {
+           .map(DeviceHealth.from);
+       final snapshot = {for (final row in rows) row.id: row};
+       final notices = (both[1]['alerts'] as List).cast<Map<String, dynamic>>();
++      final features = await storeFeatures?.call(snapshot.keys);
+       if (!active) return;
+-      devices = snapshot;
+-      alerts = notices;
++      healthPeers = snapshot.keys
++          .where((id) =>
++              features == null || features[id]?.contains('health') == true)
++          .toSet();
++      quickPeers = snapshot.keys
++          .where((id) =>
++              features == null || features[id]?.contains('quick_check') == true)
++          .toSet();
++      devices = Map.fromEntries(snapshot.entries.where((entry) =>
++          healthPeers.contains(entry.key) || quickPeers.contains(entry.key)));
++      alerts = notices
++          .where((row) => healthPeers.contains(row['device_id']))
++          .toList();
+       available = true;
+       error = null;
+       _scheduleStaleness();
+@@ -245,7 +261,10 @@ class HealthStore extends ChangeNotifier {
+       if (!active) return;
+       error = (e is HealthFailure ? e : const HealthFailure(0)).toString();
+       available = false;
+-      if (e is HealthFailure && (e.status == 403 || e.status == 404)) {
++      if (storeFeatures != null ||
++          e is HealthFailure && (e.status == 403 || e.status == 404)) {
++        healthPeers.clear();
++        quickPeers.clear();
+         devices = {};
+         alerts = [];
+       }
+diff --git a/flutter/lib/steaddesk/ops_health_host.dart b/flutter/lib/steaddesk/ops_health_host.dart
+index 0a2e0aa..d967582 100644
+--- a/flutter/lib/steaddesk/ops_health_host.dart
++++ b/flutter/lib/steaddesk/ops_health_host.dart
+@@ -5,6 +5,9 @@ import 'package:flutter/material.dart';
+ import '../common.dart' show gFFI;
+ import '../models/platform_model.dart' show bind;
+ import 'ops_health.dart';
++import 'merchant_build.dart' show opsHealthEnabled;
++import 'store_features.dart';
++import 'store_feature_rows.dart';
+ import 'ops_health_widgets.dart';
+ import 'quick_support_api.dart';
+ 
+@@ -74,6 +77,18 @@ class _EngineHealth extends ChangeNotifier {
+       origin = target;
+       retire();
+       final next = HealthStore(OpsHealthHttp(target, current.token),
++          storeFeatures: (peers) async {
++            final snapshots = await storeFeaturesForPeers(peers);
++            final now = DateTime.now();
++            return {
++              for (final e in snapshots.entries)
++                e.key: {
++                  if (e.value.allows('health', opsHealthEnabled, now)) 'health',
++                  if (e.value.allows('quick_check', supportQuickEnabled, now))
++                    'quick_check',
++                }
++            };
++          },
+           isCurrent: () =>
+               users > 0 &&
+               generation == guard &&
+@@ -136,6 +151,7 @@ class _OpsHealthHostState extends State<OpsHealthHost> {
+             builder: (_, __) {
+               switch (widget.surface) {
+                 case HealthSurface.header:
++                  if (store.healthPeers.isEmpty) return const SizedBox.shrink();
+                   return TextButton(
+                       onPressed: () => showDialog<void>(
+                           context: context,
+@@ -154,10 +170,11 @@ class _OpsHealthHostState extends State<OpsHealthHost> {
+                           '告警 ${store.available ? store.alerts.length : '—'}'));
+                 case HealthSurface.inventory:
+                   if (!store.available ||
+-                      !store.devices.containsKey(widget.device)) {
++                      !store.quickPeers.contains(widget.device)) {
+                     return Text(store.error ?? '设备清单暂不可用。');
+                   }
+-                  return storeInventory(store, widget.device!);
++                  return storeGate('quick_check', widget.device,
++                      storeInventory(store, widget.device!));
+                 case HealthSurface.overview:
+                   return ListView(padding: const EdgeInsets.all(16), children: [
+                     if (store.error != null) Text(store.error!),
+@@ -169,17 +186,22 @@ class _OpsHealthHostState extends State<OpsHealthHost> {
+                           subtitle: Column(
+                               crossAxisAlignment: CrossAxisAlignment.start,
+                               children: [
+-                                HealthDeviceView(store: store, id: id),
+-                                if (supportQuickEnabled && store.available)
++                                if (store.healthPeers.contains(id))
++                                  HealthDeviceView(store: store, id: id),
++                                if (store.quickPeers.contains(id) &&
++                                    store.available)
+                                   merchantReport(store, id)
+                               ])),
+                   ]);
+                 default:
+-                  return HealthDeviceView(
+-                      key: ValueKey((store, widget.device)),
+-                      store: store,
+-                      id: widget.device!,
+-                      checks: widget.surface == HealthSurface.card);
++                  return storeGate(
++                      'health',
++                      widget.device,
++                      HealthDeviceView(
++                          key: ValueKey((store, widget.device)),
++                          store: store,
++                          id: widget.device!,
++                          checks: widget.surface == HealthSurface.card));
+               }
+             });
+       });
+diff --git a/flutter/lib/steaddesk/ops_health_widgets.dart b/flutter/lib/steaddesk/ops_health_widgets.dart
+index 2a05077..ca2726e 100644
+--- a/flutter/lib/steaddesk/ops_health_widgets.dart
++++ b/flutter/lib/steaddesk/ops_health_widgets.dart
+@@ -47,7 +47,8 @@ class _HealthDeviceViewState extends State<HealthDeviceView> {
+         epoch == run &&
+         scope == store.scopeRevision &&
+         store.active &&
+-        store.devices.containsKey(id);
++        store.devices.containsKey(id) &&
++        (store.storeFeatures == null || store.healthPeers.contains(id));
+     setState(() {
+       busy = true;
+       error = null;
+@@ -159,7 +160,10 @@ class _HealthAlertListState extends State<HealthAlertList> {
+                         ])));
+         if (reason == null) return;
+       }
+-      if (!mounted || store != widget.store || !store.active) return;
++      if (!mounted ||
++          store != widget.store ||
++          !store.active ||
++          !store.alerts.any((row) => row['id'] == id)) return;
+       await store.updateAlert(id, reason);
+     } catch (e) {
+       if (mounted && store == widget.store) {
+diff --git a/flutter/lib/steaddesk/quick/http.dart b/flutter/lib/steaddesk/quick/http.dart
+index 00e5b9a..869ef89 100644
+--- a/flutter/lib/steaddesk/quick/http.dart
++++ b/flutter/lib/steaddesk/quick/http.dart
+@@ -16,6 +16,7 @@ Future<Json> signedQuickCall(CheckScope scope, String op, int version,
+   final route = switch (op) {
+     'identity' => 'update-identity',
+     'inventory' => 'check-inventory',
++    'features' => 'store-features',
+     'report' => 'check-reports',
+     _ => throw StateError('Unknown check operation')
+   };
+diff --git a/flutter/lib/steaddesk/quick/support.dart b/flutter/lib/steaddesk/quick/support.dart
+index 72ed11d..32eea39 100644
+--- a/flutter/lib/steaddesk/quick/support.dart
++++ b/flutter/lib/steaddesk/quick/support.dart
+@@ -27,7 +27,9 @@ class _StoreViewState extends State<_StoreView> {
+   bool get current =>
+       mounted &&
+       widget.store.active &&
+-      widget.store.devices.containsKey(widget.device);
++      widget.store.devices.containsKey(widget.device) &&
++      (widget.store.storeFeatures == null ||
++          widget.store.quickPeers.contains(widget.device));
+   bool get editable => current && policy['can_edit'] == true && !busy;
+   @override
+   void initState() {
+diff --git a/flutter/lib/steaddesk/store_feature_admin.dart b/flutter/lib/steaddesk/store_feature_admin.dart
+new file mode 100644
+index 0000000..11874e1
+--- /dev/null
++++ b/flutter/lib/steaddesk/store_feature_admin.dart
+@@ -0,0 +1,160 @@
++import 'package:flutter/material.dart';
++
++import 'store_features.dart';
++
++const _labels = {
++  'health': '设备健康',
++  'help': '商户求助',
++  'quick_check': '快速检查',
++  'toolbar': '只读工具栏',
++  'toolbar_actions': '改动类动作',
++  'callback': '预约回电',
++  'step_cards': '步骤卡',
++};
++
++class StoreFeatureAdmin extends StatefulWidget {
++  final String device;
++  const StoreFeatureAdmin({super.key, required this.device});
++  @override
++  State<StoreFeatureAdmin> createState() => _StoreFeatureAdminState();
++}
++
++class _StoreFeatureAdminState extends State<StoreFeatureAdmin> {
++  Map<String, dynamic>? snapshot;
++  bool busy = false;
++  String? error;
++  int generation = 0;
++  String? owner;
++  @override
++  void initState() {
++    super.initState();
++    refresh();
++  }
++
++  @override
++  void didUpdateWidget(StoreFeatureAdmin old) {
++    super.didUpdateWidget(old);
++    if (old.device != widget.device) {
++      snapshot = null;
++      refresh();
++    }
++  }
++
++  Future<void> refresh() async {
++    final guard = ++generation;
++    final auth = operatorContext();
++    setState(() {
++      busy = true;
++      error = null;
++    });
++    try {
++      final result = await manageStoreFeatures(widget.device);
++      StoreFeatureSnapshot.parse(result, DateTime.now(), online: true);
++      if (mounted && guard == generation && auth == operatorContext()) {
++        setState(() {
++          snapshot = result;
++          owner = auth;
++        });
++      }
++    } catch (_) {
++      if (mounted && guard == generation) {
++        setState(() {
++          snapshot = null;
++          error = '无法读取门店功能，请检查登录状态和门店权限。';
++        });
++      }
++    } finally {
++      if (mounted && guard == generation) setState(() => busy = false);
++    }
++  }
++
++  Future<void> edit(String name, bool enabled) async {
++    final row = snapshot;
++    if (busy ||
++        row == null ||
++        owner != operatorContext() ||
++        row['can_edit'] != true) return;
++    final device = widget.device, guard = generation;
++    String reason = '';
++    final why = await showDialog<String>(
++        context: context,
++        builder: (ctx) => StatefulBuilder(
++            builder: (ctx, change) => AlertDialog(
++                  title: Text('${enabled ? '启用' : '停用'}${_labels[name]}'),
++                  content: TextField(
++                      autofocus: true,
++                      maxLength: 160,
++                      decoration: const InputDecoration(labelText: '修改原因'),
++                      onChanged: (v) => change(() => reason = v.trim())),
++                  actions: [
++                    TextButton(
++                        onPressed: () => Navigator.pop(ctx),
++                        child: const Text('取消')),
++                    TextButton(
++                        onPressed: reason.isEmpty
++                            ? null
++                            : () => Navigator.pop(ctx, reason),
++                        child: const Text('确认'))
++                  ],
++                )));
++    if (why == null ||
++        !mounted ||
++        guard != generation ||
++        busy ||
++        owner != operatorContext()) return;
++    setState(() {
++      busy = true;
++      error = null;
++    });
++    try {
++      await manageStoreFeatures(device, {
++        'store_id': row['store_id'],
++        'flags': {name: enabled},
++        'reason': why
++      });
++      if (mounted && guard == generation) await refresh();
++    } catch (_) {
++      if (mounted && guard == generation) {
++        await refresh();
++        if (mounted && widget.device == device) {
++          setState(() => error = '修改未确认，请核对回读结果。');
++        }
++      }
++    }
++  }
++
++  @override
++  Widget build(BuildContext context) {
++    final row = owner == operatorContext() ? snapshot : null;
++    return ListView(padding: const EdgeInsets.all(16), children: [
++      Row(children: [
++        const Expanded(child: Text('门店功能')),
++        IconButton(
++            tooltip: '刷新',
++            onPressed: busy ? null : refresh,
++            icon: const Icon(Icons.refresh))
++      ]),
++      if (busy) const LinearProgressIndicator(),
++      if (error != null) Text(error!),
++      if (row != null) ...[
++        Text('门店 ${row['store_id']}'),
++        for (final name in storeFeatureNames)
++          SwitchListTile(
++              title: Text(_labels[name]!),
++              value: row['flags'][name] == true,
++              onChanged: !busy && row['can_edit'] == true
++                  ? (v) => edit(name, v)
++                  : null),
++        const Divider(),
++        const Text('最近 10 条修改'),
++        for (final item
++            in (row['history'] as List? ?? const []).whereType<Map>().take(10))
++          ListTile(
++              title: Text(
++                  '${_labels[item['feature']] ?? item['feature']} · ${item['enabled'] == true ? '开' : '关'}'),
++              subtitle:
++                  Text('${item['at']} · ${item['actor']}\n${item['reason']}'))
++      ]
++    ]);
++  }
++}
+diff --git a/flutter/lib/steaddesk/store_feature_gate_stub.dart b/flutter/lib/steaddesk/store_feature_gate_stub.dart
+new file mode 100644
+index 0000000..28ff871
+--- /dev/null
++++ b/flutter/lib/steaddesk/store_feature_gate_stub.dart
+@@ -0,0 +1,4 @@
++import 'package:flutter/widgets.dart';
++
++Widget storeGate(String name, String? peer, Widget child) =>
++    const SizedBox.shrink();
+diff --git a/flutter/lib/steaddesk/store_feature_policy.dart b/flutter/lib/steaddesk/store_feature_policy.dart
+new file mode 100644
+index 0000000..cd0c4d9
+--- /dev/null
++++ b/flutter/lib/steaddesk/store_feature_policy.dart
+@@ -0,0 +1,80 @@
++import 'dart:convert';
++
++const storeFeatureNames = {
++  'health',
++  'help',
++  'quick_check',
++  'toolbar',
++  'toolbar_actions',
++  'callback',
++  'step_cards'
++};
++const offlineStoreFeatures = {'health', 'quick_check', 'toolbar', 'step_cards'};
++
++class StoreFeatureSnapshot {
++  final String store;
++  final Map<String, bool> flags;
++  final DateTime observed;
++  final bool online;
++
++  StoreFeatureSnapshot(this.store, this.flags, this.observed,
++      {required this.online});
++
++  factory StoreFeatureSnapshot.parse(
++      Map<String, dynamic> row, DateTime observed,
++      {required bool online}) {
++    final store = row['store_id'], flags = row['flags'];
++    if (store is! String ||
++        store.isEmpty ||
++        flags is! Map ||
++        flags.length != storeFeatureNames.length ||
++        !storeFeatureNames.every((key) => flags[key] is bool)) {
++      throw const FormatException('Invalid store feature response');
++    }
++    return StoreFeatureSnapshot(store, Map<String, bool>.from(flags), observed,
++        online: online);
++  }
++
++  bool allows(String name, bool compiled, DateTime now) {
++    final age = now.difference(observed);
++    return compiled &&
++        flags[name] == true &&
++        !age.isNegative &&
++        age < const Duration(hours: 24) &&
++        (online || offlineStoreFeatures.contains(name));
++  }
++}
++
++Future<StoreFeatureSnapshot?> resolveStoreFeatures({
++  required Future<Map<String, dynamic>> Function() fetch,
++  required int Function(Object) statusOf,
++  required String Function() load,
++  required Future<void> Function(String) save,
++}) async {
++  late final StoreFeatureSnapshot snapshot;
++  try {
++    final body = await fetch();
++    snapshot =
++        StoreFeatureSnapshot.parse(body, DateTime.now().toUtc(), online: true);
++  } catch (e) {
++    final status = statusOf(e);
++    if (e is FormatException ||
++        e is TypeError ||
++        status >= 400 && status < 500) {
++      await save('');
++      return null;
++    }
++    final cached = load();
++    if (cached.isEmpty) return null;
++    final data = jsonDecode(cached) as Map<String, dynamic>;
++    return StoreFeatureSnapshot.parse(data,
++        DateTime.fromMillisecondsSinceEpoch(data['at'] as int, isUtc: true),
++        online: false);
++  }
++  await save(jsonEncode({
++    'store_id': snapshot.store,
++    'flags': snapshot.flags,
++    'at': snapshot.observed.millisecondsSinceEpoch,
++  }));
++  return snapshot;
++}
+diff --git a/flutter/lib/steaddesk/store_feature_rows.dart b/flutter/lib/steaddesk/store_feature_rows.dart
+new file mode 100644
+index 0000000..c62bb87
+--- /dev/null
++++ b/flutter/lib/steaddesk/store_feature_rows.dart
+@@ -0,0 +1,14 @@
++import 'store_features.dart';
++
++Future<Map<String, StoreFeatureSnapshot>> storeFeaturesForPeers(
++    Iterable<String> peers) async {
++  final unique = peers.toSet().toList();
++  final result = <String, StoreFeatureSnapshot>{};
++  for (var i = 0; i < unique.length; i += 8) {
++    await Future.wait(unique.skip(i).take(8).map((peer) async {
++      final snapshot = await readStoreFeatures(peer);
++      if (snapshot != null) result[peer] = snapshot;
++    }));
++  }
++  return result;
++}
+diff --git a/flutter/lib/steaddesk/store_features.dart b/flutter/lib/steaddesk/store_features.dart
+new file mode 100644
+index 0000000..054462b
+--- /dev/null
++++ b/flutter/lib/steaddesk/store_features.dart
+@@ -0,0 +1,173 @@
++import 'dart:async';
++import 'dart:convert';
++
++import 'package:crypto/crypto.dart';
++import 'package:flutter/material.dart';
++
++import '../models/native_model.dart' show PlatformFFI;
++import '../models/platform_model.dart' show bind;
++import 'help/merchant_help_client.dart' show configuredHelpOrigin;
++import 'ops_health.dart';
++import 'quick/check.dart' show CheckFailure, validId;
++import 'quick/http.dart' show signedQuickCall;
++import 'store_feature_policy.dart';
++export 'store_feature_policy.dart';
++
++String operatorContext() {
++  final token = bind.mainGetLocalOption(key: 'access_token');
++  return token.isEmpty ? '' : sha256.convert(utf8.encode(token)).toString();
++}
++
++typedef _Scope = ({Uri origin, String device, String identity, bool merchant});
++
++Future<_Scope?> _scope(String? peer) async {
++  if (peer != null) {
++    if (!validId(peer)) return null;
++    final origin = Uri.parse(await bind.mainGetApiServer());
++    final token = bind.mainGetLocalOption(key: 'access_token');
++    if (token.isEmpty) return null;
++    return (origin: origin, device: peer, identity: token, merchant: false);
++  }
++  final origin =
++      configuredHelpOrigin(await bind.mainGetOption(key: 'api-server'));
++  final device = await bind.mainGetMyId();
++  final signer = PlatformFFI.instance.helpSigner;
++  if (signer == null || !validId(device)) return null;
++  return (
++    origin: origin,
++    device: device,
++    identity: signer.quickCheckBinding(),
++    merchant: true
++  );
++}
++
++String _cacheKey(_Scope scope) =>
++    'sd-store-features-${sha256.convert(utf8.encode(jsonEncode([
++          scope.origin.toString(),
++          scope.device,
++          scope.identity,
++          scope.merchant
++        ])))}';
++
++Future<Map<String, dynamic>> _request(_Scope scope,
++    [Map<String, dynamic>? update]) async {
++  if (!scope.merchant) {
++    final http = OpsHealthHttp(scope.origin, scope.identity);
++    try {
++      return await http.request(update == null ? 'GET' : 'PUT',
++          'devices/${scope.device}/store-features', update);
++    } finally {
++      http.close();
++    }
++  }
++  if (update != null) throw StateError('Device store features are read-only');
++  final signer = PlatformFFI.instance.helpSigner!;
++  final target =
++      (origin: scope.origin, device: scope.device, binding: scope.identity);
++  final identity =
++      await signedQuickCall(target, 'identity', 0, {}, signer.signQuickCheck);
++  final version = identity['key_version'];
++  if (version is! int || version < 1) {
++    throw const FormatException('Invalid device identity');
++  }
++  return signedQuickCall(
++      target, 'features', version, {}, signer.signQuickCheck);
++}
++
++Future<StoreFeatureSnapshot?> _fetch(_Scope scope) async {
++  final key = _cacheKey(scope);
++  return resolveStoreFeatures(
++    fetch: () => _request(scope),
++    statusOf: (e) => e is HealthFailure
++        ? e.status
++        : e is CheckFailure
++            ? e.status
++            : 0,
++    load: () => bind.getLocalFlutterOption(k: key),
++    save: (v) => bind.setLocalFlutterOption(k: key, v: v),
++  );
++}
++
++final _pending = <_Scope, Future<StoreFeatureSnapshot?>>{};
++Future<StoreFeatureSnapshot?> readStoreFeatures(String? peer) async {
++  try {
++    final scope = await _scope(peer);
++    if (scope == null) return null;
++    final result = await _pending.putIfAbsent(
++        scope,
++        () => _fetch(scope).whenComplete(() {
++              _pending.remove(scope);
++            }));
++    return scope == await _scope(peer) ? result : null;
++  } catch (_) {
++    return null;
++  }
++}
++
++class StoreFeaturesView extends StatefulWidget {
++  final String? peer;
++  final Widget Function(StoreFeatureSnapshot?) builder;
++  const StoreFeaturesView({super.key, this.peer, required this.builder});
++  @override
++  State<StoreFeaturesView> createState() => _StoreFeaturesViewState();
++}
++
++class _StoreFeaturesViewState extends State<StoreFeaturesView> {
++  StoreFeatureSnapshot? value;
++  Timer? timer;
++  int generation = 0;
++  String? operator;
++  @override
++  void initState() {
++    super.initState();
++    refresh();
++    timer = Timer.periodic(const Duration(seconds: 30), (_) => refresh());
++  }
++
++  @override
++  void didUpdateWidget(StoreFeaturesView old) {
++    super.didUpdateWidget(old);
++    if (old.peer != widget.peer) {
++      value = null;
++      refresh();
++    }
++  }
++
++  Future<void> refresh() async {
++    final current = ++generation;
++    final id = widget.peer == null ? null : operatorContext();
++    if (operator != id && mounted) {
++      setState(() {
++        value = null;
++        operator = id;
++      });
++    }
++    final next = await readStoreFeatures(widget.peer);
++    if (mounted && current == generation) setState(() => value = next);
++  }
++
++  @override
++  void dispose() {
++    timer?.cancel();
++    super.dispose();
++  }
++
++  @override
++  Widget build(BuildContext context) => widget.builder(
++      widget.peer == null || operator == operatorContext() ? value : null);
++}
++
++Widget storeGate(String name, String? peer, Widget child) => StoreFeaturesView(
++    peer: peer,
++    builder: (s) => s?.allows(name, true, DateTime.now()) == true
++        ? child
++        : const SizedBox.shrink());
++
++Future<Map<String, dynamic>> manageStoreFeatures(String peer,
++    [Map<String, dynamic>? body]) async {
++  final owner = await _scope(peer);
++  if (owner == null) throw const HealthFailure(401);
++  final result = await _request(owner, body);
++  if (owner != await _scope(peer)) throw const HealthFailure(401);
++  return result;
++}
+diff --git a/flutter/lib/steaddesk/support_help_host.dart b/flutter/lib/steaddesk/support_help_host.dart
+index 56bea04..113be94 100644
+--- a/flutter/lib/steaddesk/support_help_host.dart
++++ b/flutter/lib/steaddesk/support_help_host.dart
+@@ -8,6 +8,8 @@ import '../models/platform_model.dart' show bind;
+ import 'callback_build.dart';
+ import 'case_session_api.dart' show CaseSession;
+ import 'support_help.dart';
++import 'store_feature_rows.dart';
++import 'store_features.dart';
+ import 'support_help_queue.dart';
+ 
+ typedef _Login = ({String account, String token});
+@@ -131,7 +133,44 @@ class _SupportHelpHeaderState extends State<SupportHelpHeader> {
+               target == _configuredOrigin() &&
+               target == origin);
+       final active = api!;
+-      final rows = await active.queue(callbacks: supportCallbacksEnabled);
++      final received = await active.queue(callbacks: supportCallbacksEnabled);
++      // Older queue summaries omit device_id. Resolve the server-authorized ticket
++      // detail before associating a row with a store, including during rollouts.
++      final candidates = <HelpRow>[];
++      for (var i = 0; i < received.length; i += 8) {
++        final batch =
++            await Future.wait(received.skip(i).take(8).map((row) async {
++          if (row['lane'] != 'verified') return null;
++          if (verifiedHelpDevice(row) != null) return row;
++          try {
++            final detail = await active.detail(row['id']);
++            if (detail['version'] != row['version'] ||
++                verifiedHelpDevice(detail) == null) return null;
++            return {
++              ...row,
++              'device_id': detail['device_id'],
++              'group_id': detail['group_id']
++            };
++          } on HelpStaffError {
++            return null;
++          }
++        }));
++        candidates.addAll(batch.whereType<HelpRow>());
++      }
++      final policies = await storeFeaturesForPeers(
++          candidates.map(verifiedHelpDevice).whereType<String>());
++      final rows = <HelpRow>[];
++      for (final row in candidates) {
++        final flags = policies[verifiedHelpDevice(row)], now = DateTime.now();
++        if (flags == null ||
++            row['group_id'] != null && row['group_id'] != flags.store ||
++            !flags.allows('help', true, now)) continue;
++        final callback = flags.allows('callback', supportCallbacksEnabled, now);
++        if (!callback && row['state'] == 'callback_requested') continue;
++        rows.add(callback
++            ? row
++            : (Map<String, dynamic>.from(row)..remove('callback')));
++      }
+       if (!mounted || active != api || _login() != now) return;
+       active.check();
+       if (supportCallbacksEnabled &&
+@@ -197,6 +236,21 @@ class _SupportHelpHeaderState extends State<SupportHelpHeader> {
+                     valueListenable: queueChanges,
+                     builder: (_, revision, __) => SupportHelpQueue(
+                         api: active,
++                        allowAction: (row, feature) async {
++                          final peer = verifiedHelpDevice(row);
++                          if (peer == null) return false;
++                          final snapshot = await readStoreFeatures(peer);
++                          final now = DateTime.now();
++                          return active.current() &&
++                              snapshot != null &&
++                              (row['group_id'] == null ||
++                                  row['group_id'] == snapshot.store) &&
++                              snapshot.allows('help', true, now) &&
++                              snapshot.allows(
++                                  feature,
++                                  feature == 'help' || supportCallbacksEnabled,
++                                  now);
++                        },
+                         rows: tickets,
+                         error: error,
+                         onRefresh: _refresh,
+@@ -232,9 +286,11 @@ class _SupportHelpHeaderState extends State<SupportHelpHeader> {
+   }
+ 
+   @override
+-  Widget build(BuildContext context) => TextButton(
+-      onPressed: login == null ? null : _open,
+-      child: Text(
+-          '求助 ${tickets?.where((r) => r['state'] != 'claimed').length ?? '—'}'
+-          '${supportCallbacksEnabled && (tickets?.any((r) => isDueCallback(r, login?.account ?? '')) ?? false) ? ' · 回电到时' : ''}'));
++  Widget build(BuildContext context) => tickets?.isNotEmpty != true
++      ? const SizedBox.shrink()
++      : TextButton(
++          onPressed: login == null ? null : _open,
++          child: Text(
++              '求助 ${tickets?.where((r) => r['state'] != 'claimed').length ?? '—'}'
++              '${supportCallbacksEnabled && (tickets?.any((r) => isDueCallback(r, login?.account ?? '')) ?? false) ? ' · 回电到时' : ''}'));
+ }
+diff --git a/flutter/lib/steaddesk/support_help_queue.dart b/flutter/lib/steaddesk/support_help_queue.dart
+index 34dc1a5..8c596f5 100644
+--- a/flutter/lib/steaddesk/support_help_queue.dart
++++ b/flutter/lib/steaddesk/support_help_queue.dart
+@@ -11,6 +11,7 @@ class SupportHelpQueue extends StatefulWidget {
+   final String? error;
+   final bool callbacksEnabled;
+   final Future<void> Function() onRefresh;
++  final Future<bool> Function(HelpRow row, String feature)? allowAction;
+   final Future<void> Function(HelpRow) onConnect;
+   const SupportHelpQueue(
+       {super.key,
+@@ -18,6 +19,7 @@ class SupportHelpQueue extends StatefulWidget {
+       required this.rows,
+       required this.error,
+       this.callbacksEnabled = supportCallbacksEnabled,
++      this.allowAction,
+       required this.onRefresh,
+       required this.onConnect});
+   @override
+@@ -102,7 +104,9 @@ class _SupportHelpQueueState extends State<SupportHelpQueue> {
+                               : () => Navigator.pop(ctx, true),
+                           child: const Text('保存结案')),
+                     ])));
+-    if (!mounted || confirmed != true) return;
++    if (!mounted ||
++        confirmed != true ||
++        await widget.allowAction?.call(row, 'help') == false) return;
+     await widget.api.closeCase({
+       'id': const Uuid().v4(),
+       'agent': widget.api.account,
+@@ -116,6 +120,8 @@ class _SupportHelpQueueState extends State<SupportHelpQueue> {
+       issue = null;
+     });
+     try {
++      if (await widget.allowAction?.call(row, 'help') == false)
++        throw const HelpStaffError(403);
+       final ticket = row['state'] == 'claimed'
+           ? await widget.api.detail(row['id'])
+           : await widget.api.claim(row);
+@@ -155,6 +161,8 @@ class _SupportHelpQueueState extends State<SupportHelpQueue> {
+       issue = null;
+     });
+     try {
++      if (await widget.allowAction?.call(row, 'callback') == false)
++        throw const HelpStaffError(403);
+       widget.api.check();
+       if (action == 'claim') {
+         await widget.api.claim(row);
+diff --git a/flutter/lib/steaddesk/support_home.dart b/flutter/lib/steaddesk/support_home.dart
+index bbac98f..85d97b0 100644
+--- a/flutter/lib/steaddesk/support_home.dart
++++ b/flutter/lib/steaddesk/support_home.dart
+@@ -19,6 +19,7 @@ import '../models/peer_model.dart';
+ import '../models/peer_tab_model.dart';
+ import '../models/ab_model.dart';
+ import 'ops_health_host.dart';
++import 'store_feature_admin.dart';
+ import 'quick_support_api.dart' show supportQuickEnabled;
+ import 'fleet_admin_api.dart';
+ import 'kb_admin_api.dart';
+diff --git a/flutter/lib/steaddesk/today/data.dart b/flutter/lib/steaddesk/today/data.dart
+index b349327..90f9958 100644
+--- a/flutter/lib/steaddesk/today/data.dart
++++ b/flutter/lib/steaddesk/today/data.dart
+@@ -6,6 +6,8 @@ import 'dart:typed_data';
+ import 'package:flutter/foundation.dart';
+ import '../ops_health.dart' show HealthFailure, OpsHealthHttp;
+ import '../ops_groups.dart' show opsEndpoint;
++import '../callback_build.dart' show supportCallbacksEnabled;
++import '../merchant_build.dart' show opsHealthEnabled, helpEnabled;
+ 
+ typedef TodayJson = Map<String, dynamic>;
+ const sections = {
+@@ -40,14 +42,35 @@ class TodayHttp implements TodayApi {
+   }
+ 
+   @override
+-  Future<TodayJson> snapshot() => get(base.resolve('today'));
++  Future<TodayJson> snapshot() async {
++    final result = await get(base.resolve('today'));
++    final groups = Map<String, dynamic>.from(result['sections'] as Map);
++    groups.removeWhere((name, _) => !visibleSection(name, result));
++    return {...result, 'sections': groups};
++  }
++
++  bool visibleSection(String group, TodayJson result) {
++    final compiled = switch (group) {
++      'offline' || 'alerts' || 'manual' || 'self_heal' => opsHealthEnabled,
++      'queue' => helpEnabled,
++      'callbacks' => helpEnabled && supportCallbacksEnabled,
++      _ => null
++    };
++    return compiled == null ||
++        compiled && result['store_features_applied'] == true;
++  }
++
+   @override
+-  Future<TodayJson> list(String filter, int offset) {
++  Future<TodayJson> list(String filter, int offset) async {
+     if (!sections.values.any((filters) => filters.contains(filter)) ||
+         offset < 0) throw const HealthFailure(400);
+-    return get(base
++    final result = await get(base
+         .resolve('today/$filter')
+         .replace(queryParameters: {'limit': '25', 'offset': '$offset'}));
++    final group =
++        sections.keys.firstWhere((key) => sections[key]!.contains(filter));
++    if (!visibleSection(group, result)) throw const HealthFailure(403);
++    return result;
+   }
+ 
+   Future<TodayJson> get(Uri uri) async {
+diff --git a/flutter/lib/steaddesk/toolbar/archive.dart b/flutter/lib/steaddesk/toolbar/archive.dart
+index 45f789c..d0229e1 100644
+--- a/flutter/lib/steaddesk/toolbar/archive.dart
++++ b/flutter/lib/steaddesk/toolbar/archive.dart
+@@ -91,12 +91,12 @@ Widget toolbarCaseAttachments(
+         required String caseId,
+         String? ticket,
+         String? origin}) =>
+-    !toolbarEnabled ? const SizedBox.shrink() : Builder(
++    !toolbarEnabled ? const SizedBox.shrink() : storeGate('toolbar', peer, Builder(
+         builder: (ctx) => TextButton.icon(
+             icon: const Icon(Icons.attachment, size: 16),
+             label: const Text('会话附件'),
+             onPressed: () =>
+-                _readCase(ctx, account, peer, caseId, ticket, origin)));
++                _readCase(ctx, account, peer, caseId, ticket, origin))));
+ 
+ Future<void> _readCase(BuildContext ctx, String account, String peer,
+     String caseId, String? ticket, String? origin) async {
+diff --git a/flutter/lib/steaddesk/toolbar/host.dart b/flutter/lib/steaddesk/toolbar/host.dart
+index 160cade..63b87f3 100644
+--- a/flutter/lib/steaddesk/toolbar/host.dart
++++ b/flutter/lib/steaddesk/toolbar/host.dart
+@@ -8,6 +8,7 @@ import '../case_session_api.dart';
+ import '../ops_groups.dart' show opsEndpoint;
+ import '../ops_health.dart' show HealthFailure, OpsHealthHttp;
+ import '../fixed_build.dart';
++import '../store_features.dart';
+ import '../fixed/protocol.dart';
+ import '../fixed/support_dialogs.dart';
+ import 'actions.dart';
+@@ -40,21 +41,34 @@ Widget sessionToolbar(
+         required bool Function() screenshotAllowed,
+         required ToolbarFrame frame,
+         required Widget Function(Widget?, Widget?) builder}) =>
+-    _Toolbar(
++    StoreFeaturesView(
+         key: key,
+         peer: peer,
+-        session: session,
+-        connection: connection,
+-        cases: cases,
+-        platform: platform,
+-        active: active,
+-        screenshotAllowed: screenshotAllowed,
+-        frame: frame,
+-        builder: builder);
++        builder: (features) {
++          final now = DateTime.now();
++          final read = features?.allows('toolbar', toolbarEnabled, now) == true;
++          final fixed =
++              features?.allows('toolbar_actions', fixedSupportEnabled, now) ==
++                  true;
++          if (!read && !fixed) return builder(null, null);
++          return _Toolbar(
++              read: read,
++              fixed: fixed,
++              peer: peer,
++              session: session,
++              connection: connection,
++              cases: cases,
++              platform: platform,
++              active: active,
++              screenshotAllowed: screenshotAllowed,
++              frame: frame,
++              builder: builder);
++        });
+ 
+ class _Toolbar extends StatefulWidget {
+   const _Toolbar(
+-      {required super.key,
++      {required this.read,
++      required this.fixed,
+       required this.peer,
+       required this.session,
+       required this.connection,
+@@ -65,7 +79,7 @@ class _Toolbar extends StatefulWidget {
+       required this.frame,
+       required this.builder});
+   final String peer, session, connection, platform;
+-  final bool cases;
++  final bool cases, read, fixed;
+   final bool Function() active, screenshotAllowed;
+   final ToolbarFrame frame;
+   final Widget Function(Widget?, Widget?) builder;
+@@ -168,12 +182,12 @@ class _ToolbarState extends State<_Toolbar> {
+           authorized = true;
+           history = actions
+               .where((row) => FixedAction.parse(row['action']) != null
+-                  ? fixedSupportEnabled
+-                  : toolbarEnabled)
++                  ? widget.fixed
++                  : widget.read)
+               .toList();
+         });
+       }
+-      if (fixedSupportEnabled && current && !busy) {
++      if (widget.fixed && current && !busy) {
+         List<FixedOption>? found;
+         String? who;
+         try {
+@@ -204,10 +218,12 @@ class _ToolbarState extends State<_Toolbar> {
+   }
+ 
+   Future<void> run(ToolbarAction action) async {
+-    if (!toolbarEnabled || !authorized || !current || busy) return;
++    if (!widget.read || !authorized || !current || busy) return;
+     final allowed = widget.screenshotAllowed;
+     bool valid() =>
+-        current && (action != ToolbarAction.screenshot || allowed());
++        current &&
++        widget.read &&
++        (action != ToolbarAction.screenshot || allowed());
+     if (!valid()) return;
+     setState(() {
+       busy = true;
+@@ -233,7 +249,7 @@ class _ToolbarState extends State<_Toolbar> {
+ 
+   Future<void> runFixed(FixedAction action) async {
+     final peer = supportPeer;
+-    if (!fixedSupportEnabled ||
++    if (!widget.fixed ||
+         !current ||
+         !authorized ||
+         busy ||
+@@ -247,6 +263,7 @@ class _ToolbarState extends State<_Toolbar> {
+     });
+     try {
+       await open(rebind: widget.cases);
++      if (!await fixedAllowed()) return;
+       final latest = FixedOption.options(
+           await request('POST', '$route/fixed-options', {'peer_id': peer}));
+       final choices = latest?.where((o) => o.action == action).toList();
+@@ -264,9 +281,11 @@ class _ToolbarState extends State<_Toolbar> {
+                 (ctx) => fixedConfirmDialog(ctx, choice, step)) ==
+             true;
+       },
+-          () => current
+-              ? bind.mainGetMyId().then((id) => current && id == peer)
+-              : Future.value(false),
++          () async =>
++              await fixedAllowed() &&
++              current &&
++              await bind.mainGetMyId() == peer &&
++              current,
+           ticket: ticket);
+     } catch (e) {
+       if (mounted) {
+@@ -282,8 +301,17 @@ class _ToolbarState extends State<_Toolbar> {
+     }
+   }
+ 
++  Future<bool> fixedAllowed() async {
++    if (!widget.fixed || !current) return false;
++    final flags = await readStoreFeatures(widget.peer);
++    return current &&
++        widget.fixed &&
++        flags?.allows('toolbar_actions', fixedSupportEnabled, DateTime.now()) ==
++            true;
++  }
++
+   Future<void> preview(ToolbarJson row) async {
+-    if (!toolbarEnabled ||
++    if (!widget.read ||
+         !current ||
+         !authorized ||
+         busy ||
+@@ -316,7 +344,8 @@ class _ToolbarState extends State<_Toolbar> {
+           if (value is FixedAction) runFixed(value);
+         },
+         itemBuilder: (_) => toolbarMenuEntries(
+-            widget.screenshotAllowed, widget.platform, options),
++            widget.screenshotAllowed, widget.platform, options,
++            read: widget.read, fixed: widget.fixed),
+         child:
+             const Padding(padding: EdgeInsets.all(8), child: Text('快捷操作 ▾')));
+     final sidebar = Padding(
+@@ -336,7 +365,10 @@ class _ToolbarState extends State<_Toolbar> {
+           else if (authorized && history.isEmpty)
+             const Text('暂无操作'),
+           if (current)
+-            for (final row in history) ...[
++            for (final row in history.where((r) =>
++                FixedAction.parse(r['action']) != null
++                    ? widget.fixed
++                    : widget.read)) ...[
+               Text(
+                   '${_actionLabel(row['action'])} · ${_states[row['state']] ?? row['state']}'),
+               Text(
+@@ -367,9 +399,11 @@ class _ToolbarState extends State<_Toolbar> {
+ List<PopupMenuEntry<Object>> toolbarMenuEntries(
+         bool Function() screenshotAllowed,
+         String platform,
+-        List<FixedOption>? options) =>
++        List<FixedOption>? options,
++        {bool read = toolbarEnabled,
++        bool fixed = fixedSupportEnabled}) =>
+     [
+-      if (toolbarEnabled)
++      if (read && toolbarEnabled)
+         for (final a in ToolbarAction.values)
+           PopupMenuItem(
+               value: a,
+@@ -377,8 +411,8 @@ List<PopupMenuEntry<Object>> toolbarMenuEntries(
+                   (a != ToolbarAction.logs ||
+                       {'Windows', 'Android'}.contains(platform)),
+               child: Text(a.label)),
+-      if (fixedSupportEnabled) ...[
+-        if (toolbarEnabled) const PopupMenuDivider(),
++      if (fixed && fixedSupportEnabled) ...[
++        if (read && toolbarEnabled) const PopupMenuDivider(),
+         for (final action in FixedAction.values)
+           PopupMenuItem(
+               value: action,
+diff --git a/flutter/test/steaddesk/callback_test.dart b/flutter/test/steaddesk/callback_test.dart
+index 35b16b5..db6d3d9 100644
+--- a/flutter/test/steaddesk/callback_test.dart
++++ b/flutter/test/steaddesk/callback_test.dart
+@@ -119,9 +119,15 @@ void main() {
+         await t.pumpAndSettle();
+         await t.tap(find.text('View help request'));
+         await t.pumpAndSettle();
++        if (!enabled) {
++          expect(find.text('Request a callback'), findsNothing);
++          expect(client.actions, isEmpty);
++          await t.pumpWidget(const SizedBox.shrink());
++          return;
++        }
+         await t.tap(find.text('Request a callback'));
+         await t.pumpAndSettle();
+-        if (enabled && capable) {
++        if (capable) {
+           expect(find.text(contact['name']!), findsOneWidget);
+           expect(find.text('Printer'), findsOneWidget);
+           expect(client.actions, isEmpty);
+diff --git a/flutter/test/steaddesk/ops_health_test.dart b/flutter/test/steaddesk/ops_health_test.dart
+index 86f722d..1151fa6 100644
+--- a/flutter/test/steaddesk/ops_health_test.dart
++++ b/flutter/test/steaddesk/ops_health_test.dart
+@@ -74,6 +74,29 @@ class FakeApi implements HealthApi {
+ }
+ 
+ void main() {
++  test('health alerts follow the store switch independently of inventory',
++      () async {
++    final api = FakeApi();
++    var enabled = <String>{'quick_check'};
++    final store = HealthStore(api,
++        isCurrent: () => true,
++        storeFeatures: (peers) async => {for (final id in peers) id: enabled});
++    await store.refresh();
++    expect(store.devices.keys, ['123456789']);
++    expect(store.quickPeers, {'123456789'});
++    expect(store.healthPeers, isEmpty);
++    expect(store.alerts, isEmpty);
++    enabled = {'health'};
++    await store.refresh();
++    expect(store.quickPeers, isEmpty);
++    expect(store.alerts.single['device_id'], '123456789');
++    enabled = {};
++    await store.refresh();
++    expect(store.devices, isEmpty);
++    expect(store.alerts, isEmpty);
++    store.dispose();
++  });
++
+   test('health status, reasons and three minute freshness boundary', () async {
+     final api = FakeApi();
+     final store = HealthStore(api, isCurrent: () => true, now: () => api.at);
+diff --git a/flutter/test/steaddesk/store_feature_cache_test.dart b/flutter/test/steaddesk/store_feature_cache_test.dart
+new file mode 100644
+index 0000000..92e945d
+--- /dev/null
++++ b/flutter/test/steaddesk/store_feature_cache_test.dart
+@@ -0,0 +1,30 @@
++import 'dart:async';
++import 'package:flutter_test/flutter_test.dart';
++import '../../lib/steaddesk/store_feature_policy.dart';
++
++void main() {
++  test(
++      'real resolver reuses read-only settings offline and evicts denied scope',
++      () async {
++    String cache = '';
++    Future<StoreFeatureSnapshot?> read(
++            Future<Map<String, dynamic>> Function() fetch) =>
++        resolveStoreFeatures(
++            fetch: fetch,
++            statusOf: (e) => e is StateError ? 403 : 0,
++            load: () => cache,
++            save: (v) async {
++              cache = v;
++            });
++    await read(() async => {
++          'store_id': 'fixture',
++          'flags': {for (final k in storeFeatureNames) k: true}
++        });
++    final offline = await read(() async => throw TimeoutException('fixture'));
++    expect(offline!.allows('quick_check', true, DateTime.now()), true);
++    expect(offline.allows('toolbar_actions', true, DateTime.now()), false);
++    expect(await read(() async => throw StateError('denied')), isNull);
++    expect(cache, isEmpty);
++    expect(await read(() async => throw TimeoutException('fixture')), isNull);
++  });
++}
+diff --git a/flutter/test/steaddesk/store_feature_policy_test.dart b/flutter/test/steaddesk/store_feature_policy_test.dart
+new file mode 100644
+index 0000000..d681c4c
+--- /dev/null
++++ b/flutter/test/steaddesk/store_feature_policy_test.dart
+@@ -0,0 +1,40 @@
++import 'package:flutter_test/flutter_test.dart';
++import '../../lib/steaddesk/store_feature_policy.dart';
++
++void main() {
++  final t = DateTime.utc(2026, 11, 15);
++  StoreFeatureSnapshot snap(bool enabled, bool online) =>
++      StoreFeatureSnapshot.parse({
++        'store_id': 'fixture',
++        'flags': {for (final name in storeFeatureNames) name: enabled}
++      }, t, online: online);
++  test('both the build and the currently scoped store must enable the feature',
++      () {
++    for (final name in storeFeatureNames) {
++      for (final compiled in [false, true]) {
++        for (final enabled in [false, true]) {
++          expect(snap(enabled, true).allows(name, compiled, t),
++              enabled && compiled);
++        }
++      }
++    }
++  });
++  test('only explicitly read-only operations can reuse a recent offline result',
++      () {
++    for (final name in storeFeatureNames) {
++      final value = snap(true, false);
++      expect(value.allows(name, true, t.add(const Duration(hours: 23))),
++          offlineStoreFeatures.contains(name));
++      expect(value.allows(name, true, t.add(const Duration(hours: 24))), false);
++      expect(value.allows(name, true, t.subtract(const Duration(seconds: 1))),
++          false);
++    }
++  });
++  test('empty or incomplete store responses cannot authorize operations', () {
++    expect(
++        () => StoreFeatureSnapshot.parse(
++            {'store_id': 'fixture', 'flags': {}}, t,
++            online: true),
++        throwsFormatException);
++  });
++}
+diff --git a/src/lib.rs b/src/lib.rs
+index c1b7fa9..27e74e0 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -9,9 +9,9 @@ mod steaddesk_toolbar;
+ mod steaddesk_merchant_logs;
+ #[cfg(steaddesk_fixed_merchant)]
+ mod steaddesk_fixed;
+-#[cfg(any(steaddesk_merchant, steaddesk_qc_merchant, steaddesk_tb_merchant, steaddesk_fixed_merchant))]
++#[cfg(any(steaddesk_help_merchant, steaddesk_merchant, steaddesk_qc_merchant, steaddesk_tb_merchant, steaddesk_fixed_merchant))]
+ mod steaddesk_device_signature;
+-#[cfg(steaddesk_qc_merchant)]
++#[cfg(steaddesk_help_merchant)]
+ mod steaddesk_check_signer;
+ #[cfg(all(windows, steaddesk_fleet_windows))]
+ mod steaddesk_fleet_windows;
+diff --git a/src/steaddesk_check_signer.rs b/src/steaddesk_check_signer.rs
+index c7ed008..094fe8f 100644
+--- a/src/steaddesk_check_signer.rs
++++ b/src/steaddesk_check_signer.rs
+@@ -42,6 +42,9 @@ fn proof(input: Input, device: &str, stamp: u64, nonce: &str) -> Option<Vec<u8>>
+         "identity" if key_version == 0 && body == json!({}) => {
+             ("GET", "/ops/v1/device/update-identity", body)
+         }
++        "features" if key_version > 0 && body == json!({}) => {
++            ("GET", "/ops/v1/device/store-features", body)
++        }
+         "inventory" if key_version > 0 && body == json!({}) => {
+             ("GET", "/ops/v1/device/check-inventory", body)
+         }
+@@ -91,6 +94,9 @@ fn proof(input: Input, device: &str, stamp: u64, nonce: &str) -> Option<Vec<u8>>
+ }
+ 
+ fn headers(input: Input) -> Option<Vec<u8>> {
++    if !cfg!(steaddesk_qc_merchant) && matches!(input.operation.as_str(), "inventory" | "report") {
++        return None;
++    }
+     sodiumoxide::init().ok()?;
+     let device = Config::get_id_or(String::new());
+     if !(9..=10).contains(&device.len()) || !device.bytes().all(|b| b.is_ascii_digit()) {
+@@ -173,6 +179,15 @@ mod tests {
+         );
+     }
+     #[test]
++    fn store_features_use_only_the_fixed_get_path() {
++        let bytes = canonical("features", 1, json!({})).unwrap();
++        let envelope: Value = serde_json::from_slice(&bytes[b"SteadDesk-fleet-v1\0".len()..]).unwrap();
++        assert_eq!(envelope[0], "GET");
++        assert_eq!(envelope[1], "/ops/v1/device/store-features");
++        assert!(canonical("features", 0, json!({})).is_none());
++        assert!(canonical("features", 1, json!({"store_id":"other"})).is_none());
++    }
++    #[test]
+     fn cannot_select_a_different_route_or_sign_extra_fields() {
+         for op in [
+             "update-attempts",
+diff --git a/src/steaddesk_fixed.rs b/src/steaddesk_fixed.rs
+index cbe1acc..6050a3b 100644
+--- a/src/steaddesk_fixed.rs
++++ b/src/steaddesk_fixed.rs
+@@ -14,6 +14,7 @@ use std::{
+ };
+ 
+ const IDENTITY: &str = "/ops/v1/device/update-identity";
++const STORE_FEATURES: &str = "/ops/v1/device/store-features";
+ const POLL: &str = "/ops/v1/device/fixed-poll";
+ const PERMIT: &str = "/ops/v1/device/fixed-permit";
+ const RESULT: &str = "/ops/v1/device/fixed-result";
+@@ -267,6 +268,7 @@ fn client() -> Option<Client> {
+ fn request(c: &Client, s: &Scope, path: &'static str, body: Value, version: u64) -> Option<Value> {
+     let method = match path {
+         IDENTITY if version == 0 && body == json!({}) => "GET",
++        STORE_FEATURES if version > 0 && body == json!({}) => "GET",
+         POLL | PERMIT | RESULT
+             if version > 0 && body["peer_id"] == s.peer && body["link"] == s.link =>
+         {
+@@ -307,6 +309,14 @@ fn request(c: &Client, s: &Scope, path: &'static str, body: Value, version: u64)
+     serde_json::from_slice(&data).ok()
+ }
+ 
++fn fixed_store_enabled(c: &Client, s: &Scope, version: u64) -> bool {
++    request(c, s, STORE_FEATURES, json!({}), version)
++        .is_some_and(|reply| {
++            reply["flags"]["toolbar_actions"].as_bool() == Some(true)
++                && reply["store_id"].as_str().is_some_and(|id| !id.is_empty())
++        })
++}
++
+ fn poll() -> Option<Value> {
+     let Some(s) = scope(true) else {
+         release_printer();
+@@ -319,6 +329,10 @@ fn poll() -> Option<Value> {
+     }
+     let c = client()?;
+     let v = request(&c, &s, IDENTITY, json!({}), 0)?["key_version"].as_u64()?;
++    if !fixed_store_enabled(&c, &s, v) {
++        release_printer();
++        return None;
++    }
+     let previous = ledger().lock().ok()?.profile.clone();
+     let checked = previous.and_then(|(owner, p)| (owner == s && pos_supported(&p)).then_some(p));
+     let mut caps: Vec<_> = ACTIONS
+@@ -597,6 +611,9 @@ fn acknowledged(id: &str, link: &str) -> Option<Value> {
+         return None;
+     }
+     let c = client()?;
++    if !fixed_store_enabled(&c, &s, pending.version) {
++        return None;
++    }
+     let binding = json!({"id":id,"peer_id":s.peer,"link":s.link});
+     let permit = request(&c, &s, PERMIT, binding.clone(), pending.version);
+     let outcome = match permit {
