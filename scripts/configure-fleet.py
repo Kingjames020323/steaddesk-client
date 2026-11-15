@@ -30,16 +30,56 @@ def configure(tree, merchant):
         if not enabled and not value:
             return ""
         parts = urlsplit(value)
-        if (parts.scheme != "https" or not parts.hostname or parts.username or parts.password
+        if (not value.isascii() or any(ord(c) < 33 or ord(c) == 127 or c == chr(92) for c in value)
+                or parts.scheme != "https" or not parts.hostname or parts.username is not None or parts.password is not None
                 or parts.path not in ("", "/") or parts.query or parts.fragment):
             raise ValueError(name + " must be an HTTPS origin")
+        # Parsing the port also validates its range and spelling.
+        if parts.port == 0:
+            raise ValueError(name + " cannot use port zero")
         return value.rstrip("/")
     ops = origin("STEADDESK_FLEET_OPS_ORIGIN")
     artifact = origin("STEADDESK_FLEET_ARTIFACT_ORIGIN", ops)
     profile = os.environ.get("STEADDESK_FLEET_SILENT_PROFILE", "").strip()
     if profile and not re.fullmatch(r"[0-9a-f]{64}", profile):
         raise ValueError("Expected SHA-256 of approved firmware fingerprint")
-    (tree / "src").mkdir(parents=True, exist_ok=True)
+    native = tree / "src"
+    native.mkdir(parents=True, exist_ok=True)
+    # Only the opt-in Windows merchant module includes these constants at compile time.
+    config = native / "steaddesk_fleet_windows_config.rs"
+    platform = native / "platform/steaddesk_fleet"
+    platform_sources = ("fleet_installer.h", "fleet_installer.cpp")
+
+    if enabled:
+        release = (tree / "RELEASE_VERSION").read_text().strip()
+        match = re.fullmatch(r"1\.5\.0-sd\.([1-9][0-9]{0,4})", release)
+        if not match or int(match[1]) > 65535:
+            raise ValueError("Unsupported Windows release version")
+        windows_profile = os.environ.get("STEADDESK_FLEET_WINDOWS_PROFILE", "").strip()
+        if windows_profile and not re.fullmatch(r"[0-9a-f]{64}", windows_profile):
+            raise ValueError("Expected 64 hexadecimal digits for the Windows install profile")
+        strings = {
+            "OPS_ORIGIN": ops,
+            "ARTIFACT_ORIGIN": artifact,
+            "KEY_ID": key_id,
+            "PUBLIC_KEY": public,
+            "SILENT_PROFILE": windows_profile,
+        }
+        lines = [f"pub const {name}: &str = {json.dumps(text)};" for name, text in strings.items()]
+        lines.extend([
+            "pub const KEY_VALID_FROM: u64 = 1767225600;",
+            "pub const KEY_VALID_UNTIL: u64 = 1924992000;",
+            f"pub const CURRENT_BUILD: u64 = {int(match[1])};",
+        ])
+        config.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        assets = Path(__file__).resolve().parents[1] / "windows-fleet"
+        platform.mkdir(parents=True, exist_ok=True)
+        for filename in platform_sources:
+            shutil.copyfile(assets / filename, platform / filename)
+    else:
+        config.unlink(missing_ok=True)
+        for filename in platform_sources:
+            (platform / filename).unlink(missing_ok=True)
     (tree / "src/steaddesk_fleet.rs").write_text(str(enabled).lower()+"\n")
     (tree / "src/steaddesk_fleet_key.rs").write_text(json.dumps(public)+"\n")
     source = tree / "flutter/android/app/src"

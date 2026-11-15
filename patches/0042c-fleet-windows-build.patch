@@ -1,0 +1,113 @@
+diff --git a/build.rs b/build.rs
+index eebc20f..47a4b4d 100644
+--- a/build.rs
++++ b/build.rs
+@@ -119,9 +119,30 @@ fn main() {
+         Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+         _ => panic!("invalid SteadDesk fleet selector"),
+     };
+-    if target_os == "android" && fleet_enabled
+-        && std::fs::read_to_string(selector).map(|s| s.trim() == "false").unwrap_or(false) {
+-        println!("cargo:rustc-cfg=steaddesk_fleet_merchant");
++    if fleet_enabled
++        && std::fs::read_to_string(selector).map(|s| s.trim() == "false").unwrap_or(false)
++    {
++        if target_os == "android" {
++            println!("cargo:rustc-cfg=steaddesk_fleet_merchant");
++        } else if target_os == "windows" {
++            let dir = "src/platform/steaddesk_fleet";
++            cc::Build::new()
++                .cpp(true)
++                .std("c++17")
++                .define("UNICODE", None)
++                .define("_UNICODE", None)
++                .define("NOMINMAX", None)
++                .define("_WIN32_WINNT", "0x0602")
++                .file(format!("{dir}/fleet_installer.cpp"))
++                .compile("steaddesk_fleet_installer");
++            for lib in ["wintrust", "crypt32", "bcrypt", "advapi32", "version", "shell32", "ole32"] {
++                println!("cargo:rustc-link-lib={lib}");
++            }
++            println!("cargo:rerun-if-changed={dir}/fleet_installer.cpp");
++            println!("cargo:rerun-if-changed={dir}/fleet_installer.h");
++            println!("cargo:rerun-if-changed=src/steaddesk_fleet_windows_config.rs");
++            println!("cargo:rustc-cfg=steaddesk_fleet_windows");
++        }
+     }
+     if target_os == "android" {
+         build_android_ifaddrs();
+diff --git a/libs/portable/build.rs b/libs/portable/build.rs
+index e2b2001..2faf66b 100644
+--- a/libs/portable/build.rs
++++ b/libs/portable/build.rs
+@@ -22,6 +22,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
+                 winapi::um::winnt::SUBLANG_ENGLISH_US,
+             ))
+             .set_manifest_file("../../res/manifest.xml");
++        println!("cargo:rerun-if-env-changed=STEADDESK_PACKED_PAYLOAD_SHA256");
++        println!("cargo:rerun-if-changed=../../src/steaddesk_fleet.rs");
++        if product == "SteadDesk" && include!("../../src/steaddesk_fleet.rs") {
++            let hash = std::env::var("STEADDESK_PACKED_PAYLOAD_SHA256")?;
++            if hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
++                return Err("Invalid SHA-256 for the packed merchant executable".into());
++            }
++            res.set("SteadDeskPayloadSHA256", &hash);
++        }
+         res.compile()?;
+     }
+     Ok(())
+diff --git a/libs/portable/generate.py b/libs/portable/generate.py
+index 26d0b37..cfe623c 100755
+--- a/libs/portable/generate.py
++++ b/libs/portable/generate.py
+@@ -3,7 +3,8 @@
+ import os
+ import optparse
+ import subprocess
+-from hashlib import md5
++from hashlib import md5, sha256
++from pathlib import Path
+ import brotli
+ import datetime
+ 
+@@ -84,14 +85,28 @@ def write_app_metadata(output_folder: str):
+         f.write(f"timestamp = {int(datetime.datetime.now().timestamp() * 1000)}\n")
+     print(f"App metadata has been written to {output_path}")
+ 
+-def build_portable(output_folder: str, target: str):
++def fleet_payload_digest(table, exe):
++    # Hash the bytes already selected for data.bin, even if the input file changes later.
++    if normalize(exe) != "steaddesk.exe":
++        raise ValueError("Fleet package must contain the merchant service executable")
++    matches = [packed for name, (packed, _) in table.items() if normalize(name) == normalize(exe)]
++    if len(matches) != 1:
++        raise ValueError("Missing or ambiguous fleet service executable")
++    return sha256(brotli.decompress(matches[0])).hexdigest()
++
++
++def build_portable(output_folder: str, target: str, payload_digest=None):
+     current_dir = os.getcwd()
+     try:
+         os.chdir(output_folder)
+         cmd = ["cargo", "build", "--locked", "--release"]
+         if target:
+             cmd.extend(["--target", target])
+-        subprocess.run(cmd, check=True)
++        env = dict(os.environ)
++        env.pop("STEADDESK_PACKED_PAYLOAD_SHA256", None)
++        if payload_digest:
++            env["STEADDESK_PACKED_PAYLOAD_SHA256"] = payload_digest
++        subprocess.run(cmd, check=True, env=env)
+     finally:
+         os.chdir(current_dir)
+ 
+@@ -152,4 +167,8 @@ if __name__ == '__main__':
+     else:
+         write_package_metadata(md5_table, output_folder, exe)
+         write_app_metadata(output_folder)
+-        build_portable(output_folder, options.target)
++        root = Path(__file__).resolve().parents[2]
++        enabled = (root / "src/steaddesk_fleet.rs").read_text().strip() == "true"
++        merchant = (root / "libs/hbb_common/src/steaddesk_support.rs").read_text().strip() == "false"
++        payload_digest = fleet_payload_digest(md5_table, exe) if enabled and merchant else None
++        build_portable(output_folder, options.target, payload_digest)
