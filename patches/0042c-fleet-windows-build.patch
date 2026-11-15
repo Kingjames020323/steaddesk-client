@@ -1,8 +1,25 @@
+diff --git a/build.py b/build.py
+index 7df00f3..6bcac78 100755
+--- a/build.py
++++ b/build.py
+@@ -314,6 +314,12 @@ def linux_packaging_branch():
+ 
+ def get_features(args):
+     features = ['inline'] if not args.flutter else []
++    if windows:
++        selector = Path(REPO_ROOT) / 'src/steaddesk_fleet.rs'
++        edition = Path(REPO_ROOT) / 'libs/hbb_common/src/steaddesk_support.rs'
++        if (selector.exists() and selector.read_text().strip() == 'true'
++                and edition.read_text().strip() == 'false'):
++            features.append('steaddesk-fleet-windows')
+     if args.hwcodec:
+         features.append('hwcodec')
+     if args.vram:
 diff --git a/build.rs b/build.rs
-index eebc20f..36334cb 100644
+index eebc20f..c6a1262 100644
 --- a/build.rs
 +++ b/build.rs
-@@ -119,9 +119,30 @@ fn main() {
+@@ -119,9 +119,32 @@ fn main() {
          Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
          _ => panic!("invalid SteadDesk fleet selector"),
      };
@@ -15,6 +32,8 @@ index eebc20f..36334cb 100644
 +        if target_os == "android" {
 +            println!("cargo:rustc-cfg=steaddesk_fleet_merchant");
 +        } else if target_os == "windows" {
++            assert!(std::env::var_os("CARGO_FEATURE_STEADDESK_FLEET_WINDOWS").is_some(),
++                "Opt-in Windows merchant builds require --features steaddesk-fleet-windows");
 +            let dir = "src/platform/steaddesk_fleet";
 +            cc::Build::new()
 +                .cpp(true)
