@@ -14,7 +14,7 @@ protected file handles and process launch remain actual candidate code.
 
 The fixture generates nonexportable disposable code-signing certificates in the
 runner's current-user certificate store. Only those exact certificates are
-trusted in current-user Root, and their exact thumbprints/private keys are
+copied as public certificates to the disposable machine Root store. Their exact trust entries and private keys are
 removed in `finally`. It never changes macOS trust. All generated packages and
 keys stay outside the checkout. No timestamp server is contacted.
 

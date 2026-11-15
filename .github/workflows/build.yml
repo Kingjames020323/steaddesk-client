@@ -651,10 +651,11 @@ jobs:
       shell: bash
       run: bash .distribution/scripts/apply-patches.sh "$GITHUB_WORKSPACE"
     - name: Test signed Windows fleet packages with a disposable installer
+      timeout-minutes: 15
       if: matrix.edition == 'merchant' && matrix.job.arch == 'x86_64'
       shell: pwsh
       run: |
-        pwsh -NoLogo -NoProfile -File .distribution/scripts/tests/windows-fleet/run.ps1 -RepoRoot .distribution
+        pwsh -NoLogo -NoProfile -NonInteractive -File .distribution/scripts/tests/windows-fleet/run.ps1 -RepoRoot .distribution
     - name: Restore bridge files
       uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
       with:

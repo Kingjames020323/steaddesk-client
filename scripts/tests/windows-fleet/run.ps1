@@ -3,7 +3,7 @@ param([Parameter(Mandatory=$true)][string]$RepoRoot)
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $false
-if (-not $IsWindows -or $env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_OS -ne 'Windows') {
+if (-not $IsWindows -or $env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_OS -ne 'Windows' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted') {
     throw 'Run only in a disposable Windows GitHub-hosted test job; no office or physical machines.'
 }
 if ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture -ne 'X64') { throw 'UPD-4 platform acceptance requires native Windows x64.' }
@@ -36,10 +36,20 @@ function Run([string]$Exe,[string[]]$Arguments) {
 }
 function Digest([string]$Path) { return (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash.ToLowerInvariant() }
 function New-TestCertificate([string]$Name) {
-    $cert = New-SelfSignedCertificate -Type CodeSigningCert -Subject ('CN=' + $Name) -CertStoreLocation 'Cert:\CurrentUser\My' -HashAlgorithm SHA256 -KeyAlgorithm RSA -KeyLength 2048 -KeyExportPolicy NonExportable -NotAfter ([datetime]::UtcNow.AddDays(1))
+    Write-Host "Generating a disposable signing key."
+    $cert = New-SelfSignedCertificate -Type CodeSigningCert -Subject ('CN=' + $Name) -CertStoreLocation 'Cert:\CurrentUser\My' -HashAlgorithm SHA256 -KeyAlgorithm RSA -KeyLength 2048 -Provider "Microsoft Software Key Storage Provider" -KeyExportPolicy NonExportable -NotAfter ([datetime]::UtcNow.AddDays(1))
     $certificates.Add($cert.Thumbprint)
-    $store = [Security.Cryptography.X509Certificates.X509Store]::new('Root','CurrentUser')
-    try { $store.Open([Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite); $store.Add($cert) } finally { $store.Close() }
+    Write-Host "Installing the public certificate in the disposable runner trust store."
+    $store = [Security.Cryptography.X509Certificates.X509Store]::new('Root','LocalMachine')
+    $public = [Security.Cryptography.X509Certificates.X509Certificate2]::new($cert.RawData)
+    try {
+        $store.Open([Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
+        $store.Add($public)
+    } finally {
+        $store.Close()
+        $public.Dispose()
+    }
+    Write-Host "Disposable signing certificate is ready."
     return $cert
 }
 function Sign-Test([string]$Path,$Certificate) {
@@ -192,7 +202,8 @@ try {
         & sc.exe delete $name | Out-Null
     }
     foreach ($thumb in $certificates) {
-        foreach ($store in @('Root','TrustedPublisher')) { $path='Cert:\CurrentUser\'+$store+'\'+$thumb; if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Force } }
+        $root = 'Cert:\LocalMachine\Root\' + $thumb
+        if (Test-Path -LiteralPath $root) { Remove-Item -LiteralPath $root -Force }
         $path='Cert:\CurrentUser\My\'+$thumb
         if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -DeleteKey -Force }
     }
@@ -203,11 +214,13 @@ try {
 
 foreach ($path in @($stagingBase,$installBase,$agentBase,$lab)) { if (Test-Path -LiteralPath $path) { throw "Owned fixture path survived cleanup: $path" } }
 foreach ($thumb in $certificates) {
-    foreach ($store in @('Root','TrustedPublisher','My')) { if (Test-Path -LiteralPath ('Cert:\CurrentUser\'+$store+'\'+$thumb)) { throw 'Test certificate survived cleanup.' } }
+    foreach ($store in @('Cert:\LocalMachine\Root','Cert:\CurrentUser\My')) {
+        if (Test-Path -LiteralPath (Join-Path $store $thumb)) { throw 'Test certificate survived cleanup.' }
+    }
 }
 [GC]::Collect(); [GC]::WaitForPendingFinalizers()
 foreach ($name in $createdServices) { if (Get-Service -Name $name -ErrorAction SilentlyContinue) { throw "Test service survived cleanup: $name" } }
 $record=Get-Content -LiteralPath $receipt -Raw | ConvertFrom-Json
-$record.cleanup='verified: exact current-user certificate/key, owned synthetic services, staging/install prefixes and binaries removed'
+$record.cleanup='verified: exact machine public certificate and current-user signing key, owned synthetic services, staging/install prefixes and binaries removed'
 [IO.File]::WriteAllText($receipt,($record | ConvertTo-Json -Depth 12),[Text.UTF8Encoding]::new($false))
 Write-Host "WINDOWS FLEET PLATFORM FIXTURE PASSED; sanitized receipt: $receipt"
