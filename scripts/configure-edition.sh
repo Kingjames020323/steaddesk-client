@@ -47,7 +47,21 @@ toolbar = os.environ.get("STEADDESK_TOOLBAR", "").strip().lower()
 if toolbar not in ("", "0", "1", "false", "true"):
     raise ValueError("STEADDESK_TOOLBAR must be true, false, 1 or 0")
 toolbar_enabled = toolbar in ("true", "1")
-module = "host" if toolbar_enabled and not merchant else "off"
+fixed = os.environ.get("STEADDESK_TOOLBAR_ACTIONS", "").strip().lower()
+if fixed not in ("", "0", "1", "false", "true"):
+    raise ValueError("STEADDESK_TOOLBAR_ACTIONS must be true, false, 1 or 0")
+fixed_enabled = fixed in ("true", "1")
+(lib / "fixed_build.dart").write_text(
+    f"const fixedSupportEnabled = {str(fixed_enabled and not merchant).lower()};\n"
+    f"const readToolbarEnabled = {str(toolbar_enabled and not merchant).lower()};\n", encoding="utf-8")
+selected = "merchant" if fixed_enabled and merchant else "off"
+(lib / "fixed_merchant_api.dart").write_text(f"export 'fixed/{selected}.dart';\n", encoding="utf-8")
+(tree / "src/steaddesk_fixed_enabled.rs").write_text(str(fixed_enabled and merchant).lower() + "\n", encoding="utf-8")
+fixed_java = tree / "flutter/android/app/src/main/java/com/carriez/flutter_hbb/FixedActionBuild.java"
+fixed_java.parent.mkdir(parents=True, exist_ok=True)
+fixed_java.write_text("package com.carriez.flutter_hbb;\nfinal class FixedActionBuild { static final boolean ENABLED = "
+    + str(fixed_enabled and merchant).lower() + "; }\n", encoding="utf-8")
+module = "host" if (toolbar_enabled or fixed_enabled) and not merchant else "off"
 (lib / "toolbar_api.dart").write_text(f"export 'toolbar/{module}.dart';\n", encoding="utf-8")
 (tree / "src/steaddesk_tb.rs").write_text(str(toolbar_enabled and merchant).lower() + "\n", encoding="utf-8")
 fleet_admin = os.environ.get("STEADDESK_FLEET_ADMIN", "").strip().lower()

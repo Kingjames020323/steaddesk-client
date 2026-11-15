@@ -22,6 +22,10 @@ name: Build SteadDesk
         description: Enable the three session support actions in this preview
         type: boolean
         default: false
+      steaddesk_toolbar_actions:
+        description: Enable the five registered fixed actions for a branch preview
+        type: boolean
+        default: false
       steaddesk_fleet_admin:
         description: Include the publisher panel in the Windows support preview
         type: boolean
@@ -54,6 +58,7 @@ env:
   STEADDESK_KB: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/preview/ui-v7' && inputs.steaddesk_kb && 'true' || 'false' }}
   STEADDESK_CALLBACK: ${{ github.event_name == 'workflow_dispatch' && github.ref_type == 'branch' && github.ref == 'refs/heads/preview/ui-v7' && inputs.steaddesk_callback && 'true' || 'false' }}
   STEADDESK_TOOLBAR: ${{ github.event_name == 'workflow_dispatch' && github.ref_type == 'branch' && inputs.steaddesk_toolbar && 'true' || 'false' }}
+  STEADDESK_TOOLBAR_ACTIONS: ${{ github.event_name == 'workflow_dispatch' && github.ref_type == 'branch' && inputs.steaddesk_toolbar_actions && 'true' || 'false' }}
   STEADDESK_FLEET_ADMIN: ${{ github.event_name == 'workflow_dispatch' && github.ref_type == 'branch' && inputs.steaddesk_fleet_admin && 'true' || 'false' }}
   STEADDESK_FLEET_UPDATE: ${{ github.event_name == 'workflow_dispatch' && github.ref_type == 'branch' && inputs.steaddesk_fleet_update && 'true' || 'false' }}
   STEADDESK_FLEET_OPS_ORIGIN: ${{ inputs.fleet_ops_origin || vars.STEADDESK_FLEET_OPS_ORIGIN }}
@@ -727,11 +732,11 @@ jobs:
       if: matrix.edition == 'support'
       shell: bash
       run: |
-        STEADDESK_TODAY=true STEADDESK_KB=true STEADDESK_TOOLBAR=true STEADDESK_CASES=true bash .distribution/scripts/configure-edition.sh "$PWD" support
+        STEADDESK_TODAY=true STEADDESK_KB=true STEADDESK_TOOLBAR=true STEADDESK_TOOLBAR_ACTIONS=true STEADDESK_CASES=true bash .distribution/scripts/configure-edition.sh "$PWD" support
         (
           cd flutter
           flutter pub get
-          flutter analyze --no-pub --no-fatal-infos --no-fatal-warnings lib/steaddesk/today lib/steaddesk/kb lib/steaddesk/toolbar lib/steaddesk/metrics lib/steaddesk/cases lib/models/model.dart lib/utils/multi_window_manager.dart lib/desktop/pages/desktop_home_page.dart lib/steaddesk/support_home.dart lib/desktop/pages/remote_page.dart lib/desktop/pages/remote_tab_page.dart lib/desktop/widgets/remote_toolbar.dart
+          flutter analyze --no-pub --no-fatal-infos --no-fatal-warnings lib/steaddesk/today lib/steaddesk/kb lib/steaddesk/fixed lib/steaddesk/toolbar lib/steaddesk/metrics lib/steaddesk/cases lib/models/model.dart lib/utils/multi_window_manager.dart lib/desktop/pages/desktop_home_page.dart lib/steaddesk/support_home.dart lib/desktop/pages/remote_page.dart lib/desktop/pages/remote_tab_page.dart lib/desktop/widgets/remote_toolbar.dart
           flutter test --no-pub test/steaddesk
         )
         # Restore this run's chosen setting for the actual installer.
