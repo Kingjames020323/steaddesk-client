@@ -29,6 +29,11 @@ if cases not in ("", "0", "1", "false", "true"):
     raise ValueError("STEADDESK_CASES must be true, false, 1 or 0")
 cases = not merchant and cases in ("true", "1")
 lib = tree / "flutter/lib/steaddesk"
+today = os.environ.get("STEADDESK_TODAY", "").strip().lower()
+if today not in ("", "0", "1", "false", "true"):
+    raise ValueError("STEADDESK_TODAY must be true, false, 1 or 0")
+today_module = "host" if not merchant and today in ("1", "true") else "off"
+(lib / "today_api.dart").write_text(f"export 'today/{today_module}.dart';\n", encoding="utf-8")
 quick = os.environ.get("STEADDESK_QUICK_CHECK", "").strip().lower()
 if quick not in ("", "0", "1", "false", "true"):
     raise ValueError("STEADDESK_QUICK_CHECK must be true, false, 1 or 0")

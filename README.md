@@ -92,3 +92,7 @@ The update client and publisher panel have independent switches.
 ### Knowledge cards in a preview build
 
 Knowledge cards are off by default. To include them, select the knowledge-card option in **Build SteadDesk** on `preview/ui-v7`, or set `STEADDESK_KB=true` when configuring a local edition. The merchant edition includes the help waiting room; the support edition includes an editor that requires administrator access. The server must enable the same feature before either can use it. Normal PR and tag builds leave it off.
+
+### Support Today dashboard
+
+Select the Today option in **Build SteadDesk** on `preview/ui-v7`, or set `STEADDESK_TODAY=true` when configuring the support edition. Normal PR and tag builds leave this option off. The corresponding ops service must enable the feature. The signed-in support account sees only its permitted sections and drill-down lists. Source timestamps and observation coverage appear when a feed is stale or incomplete. The merchant edition always selects the disabled entry.
