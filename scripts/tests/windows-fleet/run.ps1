@@ -64,7 +64,7 @@ function Build-Fixture([string]$Name,[string]$Payload='',[string]$Product='Stead
     if ($Payload) { $prefix += "#define SD_UPD4_PAYLOAD_SHA `"$Payload`"`n" }
     [IO.File]::WriteAllText($rc,$prefix + [IO.File]::ReadAllText((Join-Path $fixture 'fixture.rc')),[Text.UTF8Encoding]::new($false))
     Run 'rc.exe' @('/nologo',('/fo' + $res),$rc) | Out-Null
-    Run 'cl.exe' @('/nologo','/TC','/W4','/D_CRT_SECURE_NO_WARNINGS',('/Fo' + (Join-Path $lab ($Name+'.obj'))),(Join-Path $fixture 'installer_fixture.c'),$res,('/Fe' + $exe),'/link','advapi32.lib') | Out-Null
+    Run 'cl.exe' @('/nologo','/TC','/W4','/D_CRT_SECURE_NO_WARNINGS',('/Fo' + (Join-Path $lab ($Name+'.obj'))),(Join-Path $fixture 'installer_fixture.c'),('/Fe' + $exe),'/link',$res,'advapi32.lib') | Out-Null
     Sign-Test $exe $script:certificate
     return $exe
 }
