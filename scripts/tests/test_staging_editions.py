@@ -43,11 +43,19 @@ class StagingEditionTests(unittest.TestCase):
                                         "STEADDESK_HELP": str(help_enabled).lower(),
                                         "STEADDESK_METRICS": metrics,
                                         "STEADDESK_OPS_GROUPS": flag,
+                                        "STEADDESK_QUICK_CHECK": flag,
                                         "STEADDESK_OPS_HEALTH": metrics,
                                         "STEADDESK_QUALITY": metrics,
                                         "STEADDESK_RECONNECT": metrics,
                                         "STEADDESK_AGENT_CERT_SHA256": "aa" * 32 if flag else ""}, check=True)
                     lib = tree / "flutter/lib/steaddesk"
+                    quick = flag == "true"
+                    for role in ("support", "merchant"):
+                        selected = role if edition == role and quick else role + "_off"
+                        self.assertEqual((lib / f"quick_{role}_api.dart").read_text().strip(),
+                                         f"export 'quick/{selected}.dart';")
+                    self.assertEqual((tree / "src/steaddesk_qc2.rs").read_text(),
+                                     str(quick and edition == "merchant").lower() + "\n")
                     with_cases = enable or (edition == "support" and help_enabled)
                     self.assertIn(f"const normalCasesEnabled = {str(enable).lower()};",
                                   (lib / "merchant_build.dart").read_text())
