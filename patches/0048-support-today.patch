@@ -1,0 +1,1126 @@
+diff --git a/flutter/lib/steaddesk/ops_health.dart b/flutter/lib/steaddesk/ops_health.dart
+index 50d4b03..f211951 100644
+--- a/flutter/lib/steaddesk/ops_health.dart
++++ b/flutter/lib/steaddesk/ops_health.dart
+@@ -35,7 +35,9 @@ class OpsHealthHttp implements HealthApi {
+   final HttpClient _http = HttpClient()
+     ..connectionTimeout = const Duration(seconds: 8)
+     ..findProxy = (_) => 'DIRECT';
+-  OpsHealthHttp(Uri origin, this._token) : _base = opsEndpoint(origin);
++  final bool todayEvents;
++  OpsHealthHttp(Uri origin, this._token, {this.todayEvents = false})
++      : _base = opsEndpoint(origin);
+ 
+   Future<HttpClientResponse> _open(String method, String route,
+       {Map<String, dynamic>? body, bool events = false}) async {
+@@ -49,6 +51,9 @@ class OpsHealthHttp implements HealthApi {
+     req.headers.set(HttpHeaders.authorizationHeader, 'Bearer $_token');
+     req.headers.set(HttpHeaders.acceptHeader,
+         events ? 'text/event-stream' : 'application/json');
++    if (events && todayEvents) {
++      req.headers.set('X-SteadDesk-Today', '1');
++    }
+     if (body != null) {
+       req.headers.set('Idempotency-Key', const Uuid().v4());
+       req.headers.contentType = ContentType.json;
+diff --git a/flutter/lib/steaddesk/support_home.dart b/flutter/lib/steaddesk/support_home.dart
+index e98fa66..bbac98f 100644
+--- a/flutter/lib/steaddesk/support_home.dart
++++ b/flutter/lib/steaddesk/support_home.dart
+@@ -22,6 +22,7 @@ import 'ops_health_host.dart';
+ import 'quick_support_api.dart' show supportQuickEnabled;
+ import 'fleet_admin_api.dart';
+ import 'kb_admin_api.dart';
++import 'today_api.dart';
+ import 'kb_build.dart' show supportKbEnabled;
+ import 'support_help_header_api.dart';
+ import 'case_inbox_api.dart' show PendingCasesBar;
+@@ -48,6 +49,7 @@ part 'support_group_tree.dart';
+ part 'support_home_bar.dart';
+ 
+ enum SupportPage {
++  today('今天', Icons.today_outlined),
+   devices('Devices', Icons.devices_outlined),
+   recent('Recent connections', Icons.history),
+   favorites('Favorites', Icons.star_outline),
+@@ -109,7 +111,7 @@ class _SupportHomeState extends State<SupportHome> {
+     }
+   }
+ 
+-  var page = SupportPage.devices;
++  var page = todayEnabled ? SupportPage.today : SupportPage.devices;
+   final search = TextEditingController();
+   final directoryKeys = {
+     for (final p in [
+@@ -399,6 +401,8 @@ class _SupportHomeState extends State<SupportHome> {
+ 
+   Widget _body() {
+     switch (page) {
++      case SupportPage.today:
++        return const TodayHost();
+       case SupportPage.devices:
+       case SupportPage.recent:
+       case SupportPage.favorites:
+@@ -545,8 +549,9 @@ class _SupportHomeState extends State<SupportHome> {
+       Expanded(
+           child: ListView(children: [
+         for (final p in SupportPage.values)
+-          item(translate(p.label), p.icon, () => _navigate(p),
+-              selected: page == p)
++          if (p != SupportPage.today || todayEnabled)
++            item(translate(p.label), p.icon, () => _navigate(p),
++                selected: page == p)
+       ])),
+       Obx(() {
+         final user = gFFI.userModel;
+diff --git a/flutter/lib/steaddesk/today/data.dart b/flutter/lib/steaddesk/today/data.dart
+new file mode 100644
+index 0000000..b349327
+--- /dev/null
++++ b/flutter/lib/steaddesk/today/data.dart
+@@ -0,0 +1,325 @@
++import 'dart:async';
++import 'dart:convert';
++import 'dart:io';
++import 'dart:typed_data';
++
++import 'package:flutter/foundation.dart';
++import '../ops_health.dart' show HealthFailure, OpsHealthHttp;
++import '../ops_groups.dart' show opsEndpoint;
++
++typedef TodayJson = Map<String, dynamic>;
++const sections = {
++  'alerts': ['red', 'amber'],
++  'queue': ['verified', 'unverified', 'oldest'],
++  'callbacks': ['callbacks'],
++  'offline': ['offline'],
++  'manual': ['stopped', 'paused'],
++  'updates': ['attempts', 'batches', 'safety'],
++  'self_heal': ['self_heal'],
++};
++
++abstract interface class TodayApi {
++  Future<TodayJson> snapshot();
++  Future<TodayJson> list(String filter, int offset);
++  Stream<String> events();
++  void close();
++}
++
++class TodayHttp implements TodayApi {
++  final Uri base;
++  final String token;
++  final bool Function() current;
++  final OpsHealthHttp stream;
++  final HttpClient http = HttpClient()
++    ..connectionTimeout = const Duration(seconds: 5)
++    ..findProxy = (_) => 'DIRECT';
++  TodayHttp(Uri origin, this.token, this.current)
++      : base = opsEndpoint(origin),
++        stream = OpsHealthHttp(origin, token, todayEvents: true) {
++    if (origin.scheme != 'https') throw const HealthFailure(400);
++  }
++
++  @override
++  Future<TodayJson> snapshot() => get(base.resolve('today'));
++  @override
++  Future<TodayJson> list(String filter, int offset) {
++    if (!sections.values.any((filters) => filters.contains(filter)) ||
++        offset < 0) throw const HealthFailure(400);
++    return get(base
++        .resolve('today/$filter')
++        .replace(queryParameters: {'limit': '25', 'offset': '$offset'}));
++  }
++
++  Future<TodayJson> get(Uri uri) async {
++    if (!current()) throw const HealthFailure(401);
++    final request = await http.getUrl(uri).timeout(const Duration(seconds: 6));
++    if (!current()) {
++      request.abort();
++      throw const HealthFailure(401);
++    }
++    request.followRedirects = false;
++    request.headers.set(HttpHeaders.authorizationHeader, 'Bearer $token');
++    request.headers.set(HttpHeaders.acceptHeader, 'application/json');
++    final response = await request.close().timeout(const Duration(seconds: 8));
++    if (response.statusCode != 200) {
++      await response.listen((_) {}).cancel();
++      throw HealthFailure(response.statusCode);
++    }
++    final bytes = BytesBuilder(copy: false);
++    await for (final chunk in response.timeout(const Duration(seconds: 8))) {
++      if (bytes.length + chunk.length > 256 * 1024) {
++        throw const FormatException('Invalid dashboard response');
++      }
++      bytes.add(chunk);
++    }
++    if (!current()) throw const HealthFailure(401);
++    return jsonDecode(utf8.decode(bytes.takeBytes())) as TodayJson;
++  }
++
++  @override
++  Stream<String> events() => stream.changes();
++  @override
++  void close() {
++    http.close(force: true);
++    stream.close();
++  }
++}
++
++class TodaySection {
++  final TodayJson data;
++  final Map<String, int?> counts;
++  TodaySection(String key, this.data)
++      : counts = {
++          for (final filter in sections[key]!)
++            if ((data['counts'] as Map).containsKey(filter))
++              filter: data['counts'][filter] as int?
++        } {
++    if (!const {'live', 'partial', 'stale', 'unknown'}
++            .contains(data['freshness']) ||
++        counts.values.any((n) => n != null && n < 0)) {
++      throw const FormatException('Invalid dashboard metrics');
++    }
++  }
++  int? get asOf => data['as_of'] as int?;
++  String get freshness => data['freshness'] as String;
++}
++
++class TodayStore extends ChangeNotifier {
++  final TodayApi api;
++  final bool Function() current;
++  TodayStore(this.api, this.current);
++  Map<String, TodaySection> visible = {};
++  bool loading = true, streamDown = false, offline = false, denied = false;
++  int? asOf;
++  String? filter;
++  List<TodayJson> rows = [];
++  int? nextOffset, detailAsOf;
++  int detailOffset = 0;
++  String detailQuality = 'unknown';
++  bool detailLoading = false, detailFailed = false;
++  bool _retired = false, _reading = false, _again = false;
++  int _scope = 0, _drill = 0;
++  Timer? _poll, _retry, _coalesce;
++  StreamSubscription<String>? _feed;
++  bool get active => !_retired && current();
++  bool permits(String field) =>
++      visible.values.any((section) => section.counts.containsKey(field));
++  bool _unauthorized(Object e) =>
++      e is HealthFailure && {401, 403, 404}.contains(e.status);
++
++  void start() {
++    unawaited(refresh());
++    _listen();
++    _poll = Timer.periodic(const Duration(seconds: 10), (_) => refresh());
++  }
++
++  void _clear() {
++    _scope++;
++    visible = {};
++    asOf = null;
++    _resetDetail();
++  }
++
++  void _resetDetail() {
++    _drill++;
++    filter = null;
++    rows = [];
++    nextOffset = null;
++    detailAsOf = null;
++    detailOffset = 0;
++    detailQuality = 'unknown';
++    detailLoading = false;
++    detailFailed = false;
++  }
++
++  void back() {
++    _resetDetail();
++    notifyListeners();
++  }
++
++  void _listen() {
++    if (!active) return;
++    _feed = api.events().listen((kind) {
++      if (!active) return;
++      if (kind == 'connected') {
++        final reconnect = streamDown;
++        streamDown = false;
++        if (reconnect) unawaited(refresh());
++        notifyListeners();
++        return;
++      }
++      final permissionChange = kind == 'resync' ||
++          kind == 'reset' ||
++          kind.startsWith('group.') ||
++          kind.startsWith('role.') ||
++          kind.startsWith('permission.') ||
++          kind.startsWith('auth.');
++      if (permissionChange) {
++        _clear();
++        loading = true;
++        notifyListeners();
++      } else if (![
++        'health.',
++        'alert.',
++        'help.',
++        'fleet.',
++        'device.',
++        'self_heal.'
++      ].any(kind.startsWith)) {
++        return;
++      }
++      _coalesce?.cancel();
++      _coalesce = Timer(const Duration(milliseconds: 80), refresh);
++    },
++        onError: (Object e) => _disconnect(e),
++        onDone: () => _disconnect(null),
++        cancelOnError: true);
++  }
++
++  void _disconnect(Object? error) {
++    if (!active) return;
++    streamDown = true;
++    if (error != null && _unauthorized(error)) {
++      _clear();
++      denied = true;
++      loading = false;
++    }
++    notifyListeners();
++    _retry?.cancel();
++    _retry = Timer(const Duration(seconds: 2), _listen);
++  }
++
++  Future<void> refresh() async {
++    if (!active) return;
++    if (_reading) {
++      _again = true;
++      return;
++    }
++    _reading = true;
++    final scope = _scope;
++    try {
++      final result = await api.snapshot();
++      if (!active || scope != _scope) return;
++      final source = result['sections'] as Map;
++      final fresh = <String, TodaySection>{};
++      for (final key in sections.keys) {
++        if (source[key] is TodayJson) {
++          final section = TodaySection(key, source[key]);
++          if (section.counts.isNotEmpty) fresh[key] = section;
++        }
++      }
++      final stamp = result['as_of'] as int;
++      visible = fresh;
++      asOf = stamp;
++      offline = false;
++      denied = false;
++      final selected = filter;
++      if (selected != null) {
++        if (!permits(selected)) {
++          _resetDetail();
++        } else {
++          unawaited(open(selected, offset: detailOffset));
++        }
++      }
++    } catch (e) {
++      if (!active || scope != _scope) return;
++      if (_unauthorized(e)) {
++        _clear();
++        denied = true;
++      } else {
++        offline = true;
++      }
++    } finally {
++      _reading = false;
++      if (active) {
++        if (scope == _scope || denied) loading = false;
++        notifyListeners();
++        if (_again) {
++          _again = false;
++          scheduleMicrotask(refresh);
++        }
++      }
++    }
++  }
++
++  Future<void> open(String name, {int offset = 0}) async {
++    if (!active || !permits(name) || offset < 0) return;
++    final request = ++_drill, scope = _scope;
++    filter = name;
++    detailOffset = offset;
++    detailLoading = true;
++    detailFailed = false;
++    rows = [];
++    nextOffset = null;
++    detailAsOf = null;
++    detailQuality = 'unknown';
++    notifyListeners();
++    bool same() =>
++        active && request == _drill && scope == _scope && permits(name);
++    try {
++      final result = await api.list(name, offset);
++      if (!same()) return;
++      final page = List<TodayJson>.from(result['rows']);
++      final next = result['next_offset'] as int?;
++      if (result['filter'] != name ||
++          page.length > 25 ||
++          (next != null && next <= offset) ||
++          !const {'live', 'partial', 'stale', 'unknown'}
++              .contains(result['freshness'])) {
++        throw const FormatException('Invalid dashboard page');
++      }
++      rows = page;
++      nextOffset = next;
++      detailAsOf = result['as_of'] as int?;
++      detailQuality = result['freshness'];
++    } catch (e) {
++      if (!same()) return;
++      if (_unauthorized(e)) {
++        _clear();
++        loading = true;
++        unawaited(refresh());
++      } else {
++        detailFailed = true;
++      }
++    } finally {
++      if (active && request == _drill) {
++        detailLoading = false;
++        notifyListeners();
++      } else if (active) {
++        notifyListeners();
++      }
++    }
++  }
++
++  @override
++  void dispose() {
++    _retired = true;
++    _clear();
++    _feed?.cancel();
++    _retry?.cancel();
++    _poll?.cancel();
++    _coalesce?.cancel();
++    api.close();
++    super.dispose();
++  }
++}
+diff --git a/flutter/lib/steaddesk/today/host.dart b/flutter/lib/steaddesk/today/host.dart
+new file mode 100644
+index 0000000..aa0838f
+--- /dev/null
++++ b/flutter/lib/steaddesk/today/host.dart
+@@ -0,0 +1,81 @@
++import 'dart:async';
++import 'package:flutter/material.dart';
++import '../../common.dart' show gFFI;
++import '../../models/platform_model.dart' show bind;
++import '../ops_groups.dart' show opsEndpoint;
++import 'data.dart';
++import 'panel.dart';
++
++const todayEnabled = true;
++typedef _Identity = ({String account, String token, Uri origin, bool admin});
++_Identity? _identity() {
++  final account = gFFI.userModel.userName.value,
++      token = bind.mainGetLocalOption(key: 'access_token');
++  final origin = Uri.tryParse(bind.mainGetOptionSync(key: 'api-server'));
++  if (account.isEmpty ||
++      token.isEmpty ||
++      origin == null ||
++      origin.scheme != 'https') return null;
++  try {
++    opsEndpoint(origin);
++  } on ArgumentError {
++    return null;
++  }
++  return (
++    account: account,
++    token: token,
++    origin: origin,
++    admin: gFFI.userModel.isAdmin.value
++  );
++}
++
++class TodayHost extends StatefulWidget {
++  const TodayHost({super.key});
++  @override
++  State<TodayHost> createState() => _TodayHostState();
++}
++
++class _TodayHostState extends State<TodayHost> {
++  TodayStore? store;
++  _Identity? who;
++  Timer? tick;
++  late StreamSubscription<String> account;
++  late StreamSubscription<bool> role;
++  @override
++  void initState() {
++    super.initState();
++    account = gFFI.userModel.userName.listen((_) => sync());
++    role = gFFI.userModel.isAdmin.listen((_) => sync());
++    tick = Timer.periodic(const Duration(seconds: 1), (_) => sync());
++    sync();
++  }
++
++  void sync() {
++    if (!mounted) return;
++    final next = _identity();
++    if (who == next) return;
++    store?.dispose();
++    store = null;
++    who = next;
++    if (next != null) {
++      bool current() => mounted && who == next && _identity() == next;
++      store = TodayStore(TodayHttp(next.origin, next.token, current), current)
++        ..start();
++    }
++    setState(() {});
++  }
++
++  @override
++  void dispose() {
++    account.cancel();
++    role.cancel();
++    tick?.cancel();
++    store?.dispose();
++    super.dispose();
++  }
++
++  @override
++  Widget build(BuildContext context) => store == null
++      ? const Center(child: Text('请登录客服账号后查看今天的数据。'))
++      : TodayPanel(store: store!);
++}
+diff --git a/flutter/lib/steaddesk/today/off.dart b/flutter/lib/steaddesk/today/off.dart
+new file mode 100644
+index 0000000..c33ffa3
+--- /dev/null
++++ b/flutter/lib/steaddesk/today/off.dart
+@@ -0,0 +1,9 @@
++import 'package:flutter/widgets.dart';
++
++const todayEnabled = false;
++
++class TodayHost extends StatelessWidget {
++  const TodayHost({super.key});
++  @override
++  Widget build(BuildContext context) => const SizedBox.shrink();
++}
+diff --git a/flutter/lib/steaddesk/today/panel.dart b/flutter/lib/steaddesk/today/panel.dart
+new file mode 100644
+index 0000000..cc07514
+--- /dev/null
++++ b/flutter/lib/steaddesk/today/panel.dart
+@@ -0,0 +1,370 @@
++import 'dart:math' as math;
++import 'package:flutter/material.dart';
++import 'data.dart';
++
++const _titles = {
++  'alerts': '未处理预警',
++  'queue': '求助队列',
++  'callbacks': '今日回电',
++  'offline': '离线设备',
++  'manual': '商户手动停止或暂停',
++  'updates': '批量升级',
++  'self_heal': '今日自愈动作',
++};
++const _icons = {
++  'alerts': Icons.notifications_none,
++  'queue': Icons.support_agent,
++  'callbacks': Icons.phone_callback_outlined,
++  'offline': Icons.cloud_off_outlined,
++  'manual': Icons.pause_circle_outline,
++  'updates': Icons.system_update_alt,
++  'self_heal': Icons.healing_outlined,
++};
++const _filters = {
++  'red': '红色',
++  'amber': '琥珀',
++  'verified': '已验证',
++  'unverified': '未验证',
++  'oldest': '最长等待',
++  'callbacks': '待回电',
++  'offline': '离线',
++  'stopped': '强行停止',
++  'paused': '暂停远程',
++  'attempts': '升级尝试',
++  'batches': '升级批次',
++  'safety': '急停',
++  'self_heal': '已观测动作',
++};
++const _states = {
++  'red': '红色',
++  'amber': '琥珀',
++  'queued': '排队中',
++  'scheduled': '待回电',
++  'offline': '离线',
++  'stopped': '停止',
++  'paused': '暂停',
++  'enabled': '启用',
++  'live': '已观测',
++  'partial': '部分来源',
++  'unknown': '未知',
++  'stale': '已过时',
++  'verified': '已验证',
++  'unverified': '未验证',
++  'draft': '草稿',
++  'canary': '试点',
++  'paused_rollout': '暂停',
++  'withdrawn': '已下架',
++  'published': '已发布',
++  'pilot': '试点',
++  'running': '进行中',
++  'completed': '已完成',
++  'failed': '失败',
++  'frozen': '冻结',
++  'open': '已开放',
++  'closed': '未开放',
++  'started': '已开始',
++  'committing': '提交中',
++  'deferred': '已推迟',
++  'rejected': '已拒绝',
++  'offer_shown': '已提示',
++  'accepted': '已接受',
++  'declined': '已拒绝',
++  'expired': '已过期',
++  'healthy': '健康',
++  'late_failure': '后续失败',
++  'pending_user_action': '等待确认',
++  'pending_reboot': '等待重启',
++  'observing': '观察中',
++};
++String _clock(int seconds) {
++  final t = DateTime.fromMillisecondsSinceEpoch(seconds * 1000).toLocal();
++  return '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}';
++}
++
++String _cutoff(int? stamp) =>
++    stamp == null ? '尚无观测时间' : '数据截至 ${_clock(stamp)}';
++String _quality(String value, int? asOf, bool disconnected) {
++  if (value == 'unknown') {
++    return asOf == null ? '来源未知' : '来源未知 · ${_cutoff(asOf)}';
++  }
++  if (value == 'partial') return '部分来源 · ${_cutoff(asOf)}';
++  if (value == 'stale' || disconnected) return _cutoff(asOf);
++  return '';
++}
++
++String _wait(dynamic seconds) => seconds is int ? '${seconds ~/ 60} 分' : '未知';
++
++class TodayPanel extends StatelessWidget {
++  final TodayStore store;
++  const TodayPanel({super.key, required this.store});
++  @override
++  Widget build(BuildContext context) => AnimatedBuilder(
++      animation: store,
++      builder: (context, _) {
++        if (!store.active) return const SizedBox.shrink();
++        final selected = store.filter;
++        if (selected != null && store.permits(selected)) {
++          return _Details(store: store, filter: selected);
++        }
++        final date = DateTime.now();
++        return Column(
++            crossAxisAlignment: CrossAxisAlignment.stretch,
++            children: [
++              Padding(
++                  padding: const EdgeInsets.fromLTRB(16, 6, 8, 4),
++                  child: Row(children: [
++                    Text('今天', style: Theme.of(context).textTheme.titleLarge),
++                    const SizedBox(width: 12),
++                    Expanded(
++                        child: Text('${date.month}月${date.day}日',
++                            style: Theme.of(context).textTheme.bodyMedium)),
++                    if (store.offline || store.streamDown)
++                      Flexible(
++                          child: Text(_cutoff(store.asOf),
++                              textAlign: TextAlign.end)),
++                    IconButton(
++                        tooltip: '刷新',
++                        onPressed: store.refresh,
++                        icon: const Icon(Icons.refresh)),
++                  ])),
++              if (store.visible.isEmpty)
++                Expanded(
++                    child: Center(
++                        child: store.loading
++                            ? const CircularProgressIndicator()
++                            : Text(store.denied
++                                ? '无权查看今天的数据。'
++                                : store.offline
++                                    ? '暂时无法读取今天的数据。'
++                                    : '暂无可查看的项目。')))
++              else
++                Expanded(child: LayoutBuilder(builder: (ctx, box) {
++                  final columns = box.maxWidth >= 650
++                      ? 3
++                      : box.maxWidth >= 410
++                          ? 2
++                          : 1;
++                  const gap = 8.0;
++                  final width = math.max(
++                      0.0, (box.maxWidth - 24 - gap * (columns - 1)) / columns);
++                  return SingleChildScrollView(
++                      padding: const EdgeInsets.fromLTRB(12, 2, 12, 12),
++                      child: Wrap(spacing: gap, runSpacing: gap, children: [
++                        for (final section in store.visible.entries)
++                          SizedBox(
++                              width: width,
++                              child: _Section(
++                                  name: section.key,
++                                  data: section.value,
++                                  store: store))
++                      ]));
++                })),
++            ]);
++      });
++}
++
++class _Section extends StatelessWidget {
++  final String name;
++  final TodaySection data;
++  final TodayStore store;
++  const _Section({required this.name, required this.data, required this.store});
++  @override
++  Widget build(BuildContext context) {
++    final raw = data.data;
++    final stamp =
++        _quality(data.freshness, data.asOf, store.offline || store.streamDown);
++    final oldest = raw['oldest'];
++    String states(String permission, String field) {
++      if (!data.counts.containsKey(permission) || raw[field] is! Map) return '';
++      return (raw[field] as Map)
++          .entries
++          .where((entry) => entry.value is int && entry.value > 0)
++          .map((entry) => '${_states[entry.key] ?? entry.key} ${entry.value}')
++          .join(' · ');
++    }
++
++    final batchStates = states('batches', 'stages');
++    final attemptStates = states('attempts', 'attempt_states');
++    final covered = raw['covered_devices'], total = raw['total_devices'];
++    final info = <String>[
++      if (name == 'queue' &&
++          data.counts.containsKey('oldest') &&
++          oldest is Map &&
++          oldest['id'] is String)
++        '最早单号 ${oldest['id']}',
++      if (name == 'callbacks') '按门店当地日期',
++      if (attemptStates.isNotEmpty) '执行 · $attemptStates',
++      if (batchStates.isNotEmpty) '批次 · $batchStates',
++      if (covered is int && total is int) '观测覆盖 $covered/$total 台',
++    ];
++    return Card(
++        key: ValueKey('today-section-$name'),
++        margin: EdgeInsets.zero,
++        elevation: 0,
++        shape: RoundedRectangleBorder(
++            borderRadius: BorderRadius.circular(8),
++            side: const BorderSide(color: Color(0xffd4e1e8))),
++        child: Padding(
++            padding: const EdgeInsets.fromLTRB(10, 8, 10, 8),
++            child:
++                Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
++              Row(children: [
++                Icon(_icons[name], size: 17, color: const Color(0xff245a76)),
++                const SizedBox(width: 6),
++                Expanded(
++                    child: Text(_titles[name]!,
++                        style: const TextStyle(
++                            fontWeight: FontWeight.w600, fontSize: 14)))
++              ]),
++              const SizedBox(height: 5),
++              Row(children: [
++                for (final entry in data.counts.entries)
++                  Expanded(
++                      child: InkWell(
++                          key: ValueKey('today-filter-${entry.key}'),
++                          onTap: () => store.open(entry.key),
++                          borderRadius: BorderRadius.circular(4),
++                          child: Padding(
++                              padding: const EdgeInsets.symmetric(
++                                  horizontal: 2, vertical: 4),
++                              child: Column(
++                                  crossAxisAlignment: CrossAxisAlignment.start,
++                                  children: [
++                                    Text(_filters[entry.key]!,
++                                        style: TextStyle(
++                                            fontSize: 12,
++                                            color: entry.key == 'red'
++                                                ? const Color(0xffa02a29)
++                                                : entry.key == 'amber'
++                                                    ? const Color(0xff815410)
++                                                    : const Color(0xff335b70))),
++                                    Text(
++                                        entry.value == null
++                                            ? '未知'
++                                            : entry.key == 'oldest' &&
++                                                    entry.value != 0
++                                                ? _wait(oldest is Map
++                                                    ? oldest['wait_seconds']
++                                                    : null)
++                                                : entry.key == 'safety'
++                                                    ? (raw['stopped'] == true
++                                                        ? '已触发'
++                                                        : raw['stopped'] ==
++                                                                false
++                                                            ? '未触发'
++                                                            : '未知')
++                                                    : '${entry.value}',
++                                        style: const TextStyle(
++                                            fontSize: 18,
++                                            fontWeight: FontWeight.w600)),
++                                  ])))),
++              ]),
++              for (final line in info)
++                Tooltip(
++                    message: line,
++                    child: Text(line,
++                        maxLines: 1,
++                        overflow: TextOverflow.ellipsis,
++                        style: const TextStyle(fontSize: 12))),
++              if (stamp.isNotEmpty)
++                Text(stamp,
++                    style: const TextStyle(
++                        fontSize: 12, color: Color(0xff795215))),
++            ])));
++  }
++}
++
++class _Details extends StatelessWidget {
++  final TodayStore store;
++  final String filter;
++  const _Details({required this.store, required this.filter});
++  @override
++  Widget build(BuildContext context) {
++    final group = sections.entries
++        .firstWhere((entry) => entry.value.contains(filter))
++        .key;
++    final title = '${_titles[group]} · ${_filters[filter]}';
++    final quality = _quality(store.detailQuality, store.detailAsOf,
++        store.streamDown || store.offline || store.detailFailed);
++    return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
++      Row(children: [
++        IconButton(
++            key: const ValueKey('today-back'),
++            tooltip: '返回今天',
++            onPressed: store.back,
++            icon: const Icon(Icons.arrow_back)),
++        Expanded(
++            child: Text(title, style: Theme.of(context).textTheme.titleMedium)),
++        IconButton(
++            tooltip: '刷新明细',
++            onPressed: () => store.open(filter, offset: store.detailOffset),
++            icon: const Icon(Icons.refresh)),
++      ]),
++      if (quality.isNotEmpty && !store.detailLoading)
++        Padding(
++            padding: const EdgeInsets.symmetric(horizontal: 16),
++            child: Text(quality)),
++      if (store.detailLoading) const LinearProgressIndicator(),
++      if (store.detailFailed)
++        const Padding(padding: EdgeInsets.all(12), child: Text('无法读取明细，请刷新。')),
++      Expanded(
++          child: store.rows.isEmpty
++              ? Center(
++                  child: Text(store.detailLoading
++                      ? '正在读取…'
++                      : store.detailFailed
++                          ? '明细暂不可用'
++                          : store.detailQuality == 'unknown'
++                              ? '暂无观测'
++                              : '暂无符合条件的记录'))
++              : ListView.builder(
++                  key: ValueKey((filter, store.detailOffset)),
++                  itemCount: store.rows.length,
++                  itemBuilder: (_, i) {
++                    final row = store.rows[i], id = row['id'] as String;
++                    final state = row['state'];
++                    final parts = <String>[
++                      if (state is String) _states[state] ?? state,
++                      if (row['device_id'] is String && row['device_id'] != id)
++                        '设备 ${row['device_id']}',
++                      if (row['lane'] is String)
++                        _states[row['lane']] ?? row['lane'],
++                      if (row['wait_seconds'] is int)
++                        '等待 ${_wait(row['wait_seconds'])}',
++                      if (filter == 'self_heal')
++                        '已观测动作 ${row['count'] ?? '未知'}',
++                      if (row['ring'] != null) '环 ${row['ring']}',
++                      if (row['batch'] != null) '批次 ${row['batch']}',
++                      if (row['at'] is int)
++                        '${filter == 'callbacks' ? '客服本地时间 ' : ''}${_clock(row['at'])}',
++                      if (filter == 'callbacks' && row['zone'] is String)
++                        '门店时区 ${row['zone']}',
++                    ];
++                    return ListTile(
++                        dense: true,
++                        title: Text(id),
++                        subtitle: Text(parts.join(' · ')));
++                  })),
++      if (store.detailOffset != 0 || store.nextOffset != null)
++        Wrap(
++            alignment: WrapAlignment.end,
++            crossAxisAlignment: WrapCrossAlignment.center,
++            children: [
++              Text('第 ${1 + store.detailOffset ~/ 25} 页'),
++              TextButton(
++                  key: const ValueKey('today-prev'),
++                  onPressed: store.detailOffset > 0 && !store.detailLoading
++                      ? () => store.open(filter,
++                          offset: math.max(0, store.detailOffset - 25))
++                      : null,
++                  child: const Text('上一页')),
++              TextButton(
++                  key: const ValueKey('today-next'),
++                  onPressed: store.nextOffset != null && !store.detailLoading
++                      ? () => store.open(filter, offset: store.nextOffset!)
++                      : null,
++                  child: const Text('下一页')),
++            ]),
++    ]);
++  }
++}
+diff --git a/flutter/lib/steaddesk/today_api.dart b/flutter/lib/steaddesk/today_api.dart
+new file mode 100644
+index 0000000..866386d
+--- /dev/null
++++ b/flutter/lib/steaddesk/today_api.dart
+@@ -0,0 +1 @@
++export 'today/off.dart';
+diff --git a/flutter/test/steaddesk/today_test.dart b/flutter/test/steaddesk/today_test.dart
+new file mode 100644
+index 0000000..45d7087
+--- /dev/null
++++ b/flutter/test/steaddesk/today_test.dart
+@@ -0,0 +1,229 @@
++import 'dart:async';
++import 'package:flutter/material.dart';
++import 'package:flutter_test/flutter_test.dart';
++import 'package:flutter_hbb/steaddesk/ops_health.dart' show HealthFailure;
++import 'package:flutter_hbb/steaddesk/today/data.dart';
++import 'package:flutter_hbb/steaddesk/today/panel.dart';
++
++final observation =
++    DateTime(2026, 10, 10, 13, 24).millisecondsSinceEpoch ~/ 1000;
++TodayJson snapshotFor(Map<String, List<String>> grant) => {
++      'as_of': observation + 700,
++      'sections': {
++        for (final slot in grant.entries)
++          slot.key: {
++            'as_of': observation,
++            'freshness': slot.key == 'self_heal' ? 'partial' : 'live',
++            'counts': {
++              for (final filter in slot.value)
++                filter: filter == 'offline' ? null : 1
++            },
++            if (slot.key == 'updates') ...{
++              'stages': {'open': 1},
++              'attempt_states': {'observing': 2},
++              'stopped': true
++            },
++            if (slot.key == 'queue')
++              'oldest': {'id': 'example-ticket', 'wait_seconds': 743},
++            if (slot.key == 'self_heal') ...{
++              'covered_devices': 1,
++              'total_devices': 3
++            },
++          },
++      }
++    };
++
++class Fixture implements TodayApi {
++  final feed = StreamController<String>.broadcast(sync: true);
++  TodayJson data = snapshotFor(sections);
++  Object? error;
++  Completer<TodayJson>? pendingList, pendingSnapshot;
++  final calls = <(String, int)>[];
++  int requests = 0;
++  bool closed = false;
++  @override
++  Future<TodayJson> snapshot() async {
++    requests++;
++    if (error != null) throw error!;
++    return pendingSnapshot?.future ?? Future.value(data);
++  }
++
++  @override
++  Future<TodayJson> list(String filter, int offset) async {
++    calls.add((filter, offset));
++    return pendingList?.future ?? Future.value(page(filter, offset));
++  }
++
++  TodayJson page(String filter, int offset) => {
++        'filter': filter,
++        'as_of': observation,
++        'freshness': 'live',
++        'rows': [
++          {
++            'id': 'example-$filter-$offset',
++            'state': 'queued',
++            'at': observation,
++            'phone': 'private-field',
++            'reason': 'private-reason'
++          }
++        ],
++        'next_offset': offset == 0 ? 25 : null,
++      };
++  @override
++  Stream<String> events() => feed.stream;
++  @override
++  void close() {
++    closed = true;
++    feed.close();
++  }
++}
++
++class Harness {
++  final fixture = Fixture();
++  late final store = TodayStore(fixture, () => true);
++  Future<void> mount(WidgetTester tester) async {
++    tester.view.physicalSize = const Size(1024, 640);
++    tester.view.devicePixelRatio = 1;
++    addTearDown(tester.view.resetPhysicalSize);
++    addTearDown(tester.view.resetDevicePixelRatio);
++    store.start();
++    await tester.pumpWidget(MaterialApp(
++        home: Scaffold(
++            body: Center(
++                child: SizedBox(
++                    width: 806,
++                    height: 498,
++                    child: TodayPanel(store: store))))));
++    await tester.pump();
++  }
++
++  Future<void> close(WidgetTester tester) async {
++    await tester.pumpWidget(const SizedBox.shrink());
++    store.dispose();
++  }
++}
++
++Finder byKey(String name) => find.byKey(ValueKey(name));
++
++void main() {
++  testWidgets(
++      'seven scoped sections fit without scrolling and all filters drill into matching pages',
++      (tester) async {
++    final h = Harness();
++    final elapsed = Stopwatch()..start();
++    await h.mount(tester);
++    expect(h.fixture.requests, 1);
++    for (final key in sections.keys) {
++      expect(byKey('today-section-$key').hitTestable(), findsOneWidget);
++    }
++    expect(elapsed.elapsed, lessThan(const Duration(seconds: 2)));
++    expect(find.text('最早单号 example-ticket'), findsOneWidget);
++    expect(find.text('12 分'), findsOneWidget);
++    expect(find.text('批次 · 已开放 1'), findsOneWidget);
++    expect(find.text('执行 · 观察中 2'), findsOneWidget);
++    expect(find.text('已触发'), findsOneWidget);
++    expect(find.text('观测覆盖 1/3 台'), findsOneWidget);
++    expect(find.text('部分来源 · 数据截至 13:24'), findsOneWidget);
++    expect(
++        find.descendant(
++            of: byKey('today-filter-offline'), matching: find.text('未知')),
++        findsOneWidget);
++    for (final filter in sections.values.expand((fields) => fields)) {
++      final button = byKey('today-filter-$filter');
++      expect(button.hitTestable(), findsOneWidget);
++      await tester.tap(button);
++      await tester.pumpAndSettle();
++      expect(h.fixture.calls.last, (filter, 0));
++      expect(find.text('example-$filter-0'), findsOneWidget);
++      expect(find.textContaining('private-'), findsNothing);
++      await tester.tap(byKey('today-next'));
++      await tester.pumpAndSettle();
++      expect(find.text('example-$filter-25'), findsOneWidget);
++      expect(find.text('example-$filter-0'), findsNothing);
++      await tester.tap(byKey('today-prev'));
++      await tester.pumpAndSettle();
++      expect(h.fixture.calls.last, (filter, 0));
++      await tester.tap(byKey('today-back'));
++      await tester.pumpAndSettle();
++    }
++    await h.close(tester);
++  });
++
++  testWidgets(
++      'only granted submetrics render; SSE failure shows source cutoff then polling clears forbidden data',
++      (tester) async {
++    final h = Harness();
++    h.fixture.data = snapshotFor({
++      'manual': ['stopped']
++    });
++    await h.mount(tester);
++    expect(byKey('today-filter-stopped'), findsOneWidget);
++    expect(byKey('today-filter-paused'), findsNothing);
++    expect(byKey('today-section-alerts'), findsNothing);
++    h.fixture.feed.addError(StateError('disconnected'));
++    await tester.pump();
++    expect(find.text('数据截至 13:24'), findsOneWidget);
++    h.fixture.error = const HealthFailure(403);
++    await tester.pump(const Duration(seconds: 10));
++    await tester.pump();
++    expect(byKey('today-filter-stopped'), findsNothing);
++    expect(find.text('无权查看今天的数据。'), findsOneWidget);
++    await h.close(tester);
++  });
++
++  testWidgets(
++      'permission resync revokes immediately, including pending reads and late detail completions',
++      (tester) async {
++    final h = Harness();
++    await h.mount(tester);
++    h.fixture.pendingList = Completer<TodayJson>();
++    h.fixture.pendingSnapshot = Completer<TodayJson>();
++    unawaited(h.store.refresh());
++    await tester.tap(byKey('today-filter-red'));
++    await tester.pump();
++    expect(h.store.filter, 'red');
++    h.fixture.feed.add('resync');
++    expect(h.store.filter, isNull);
++    expect(h.store.visible, isEmpty);
++    await tester.pump();
++    h.fixture.pendingList!.complete(h.fixture.page('red', 0));
++    h.fixture.pendingSnapshot!.complete(snapshotFor(sections));
++    h.fixture.pendingSnapshot = null;
++    h.fixture.data = snapshotFor({
++      'queue': ['unverified']
++    });
++    await tester.pump(const Duration(milliseconds: 100));
++    await tester.pump();
++    expect(find.text('example-red-0'), findsNothing);
++    expect(byKey('today-filter-red'), findsNothing);
++    expect(byKey('today-filter-oldest'), findsNothing);
++    expect(byKey('today-filter-unverified'), findsOneWidget);
++    expect(find.textContaining('example-ticket'), findsNothing);
++    await h.close(tester);
++  });
++
++  testWidgets(
++      'scope recheck refetches current page and discards old rows while fresh proof is pending',
++      (tester) async {
++    final h = Harness();
++    await h.mount(tester);
++    await tester.tap(byKey('today-filter-red'));
++    await tester.pumpAndSettle();
++    await tester.tap(byKey('today-next'));
++    await tester.pumpAndSettle();
++    h.fixture.pendingList = Completer<TodayJson>();
++    h.fixture.feed.add('alert.changed');
++    await tester.pump(const Duration(milliseconds: 100));
++    await tester.pump();
++    expect(h.fixture.calls.last, ('red', 25));
++    expect(find.text('example-red-25'), findsNothing);
++    h.fixture.pendingList!.completeError(const HealthFailure(404));
++    h.fixture.data = snapshotFor({
++      'queue': ['verified']
++    });
++    await tester.pumpAndSettle();
++    expect(byKey('today-filter-red'), findsNothing);
++    expect(byKey('today-filter-verified'), findsOneWidget);
++    await h.close(tester);
++  });
++}

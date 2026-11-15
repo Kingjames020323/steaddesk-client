@@ -1,0 +1,100 @@
+diff --git a/flutter/android/app/src/steaddeskMerchant/java/com/carriez/flutter_hbb/AgentWakeService.java b/flutter/android/app/src/steaddeskMerchant/java/com/carriez/flutter_hbb/AgentWakeService.java
+index 97dae11..261e112 100644
+--- a/flutter/android/app/src/steaddeskMerchant/java/com/carriez/flutter_hbb/AgentWakeService.java
++++ b/flutter/android/app/src/steaddeskMerchant/java/com/carriez/flutter_hbb/AgentWakeService.java
+@@ -11,7 +11,7 @@ import android.os.RemoteException;
+ public final class AgentWakeService extends Service {
+     private final Binder endpoint = new Binder() {
+         @Override protected boolean onTransact(int code, Parcel data, Parcel reply, int flags) throws RemoteException {
+-            if (code != FIRST_CALL_TRANSACTION && code != FIRST_CALL_TRANSACTION + 1 && code != FIRST_CALL_TRANSACTION + 2)
++            if (code != FIRST_CALL_TRANSACTION && code != FIRST_CALL_TRANSACTION + 1 && code != FIRST_CALL_TRANSACTION + 2 && code != FIRST_CALL_TRANSACTION + 3)
+                 return super.onTransact(code, data, reply, flags);
+             data.enforceInterface("com.steaddesk.remote.IWakeService");
+             enforceCallingPermission("com.steaddesk.remote.permission.WAKE_SERVICE", MerchantLanguage.text(AgentWakeService.this, R.string.recovery_signature));
+@@ -20,9 +20,16 @@ public final class AgentWakeService extends Service {
+                 throw new SecurityException(MerchantLanguage.text(AgentWakeService.this, R.string.recovery_uid));
+             if (code == FIRST_CALL_TRANSACTION + 2 && (data.dataAvail() != 0 || reply == null || (flags & IBinder.FLAG_ONEWAY) != 0))
+                 throw new SecurityException("collect_logs takes no arguments and requires a reply");
++            if (code == FIRST_CALL_TRANSACTION + 3 && (data.dataAvail() != 0 || reply == null || flags != 0))
++                throw new SecurityException("unexpected observation request");
+             long identity = Binder.clearCallingIdentity();
+             try {
+                 int state = MerchantRecovery.status(AgentWakeService.this);
++                if (code == FIRST_CALL_TRANSACTION + 3) {
++                    reply.writeNoException();
++                    if (state == 1 || state == 2) MerchantToday.append(AgentWakeService.this, reply);
++                    return true;
++                }
+                 if (code == FIRST_CALL_TRANSACTION && state == 0 && !MerchantRecovery.restore(AgentWakeService.this))
+                     throw new IllegalStateException(MerchantLanguage.text(AgentWakeService.this, R.string.recovery_unavailable));
+                 if (code == FIRST_CALL_TRANSACTION + 2) {
+diff --git a/flutter/android/app/src/steaddeskMerchant/java/com/carriez/flutter_hbb/MerchantToday.java b/flutter/android/app/src/steaddeskMerchant/java/com/carriez/flutter_hbb/MerchantToday.java
+new file mode 100644
+index 0000000..0eb407b
+--- /dev/null
++++ b/flutter/android/app/src/steaddeskMerchant/java/com/carriez/flutter_hbb/MerchantToday.java
+@@ -0,0 +1,64 @@
++package com.carriez.flutter_hbb;
++
++import android.content.Context;
++import android.content.RestrictionsManager;
++import android.os.Parcel;
++import org.json.JSONArray;
++import org.json.JSONObject;
++import java.io.BufferedReader;
++import java.io.File;
++import java.io.FileInputStream;
++import java.io.InputStreamReader;
++import java.nio.charset.StandardCharsets;
++import java.text.SimpleDateFormat;
++import java.util.Locale;
++import java.util.TimeZone;
++
++/** Optional observation read over an existing, authorized peer connection (no start or wake). */
++final class MerchantToday {
++    static void append(Context context, Parcel reply) {
++        try {
++            RestrictionsManager manager = (RestrictionsManager)context.getSystemService(Context.RESTRICTIONS_SERVICE);
++            if (manager == null || !manager.getApplicationRestrictions().getBoolean("STEADDESK_TODAY", false)) return;
++            File journal = new File(context.getFilesDir(), "self-heal.jsonl");
++            if (!journal.isFile() || journal.length() > 1024 * 1024) return;
++            try (BufferedReader input = new BufferedReader(new InputStreamReader(new FileInputStream(journal), StandardCharsets.UTF_8))) {
++                JSONObject window = project(input, System.currentTimeMillis() / 1000);
++                if (window != null) reply.writeString(window.toString());
++            }
++        } catch (Exception unavailable) { /* Old status result stays valid; no fabricated zero. */ }
++    }
++
++    static JSONObject project(BufferedReader input, long now) throws Exception {
++        SimpleDateFormat utc = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.ROOT);
++        utc.setTimeZone(TimeZone.getTimeZone("UTC"));
++        utc.setLenient(false);
++        JSONArray attempts = new JSONArray();
++        long first = -1, last = -1;
++        int lines = 0;
++        for (String line; (line = input.readLine()) != null;) {
++            if (++lines > 500 || line.length() > 4096) return null;
++            JSONObject entry = new JSONObject(line);
++            String stamp = entry.getString("time");
++            if (stamp.length() != 24) return null;
++            long time = utc.parse(stamp).getTime() / 1000;
++            if (time < last || time > now) return null;
++            if (first < 0) first = time;
++            last = time;
++            if ("wake".equals(entry.getString("action")) && "reserved".equals(entry.getString("result")) &&
++                    time >= now - 172800) {
++                if (attempts.length() == 256) return null;
++                attempts.put(time);
++            }
++        }
++        if (first < 0) return null;
++        long since = Math.max(first, now - 172800);
++        // A full rotating journal may have dropped earlier events in its first second.
++        if (lines == 500 && first >= since) {
++            since = first + 1;
++            if (since > now) return null;
++            while (attempts.length() > 0 && attempts.getLong(0) < since) attempts.remove(0);
++        }
++        return new JSONObject().put("since", since).put("as_of", now).put("times", attempts);
++    }
++}
