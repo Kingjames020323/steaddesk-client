@@ -213,5 +213,12 @@
     "Cannot reach callback service. Check your connection and retry.",
     "Scheduled callback (store time): %s",
     "The first call was missed. Support will try again."
+  ],
+  "Fixed action notices": [
+    "Support is restarting the POS app.",
+    "Support is reconnecting SteadDesk to the printer.",
+    "Support is printing a test page.",
+    "Support is opening network settings.",
+    "Support is restarting this device."
   ]
 }

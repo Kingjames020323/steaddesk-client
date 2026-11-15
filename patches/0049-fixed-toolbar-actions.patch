@@ -1,0 +1,2190 @@
+diff --git a/build.rs b/build.rs
+index 8271f69..f594418 100644
+--- a/build.rs
++++ b/build.rs
+@@ -103,6 +103,21 @@ fn main() {
+     match std::fs::read_to_string(selector).expect("configured edition").trim() {
+         "false" => {
+             println!("cargo:rustc-cfg=steaddesk_help_merchant");
++            let fixed = "src/steaddesk_fixed_enabled.rs";
++            println!("cargo:rerun-if-changed={fixed}");
++            if matches!(target_os.as_str(), "windows" | "android") &&
++                std::fs::read_to_string(fixed).is_ok_and(|s| s.trim() == "true") {
++                println!("cargo:rustc-cfg=steaddesk_fixed_merchant");
++                if target_os == "windows" {
++                    let cpp = "src/platform/fixed_actions.cpp";
++                    cc::Build::new().cpp(true).std("c++17").define("UNICODE",None)
++                        .define("_UNICODE",None).file(cpp).compile("steaddesk_fixed_windows");
++                    for lib in ["rstrtmgr","shell32","advapi32","user32"] {
++                        println!("cargo:rustc-link-lib={lib}");
++                    }
++                    println!("cargo:rerun-if-changed={cpp}");
++                }
++            }
+             let toolbar = "src/steaddesk_tb.rs";
+             println!("cargo:rerun-if-changed={toolbar}");
+             if target_os == "windows" && std::fs::read_to_string(toolbar).map(|s| s.trim() == "true").unwrap_or(false) {
+diff --git a/flutter/android/app/src/main/java/com/carriez/flutter_hbb/FixedActionBuild.java b/flutter/android/app/src/main/java/com/carriez/flutter_hbb/FixedActionBuild.java
+new file mode 100644
+index 0000000..2cec6fa
+--- /dev/null
++++ b/flutter/android/app/src/main/java/com/carriez/flutter_hbb/FixedActionBuild.java
+@@ -0,0 +1,2 @@
++package com.carriez.flutter_hbb;
++final class FixedActionBuild { static final boolean ENABLED = false; }
+diff --git a/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/FixedWifiSettings.kt b/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/FixedWifiSettings.kt
+new file mode 100644
+index 0000000..f676806
+--- /dev/null
++++ b/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/FixedWifiSettings.kt
+@@ -0,0 +1,50 @@
++package com.carriez.flutter_hbb
++
++import android.app.KeyguardManager
++import android.content.Context
++import android.content.Intent
++import android.content.pm.ApplicationInfo
++import android.os.Looper
++import android.os.PowerManager
++import android.provider.Settings
++import androidx.annotation.Keep
++import java.lang.ref.WeakReference
++import java.util.concurrent.FutureTask
++import java.util.concurrent.TimeUnit
++
++internal object FixedWifiSettings {
++    @Volatile private var resumed = WeakReference<MainActivity>(null)
++    @Keep @JvmStatic private external fun consumePermit(): Boolean
++
++    fun resumed(activity: MainActivity) { resumed = WeakReference(activity) }
++    fun paused(activity: MainActivity) {
++        if (resumed.get() === activity) resumed.clear()
++    }
++
++    fun query(name: String): Boolean {
++        if (!FixedActionBuild.ENABLED || Looper.myLooper() == Looper.getMainLooper()) return false
++        val activity = resumed.get() ?: return false
++        val check = FutureTask<Boolean> {
++            val screen = activity.getSystemService(Context.POWER_SERVICE) as PowerManager
++            val lock = activity.getSystemService(Context.KEYGUARD_SERVICE) as KeyguardManager
++            if (resumed.get() !== activity || activity.isFinishing || activity.isDestroyed ||
++                !screen.isInteractive || lock.isKeyguardLocked || !activity.hasWindowFocus() ||
++                !activity.window.decorView.isShown || (MerchantRecovery.userPaused(activity) || MerchantRecovery.freshPeerUserStopped() != "false")) return@FutureTask false
++            if (name == "steaddesk_fixed_visible") return@FutureTask true
++            val intent = Intent(Settings.ACTION_WIFI_SETTINGS)
++            val info = activity.packageManager.resolveActivity(intent, android.content.pm.PackageManager.MATCH_DEFAULT_ONLY)?.activityInfo
++                ?: return@FutureTask false
++            if (!info.exported || info.applicationInfo.flags and ApplicationInfo.FLAG_SYSTEM == 0) return@FutureTask false
++            if (name == "steaddesk_fixed_settings_supported") return@FutureTask true
++            if (name != "steaddesk_fixed_settings" || !consumePermit() || (MerchantRecovery.userPaused(activity) || MerchantRecovery.freshPeerUserStopped() != "false")) return@FutureTask false
++            intent.setClassName(info.packageName, info.name)
++            activity.startActivity(intent)
++            true
++        }
++        activity.runOnUiThread(check)
++        return try { check.get(1500, TimeUnit.MILLISECONDS) } catch (_: Exception) {
++            check.cancel(false)
++            false
++        }
++    }
++}
+diff --git a/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MainActivity.kt b/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MainActivity.kt
+index c4a15ff..3b84ab8 100644
+--- a/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MainActivity.kt
++++ b/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MainActivity.kt
+@@ -113,6 +113,7 @@ class MainActivity : FlutterActivity() {
+ 
+     override fun onResume() {
+         super.onResume()
++        if (FixedActionBuild.ENABLED) FixedWifiSettings.resumed(this)
+         val inputPer = InputService.isOpen
+         activity.runOnUiThread {
+             flutterMethodChannel?.invokeMethod(
+@@ -122,6 +123,11 @@ class MainActivity : FlutterActivity() {
+         }
+     }
+ 
++    override fun onPause() {
++        if (FixedActionBuild.ENABLED) FixedWifiSettings.paused(this)
++        super.onPause()
++    }
++
+     private fun requestMediaProjection() {
+         val intent = Intent(this, PermissionRequestTransparentActivity::class.java).apply {
+             action = ACT_REQUEST_MEDIA_PROJECTION
+diff --git a/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MainService.kt b/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MainService.kt
+index 55cdb1d..d967f6f 100644
+--- a/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MainService.kt
++++ b/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MainService.kt
+@@ -99,6 +99,8 @@ class MainService : Service() {
+         return when (name) {
+             "steaddesk_self_heal_paused" -> MerchantRecovery.paused()
+             "steaddesk_peer_user_stopped" -> MerchantRecovery.peerUserStopped()
++            "steaddesk_fixed_peer_stopped" -> MerchantRecovery.freshPeerUserStopped()
++            "steaddesk_fixed_visible", "steaddesk_fixed_settings_supported", "steaddesk_fixed_settings" -> FixedWifiSettings.query(name).toString()
+             "steaddesk_remote_paused" -> MerchantRecovery.userPaused(this).toString()
+             "steaddesk_file_scope" -> JSONObject().apply {
+                 put("storage", Environment.getExternalStorageDirectory().absolutePath)
+diff --git a/flutter/android/app/src/steaddeskMerchant/java/com/carriez/flutter_hbb/MerchantRecovery.java b/flutter/android/app/src/steaddeskMerchant/java/com/carriez/flutter_hbb/MerchantRecovery.java
+index 21709a2..8128e04 100644
+--- a/flutter/android/app/src/steaddeskMerchant/java/com/carriez/flutter_hbb/MerchantRecovery.java
++++ b/flutter/android/app/src/steaddeskMerchant/java/com/carriez/flutter_hbb/MerchantRecovery.java
+@@ -64,6 +64,10 @@ public final class MerchantRecovery {
+         return watchdog == null ? "" : Boolean.toString(watchdog.isPeerUserStopped());
+     }
+ 
++    public static synchronized String freshPeerUserStopped() {
++        return watchdog == null ? "" : watchdog.freshPeerUserStopped();
++    }
++
+     public static void recordBoot(Context context, String event) { MerchantLogRecords.recordBoot(context, event); }
+ 
+     private MerchantRecovery() {}
+diff --git a/flutter/android/app/src/steaddeskMerchant/java/com/steaddesk/recovery/PeerWatchdog.java b/flutter/android/app/src/steaddeskMerchant/java/com/steaddesk/recovery/PeerWatchdog.java
+index ae308d3..3c16ae7 100644
+--- a/flutter/android/app/src/steaddeskMerchant/java/com/steaddesk/recovery/PeerWatchdog.java
++++ b/flutter/android/app/src/steaddeskMerchant/java/com/steaddesk/recovery/PeerWatchdog.java
+@@ -143,6 +143,11 @@ public final class PeerWatchdog {
+         }
+     }
+ 
++    public String freshPeerUserStopped() {
++        try { return Boolean.toString(readPeerStopped()); }
++        catch (PackageManager.NameNotFoundException | RuntimeException unavailable) { return ""; }
++    }
++
+     public boolean isPeerUserStopped() {
+         try { return readPeerStopped(); }
+         catch (PackageManager.NameNotFoundException | RuntimeException unavailable) { return lastPeerStopped; }
+diff --git a/flutter/android/app/src/steaddeskSupport/java/com/carriez/flutter_hbb/MerchantRecovery.java b/flutter/android/app/src/steaddeskSupport/java/com/carriez/flutter_hbb/MerchantRecovery.java
+index d7d9a1f..160d034 100644
+--- a/flutter/android/app/src/steaddeskSupport/java/com/carriez/flutter_hbb/MerchantRecovery.java
++++ b/flutter/android/app/src/steaddeskSupport/java/com/carriez/flutter_hbb/MerchantRecovery.java
+@@ -10,6 +10,8 @@ public final class MerchantRecovery {
+     public static String paused() { return ""; }
+     public static String peerUserStopped() { return ""; }
+ 
++    public static String freshPeerUserStopped() { return ""; }
++
+     public static void recordBoot(android.content.Context context, String event) {}
+ 
+     private MerchantRecovery() {}
+diff --git a/flutter/lib/desktop/pages/remote_page.dart b/flutter/lib/desktop/pages/remote_page.dart
+index 72ce942..854be93 100644
+--- a/flutter/lib/desktop/pages/remote_page.dart
++++ b/flutter/lib/desktop/pages/remote_page.dart
+@@ -728,7 +728,7 @@ class _RemotePageState extends State<RemotePage>
+   late final bool _supportSession =
+       isDesktop && bind.mainGetAppNameSync() == 'SteadDesk Support';
+ 
+-  late final _toolbarFrame = toolbarEnabled && _supportSession ? ToolbarFrame() : null;
++  late final _toolbarFrame = sessionToolbarEnabled && _supportSession ? ToolbarFrame() : null;
+ 
+   bool get _toolbarActive => mounted && _isSelectedTab && !_isWindowBlur &&
+       _ffi.connType == ConnType.defaultConn && _ffi.ffiModel.pi.isSet.isTrue &&
+@@ -1052,7 +1052,7 @@ class _RemotePageState extends State<RemotePage>
+                   : Obx(() {
+                       _ffi.textureModel.updateCurrentDisplay(peerDisplay.value);
+                       final image = ImagePaint(
+-                        toolbarFrame: _toolbarFrame,
++                        toolbarFrame: toolbarEnabled ? _toolbarFrame : null,
+                         id: widget.id,
+                         zoomCursor: _zoomCursor,
+                         cursorOverImage: _cursorOverImage,
+@@ -1063,7 +1063,7 @@ class _RemotePageState extends State<RemotePage>
+                                 child, enterView, leaveView),
+                         ffi: _ffi,
+                       );
+-                      return _toolbarFrame?.view(image) ?? image;
++                      return toolbarEnabled ? (_toolbarFrame?.view(image) ?? image) : image;
+                     }),
+             );
+           }),
+diff --git a/flutter/lib/steaddesk/fixed/merchant.dart b/flutter/lib/steaddesk/fixed/merchant.dart
+new file mode 100644
+index 0000000..da1e620
+--- /dev/null
++++ b/flutter/lib/steaddesk/fixed/merchant.dart
+@@ -0,0 +1,127 @@
++import 'dart:async';
++import 'dart:convert';
++import 'dart:ffi';
++import 'dart:io';
++import 'dart:isolate';
++import 'package:ffi/ffi.dart';
++import 'package:flutter/material.dart';
++import '../../common.dart' show translate;
++import 'protocol.dart';
++
++typedef _Native = UintPtr Function(
++    Pointer<Uint8>, UintPtr, Pointer<Uint8>, UintPtr);
++typedef _Invoke = int Function(Pointer<Uint8>, int, Pointer<Uint8>, int);
++
++FixedJson? _native(String input) {
++  final lib = DynamicLibrary.open(
++      Platform.isWindows ? 'librustdesk.dll' : 'librustdesk.so');
++  final invoke = lib.lookupFunction<_Native, _Invoke>('steaddesk_fixed_notice');
++  final data = utf8.encode(input);
++  return using((arena) {
++    final src = arena<Uint8>(data.length)
++      ..asTypedList(data.length).setAll(0, data);
++    final dst = arena<Uint8>(2048);
++    final n = invoke(src, data.length, dst, 2048);
++    return n > 0 && n <= 2048
++        ? jsonDecode(utf8.decode(dst.asTypedList(n))) as FixedJson
++        : null;
++  });
++}
++
++Future<FixedJson?> _call(String input) => Isolate.run(() => _native(input));
++
++const fixedMerchantEnabled = true;
++typedef FixedNoticeCall = Future<FixedJson?> Function(String);
++Future<void> _release(FixedNoticeCall call) async {
++  try {
++    await call('release');
++  } catch (_) {}
++}
++
++Widget fixedMerchantNotice() => const FixedMerchantNotice();
++
++class FixedMerchantNotice extends StatefulWidget {
++  final FixedNoticeCall call;
++  final String Function(String)? label;
++  const FixedMerchantNotice({super.key, this.call = _call, this.label});
++  @override
++  State<FixedMerchantNotice> createState() => _NoticeState();
++}
++
++class _NoticeState extends State<FixedMerchantNotice>
++    with WidgetsBindingObserver {
++  FixedOffer? offer;
++  Timer? timer;
++  bool busy = false;
++  int revision = 0;
++  bool get visible =>
++      mounted &&
++      WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed &&
++      ModalRoute.of(context)?.isCurrent == true;
++  @override
++  void initState() {
++    super.initState();
++    WidgetsBinding.instance.addObserver(this);
++    timer = Timer.periodic(const Duration(seconds: 3), (_) => tick());
++  }
++
++  @override
++  void didChangeAppLifecycleState(AppLifecycleState state) {
++    if (state != AppLifecycleState.resumed) {
++      revision++;
++      unawaited(_release(widget.call));
++      if (offer != null && mounted) setState(() => offer = null);
++    }
++  }
++
++  @override
++  void dispose() {
++    revision++;
++    unawaited(_release(widget.call));
++    timer?.cancel();
++    WidgetsBinding.instance.removeObserver(this);
++    super.dispose();
++  }
++
++  Future<void> tick() async {
++    if (busy || !visible) return;
++    busy = true;
++    final generation = revision;
++    bool active() => visible && revision == generation;
++    try {
++      final row = await widget.call('poll');
++      if (!active() ||
++          row == null ||
++          !fixedFields(row, {'id', 'action', 'target_label', 'link'})) return;
++      final link = row.remove('link');
++      final found = FixedOffer.parse(row);
++      if (found == null || link is! String) return;
++      setState(() => offer = found);
++      await WidgetsBinding.instance.endOfFrame;
++      await Future<void>.delayed(const Duration(seconds: 2));
++      if (!active() || offer != found) return;
++      await widget.call(jsonEncode({'id': found.id, 'link': link}));
++    } catch (_) {
++      // A later poll may discover a new offer. Never repeat the permit or action.
++    } finally {
++      busy = false;
++      if (mounted && offer != null) setState(() => offer = null);
++    }
++  }
++
++  @override
++  Widget build(BuildContext context) {
++    final item = offer;
++    if (item == null) return const SizedBox.shrink();
++    return Semantics(
++        liveRegion: true,
++        child: Material(
++            color: const Color(0xffffe6a7),
++            child: Padding(
++                padding: const EdgeInsets.all(14),
++                child: Text(
++                    '${(widget.label ?? (key) => translate(key))(item.action.notice)}\n${item.label}',
++                    style: const TextStyle(
++                        color: Colors.black, fontWeight: FontWeight.bold)))));
++  }
++}
+diff --git a/flutter/lib/steaddesk/fixed/off.dart b/flutter/lib/steaddesk/fixed/off.dart
+new file mode 100644
+index 0000000..7d1d892
+--- /dev/null
++++ b/flutter/lib/steaddesk/fixed/off.dart
+@@ -0,0 +1,5 @@
++import 'package:flutter/widgets.dart';
++
++Widget fixedMerchantNotice() => const SizedBox.shrink();
++
++const fixedMerchantEnabled = false;
+diff --git a/flutter/lib/steaddesk/fixed/protocol.dart b/flutter/lib/steaddesk/fixed/protocol.dart
+new file mode 100644
+index 0000000..ef759a2
+--- /dev/null
++++ b/flutter/lib/steaddesk/fixed/protocol.dart
+@@ -0,0 +1,114 @@
++typedef FixedJson = Map<String, dynamic>;
++
++enum FixedAction {
++  restartPos('restart_pos', '重启 POS 应用', 'Support is restarting the POS app.'),
++  reconnect('reconnect_printer', '重新建立 SteadDesk 打印连接',
++      'Support is reconnecting SteadDesk to the printer.'),
++  printTest('print_test', '打印测试页', 'Support is printing a test page.'),
++  settings('open_settings', '打开网络设置', 'Support is opening network settings.'),
++  reboot('reboot', '重启设备', 'Support is restarting this device.');
++
++  const FixedAction(this.wire, this.label, this.notice);
++  final String wire, label, notice;
++  static FixedAction? parse(Object? value) {
++    for (final entry in values) {
++      if (entry.wire == value) return entry;
++    }
++    return null;
++  }
++
++  bool get printer => this == reconnect || this == printTest;
++}
++
++final _record = RegExp(r'^[0-9A-HJKMNP-TV-Z]{26}$');
++bool fixedId(Object? value, String prefix) =>
++    value is String &&
++    value.startsWith(prefix) &&
++    _record.hasMatch(value.substring(prefix.length));
++bool fixedPeer(Object? value) =>
++    value is String && RegExp(r'^[0-9]{9,10}$').hasMatch(value);
++bool _label(Object? value) =>
++    value is String &&
++    value.trim().isNotEmpty &&
++    value.length <= 200 &&
++    !RegExp(r'[\x00-\x1f\x7f]').hasMatch(value);
++bool fixedFields(Object? value, Set<String> keys) =>
++    value is Map &&
++    value.length == keys.length &&
++    keys.every(value.containsKey);
++
++class FixedOption {
++  final FixedAction action;
++  final String target, label;
++  const FixedOption(this.action, this.target, this.label);
++  static List<FixedOption>? options(FixedJson reply) {
++    if (!fixedFields(reply, {'available', 'options'}) ||
++        reply['available'] != true) return null;
++    final rows = reply['options'];
++    if (rows is! List || rows.length > 512) return null;
++    final found = <FixedOption>[];
++    for (final row in rows) {
++      if (!fixedFields(row, {'action', 'target', 'label'}) ||
++          !fixedId(row['target'], 'i_') ||
++          !_label(row['label'])) return null;
++      final a = FixedAction.parse(row['action']);
++      if (a == null) return null;
++      found.add(FixedOption(a, row['target'], row['label']));
++    }
++    return found;
++  }
++}
++
++typedef FixedRequest = Future<FixedJson> Function(String, String, [FixedJson?]);
++Future<void> submitFixed(
++    FixedRequest request,
++    String route,
++    String peer,
++    FixedOption option,
++    Future<bool> Function(int) confirm,
++    Future<bool> Function() current,
++    {String? ticket}) async {
++  if (!fixedPeer(peer) ||
++      !fixedId(option.target, 'i_') ||
++      !await current() ||
++      !await confirm(1) ||
++      !await current()) return;
++  final created = await request('POST', '$route/fixed-actions', {
++    'peer_id': peer,
++    'action': option.action.wire,
++    'target': option.target,
++    if (ticket != null) 'ticket_id': ticket
++  });
++  if (!fixedId(created['id'], 't_')) throw const FormatException('无效的操作编号。');
++  if (option.action != FixedAction.reboot) {
++    if (created['state'] != 'queued') throw const FormatException('操作状态未确认。');
++    return;
++  }
++  if (created['state'] != 'confirm_again') {
++    throw const FormatException('缺少重启设备的第二次确认。');
++  }
++  if (await current() && await confirm(2) && await current()) {
++    final result = await request(
++        'POST', "$route/fixed-actions/${created['id']}/confirm", {});
++    if (result['state'] != 'queued' || result['id'] != created['id']) {
++      throw const FormatException('重启请求状态未确认。');
++    }
++  }
++}
++
++class FixedOffer {
++  final String id, label;
++  final FixedAction action;
++  const FixedOffer(this.id, this.label, this.action);
++  static FixedOffer? parse(Object? row) {
++    if (!fixedFields(row, {'id', 'action', 'target_label'})) return null;
++    final map = row as Map;
++    final a = FixedAction.parse(map['action']);
++    if (!fixedId(map['id'], 't_') ||
++        !_label(map['target_label']) ||
++        a == null) {
++      return null;
++    }
++    return FixedOffer(map['id'], map['target_label'], a);
++  }
++}
+diff --git a/flutter/lib/steaddesk/fixed/support_dialogs.dart b/flutter/lib/steaddesk/fixed/support_dialogs.dart
+new file mode 100644
+index 0000000..5a6ed80
+--- /dev/null
++++ b/flutter/lib/steaddesk/fixed/support_dialogs.dart
+@@ -0,0 +1,27 @@
++import 'package:flutter/material.dart';
++import 'protocol.dart';
++
++Widget fixedTargetDialog(
++        BuildContext ctx, FixedAction action, List<FixedOption> choices) =>
++    SimpleDialog(title: Text('选择目标 · ${action.label}'), children: [
++      for (final o in choices)
++        SimpleDialogOption(
++            onPressed: () => Navigator.pop(ctx, o), child: Text(o.label))
++    ]);
++
++Widget fixedConfirmDialog(BuildContext ctx, FixedOption choice, int step) {
++  final action = choice.action;
++  return AlertDialog(
++      title: Text(step == 2 ? '再次确认重启设备' : action.label),
++      content: Text(step == 2
++          ? '重启将中断远程会话。确认重启「${choice.label}」？'
++          : '目标：${choice.label}。确认执行「${action.label}」？'),
++      actions: [
++        TextButton(
++            onPressed: () => Navigator.pop(ctx, false),
++            child: const Text('取消')),
++        FilledButton(
++            onPressed: () => Navigator.pop(ctx, true),
++            child: Text(step == 2 ? '确认重启' : '确认'))
++      ]);
++}
+diff --git a/flutter/lib/steaddesk/fixed_build.dart b/flutter/lib/steaddesk/fixed_build.dart
+new file mode 100644
+index 0000000..c086486
+--- /dev/null
++++ b/flutter/lib/steaddesk/fixed_build.dart
+@@ -0,0 +1,2 @@
++const fixedSupportEnabled = false;
++const readToolbarEnabled = false;
+diff --git a/flutter/lib/steaddesk/fixed_merchant_api.dart b/flutter/lib/steaddesk/fixed_merchant_api.dart
+new file mode 100644
+index 0000000..daf33ae
+--- /dev/null
++++ b/flutter/lib/steaddesk/fixed_merchant_api.dart
+@@ -0,0 +1 @@
++export 'fixed/off.dart';
+diff --git a/flutter/lib/steaddesk/merchant_panel.dart b/flutter/lib/steaddesk/merchant_panel.dart
+index 156c8ee..47295dc 100644
+--- a/flutter/lib/steaddesk/merchant_panel.dart
++++ b/flutter/lib/steaddesk/merchant_panel.dart
+@@ -14,6 +14,7 @@ import 'help/merchant_help_off.dart'
+     if (dart.library.io) 'merchant_help_api.dart';
+ import 'quick/merchant_off.dart' if (dart.library.io) 'quick_merchant_api.dart';
+ import 'merchant_pause_button.dart';
++import 'fixed/off.dart' if (dart.library.io) 'fixed_merchant_api.dart';
+ import 'merchant_window_stub.dart'
+     if (dart.library.io) 'merchant_window_io.dart';
+ 
+@@ -510,7 +511,16 @@ class _MerchantPanelState extends State<MerchantPanel>
+   @override
+   Widget build(BuildContext context) => Scaffold(
+         backgroundColor: Colors.white,
+-        body: SafeArea(child: content()),
++        body: SafeArea(
++            child: !fixedMerchantEnabled
++                ? content()
++                : Column(children: [
++                    if ((merchantAndroid ||
++                            merchantWindows && widget.connectionManager) &&
++                        sessions.length == 1)
++                      fixedMerchantNotice(),
++                    Expanded(child: content()),
++                  ])),
+         bottomNavigationBar: SafeArea(
+           top: false,
+           child: Padding(
+diff --git a/flutter/lib/steaddesk/toolbar/archive.dart b/flutter/lib/steaddesk/toolbar/archive.dart
+index fe65759..45f789c 100644
+--- a/flutter/lib/steaddesk/toolbar/archive.dart
++++ b/flutter/lib/steaddesk/toolbar/archive.dart
+@@ -91,7 +91,7 @@ Widget toolbarCaseAttachments(
+         required String caseId,
+         String? ticket,
+         String? origin}) =>
+-    Builder(
++    !toolbarEnabled ? const SizedBox.shrink() : Builder(
+         builder: (ctx) => TextButton.icon(
+             icon: const Icon(Icons.attachment, size: 16),
+             label: const Text('会话附件'),
+diff --git a/flutter/lib/steaddesk/toolbar/host.dart b/flutter/lib/steaddesk/toolbar/host.dart
+index 9a192ac..160cade 100644
+--- a/flutter/lib/steaddesk/toolbar/host.dart
++++ b/flutter/lib/steaddesk/toolbar/host.dart
+@@ -7,12 +7,16 @@ import '../../models/platform_model.dart' show bind;
+ import '../case_session_api.dart';
+ import '../ops_groups.dart' show opsEndpoint;
+ import '../ops_health.dart' show HealthFailure, OpsHealthHttp;
++import '../fixed_build.dart';
++import '../fixed/protocol.dart';
++import '../fixed/support_dialogs.dart';
+ import 'actions.dart';
+ import 'frame.dart';
+ export 'frame.dart' show ToolbarFrame;
+ part 'archive.dart';
+ 
+-const toolbarEnabled = true;
++const toolbarEnabled = readToolbarEnabled;
++const sessionToolbarEnabled = toolbarEnabled || fixedSupportEnabled;
+ typedef _Login = ({String name, String token});
+ _Login? _login() {
+   try {
+@@ -76,6 +80,8 @@ class _ToolbarState extends State<_Toolbar> {
+   String? route, ticket, error;
+   bool authorized = false, reading = false, busy = false;
+   List<ToolbarJson> history = [];
++  List<FixedOption>? options;
++  String? supportPeer;
+   late final Timer timer;
+   bool get current =>
+       mounted && owner != null && owner == _login() && widget.active();
+@@ -160,9 +166,30 @@ class _ToolbarState extends State<_Toolbar> {
+         setState(() {
+           if (!authorized) error = null;
+           authorized = true;
+-          history = actions;
++          history = actions
++              .where((row) => FixedAction.parse(row['action']) != null
++                  ? fixedSupportEnabled
++                  : toolbarEnabled)
++              .toList();
+         });
+       }
++      if (fixedSupportEnabled && current && !busy) {
++        List<FixedOption>? found;
++        String? who;
++        try {
++          who = await bind.mainGetMyId();
++          if (fixedPeer(who)) {
++            found = FixedOption.options(await request(
++                'POST', '$route/fixed-options', {'peer_id': who}));
++          }
++        } catch (_) {}
++        if (current && !busy) {
++          setState(() {
++            options = found;
++            supportPeer = who;
++          });
++        }
++      }
+     } catch (e) {
+       if (mounted && !busy) {
+         setState(() {
+@@ -177,7 +204,7 @@ class _ToolbarState extends State<_Toolbar> {
+   }
+ 
+   Future<void> run(ToolbarAction action) async {
+-    if (!authorized || !current || busy) return;
++    if (!toolbarEnabled || !authorized || !current || busy) return;
+     final allowed = widget.screenshotAllowed;
+     bool valid() =>
+         current && (action != ToolbarAction.screenshot || allowed());
+@@ -204,8 +231,63 @@ class _ToolbarState extends State<_Toolbar> {
+     }
+   }
+ 
++  Future<void> runFixed(FixedAction action) async {
++    final peer = supportPeer;
++    if (!fixedSupportEnabled ||
++        !current ||
++        !authorized ||
++        busy ||
++        peer == null ||
++        !fixedPeer(peer)) {
++      return;
++    }
++    setState(() {
++      busy = true;
++      error = null;
++    });
++    try {
++      await open(rebind: widget.cases);
++      final latest = FixedOption.options(
++          await request('POST', '$route/fixed-options', {'peer_id': peer}));
++      final choices = latest?.where((o) => o.action == action).toList();
++      if (choices == null || choices.isEmpty || !current) {
++        throw const FormatException('此设备不支持或当前安全状态不允许执行。');
++      }
++      final choice = choices.length == 1
++          ? choices.single
++          : await _guardedDialog<FixedOption>(context, () => current,
++              (ctx) => fixedTargetDialog(ctx, action, choices));
++      if (choice == null || !current) return;
++      await submitFixed(request, route!, peer, choice, (step) async {
++        if (!current) return false;
++        return await _guardedDialog<bool>(context, () => current,
++                (ctx) => fixedConfirmDialog(ctx, choice, step)) ==
++            true;
++      },
++          () => current
++              ? bind.mainGetMyId().then((id) => current && id == peer)
++              : Future.value(false),
++          ticket: ticket);
++    } catch (e) {
++      if (mounted) {
++        setState(() => error = e is HealthFailure && e.status == 429
++            ? '同一设备的同一动作每 10 分钟只能执行一次。'
++            : message(e));
++      }
++    } finally {
++      if (mounted) {
++        setState(() => busy = false);
++        await refresh();
++      }
++    }
++  }
++
+   Future<void> preview(ToolbarJson row) async {
+-    if (!current || !authorized || busy || row['state'] != 'completed') return;
++    if (!toolbarEnabled ||
++        !current ||
++        !authorized ||
++        busy ||
++        row['state'] != 'completed') return;
+     final id = row['id'];
+     if (!_validActionId(id)) return;
+     setState(() {
+@@ -226,20 +308,15 @@ class _ToolbarState extends State<_Toolbar> {
+   @override
+   Widget build(BuildContext context) {
+     final ready = authorized && current && !busy;
+-    final menu = PopupMenuButton<ToolbarAction>(
++    final menu = PopupMenuButton<Object>(
+         enabled: ready,
+         tooltip: '会话快捷操作',
+-        onSelected: run,
+-        itemBuilder: (_) => [
+-              for (final a in ToolbarAction.values)
+-                PopupMenuItem(
+-                    value: a,
+-                    enabled: (a != ToolbarAction.screenshot ||
+-                            widget.screenshotAllowed()) &&
+-                        (a != ToolbarAction.logs ||
+-                            {'Windows', 'Android'}.contains(widget.platform)),
+-                    child: Text(a.label))
+-            ],
++        onSelected: (value) {
++          if (value is ToolbarAction) run(value);
++          if (value is FixedAction) runFixed(value);
++        },
++        itemBuilder: (_) => toolbarMenuEntries(
++            widget.screenshotAllowed, widget.platform, options),
+         child:
+             const Padding(padding: EdgeInsets.all(8), child: Text('快捷操作 ▾')));
+     final sidebar = Padding(
+@@ -264,6 +341,10 @@ class _ToolbarState extends State<_Toolbar> {
+                   '${_actionLabel(row['action'])} · ${_states[row['state']] ?? row['state']}'),
+               Text(
+                   "${row['case_kind'] == 'pending' ? '待补结案' : '关联工单'} · ${row['case_id']}"),
++              if (row['target_label'] is String)
++                Text("目标：${row['target_label']}"),
++              if (row['confirmed_by'] is String)
++                Text("确认人：${row['confirmed_by']}"),
+               Text(_localTime(row['created_at'])),
+               if (_merchantLogStatus[row['merchant']] case final status?)
+                 Text(status),
+@@ -283,14 +364,47 @@ class _ToolbarState extends State<_Toolbar> {
+   }
+ }
+ 
++List<PopupMenuEntry<Object>> toolbarMenuEntries(
++        bool Function() screenshotAllowed,
++        String platform,
++        List<FixedOption>? options) =>
++    [
++      if (toolbarEnabled)
++        for (final a in ToolbarAction.values)
++          PopupMenuItem(
++              value: a,
++              enabled: (a != ToolbarAction.screenshot || screenshotAllowed()) &&
++                  (a != ToolbarAction.logs ||
++                      {'Windows', 'Android'}.contains(platform)),
++              child: Text(a.label)),
++      if (fixedSupportEnabled) ...[
++        if (toolbarEnabled) const PopupMenuDivider(),
++        for (final action in FixedAction.values)
++          PopupMenuItem(
++              value: action,
++              enabled: options?.any((o) => o.action == action) == true,
++              child: Text(options == null
++                  ? '${action.label} · 安全状态不可用'
++                  : options.any((o) => o.action == action)
++                      ? action.label
++                      : '${action.label} · 此设备不支持')),
++      ]
++    ];
++
+ String _actionLabel(dynamic value) {
+   for (final a in ToolbarAction.values) {
+     if (a.wire == value) return a.label;
+   }
+-  return '操作';
++  return FixedAction.parse(value)?.label ?? '操作';
+ }
+ 
+ const _states = {
++  'confirm_again': '待第二次确认',
++  'offered': '商户端已接收',
++  'dispatched': '已授权执行',
++  'unsupported': '此设备不支持',
++  'unknown': '执行结果未知',
++  'initiated': '已请求重启',
+   'queued': '已排队',
+   'running': '进行中',
+   'uploading': '上传中',
+diff --git a/flutter/lib/steaddesk/toolbar/off.dart b/flutter/lib/steaddesk/toolbar/off.dart
+index 253b70b..9a281e7 100644
+--- a/flutter/lib/steaddesk/toolbar/off.dart
++++ b/flutter/lib/steaddesk/toolbar/off.dart
+@@ -2,6 +2,7 @@ import 'dart:typed_data';
+ import 'package:flutter/widgets.dart';
+ 
+ const toolbarEnabled = false;
++const sessionToolbarEnabled = false;
+ 
+ class ToolbarFrame {
+   Widget view(Widget child) => child;
+diff --git a/flutter/test/steaddesk/fixed_actions_test.dart b/flutter/test/steaddesk/fixed_actions_test.dart
+new file mode 100644
+index 0000000..160e67a
+--- /dev/null
++++ b/flutter/test/steaddesk/fixed_actions_test.dart
+@@ -0,0 +1,210 @@
++import 'package:flutter/material.dart';
++import 'package:flutter_test/flutter_test.dart';
++import 'package:flutter_hbb/steaddesk/fixed/merchant.dart'
++    show FixedMerchantNotice;
++import 'package:flutter_hbb/steaddesk/fixed/support_dialogs.dart';
++import 'package:flutter_hbb/steaddesk/fixed/protocol.dart';
++
++void main() {
++  const id = 't_00000000000000000000000000';
++  const target = 'i_00000000000000000000000000';
++  const peer = '123456789';
++  for (final action in FixedAction.values) {
++    test('${action.wire} requires its own visible confirmations', () async {
++      final steps = <int>[], requests = <String>[];
++      final option = FixedOption(action, target, 'Demo terminal');
++      await submitFixed(
++          (method, path, [body]) async {
++            requests.add(path);
++            expect(method, 'POST');
++            if (path.endsWith('/confirm')) {
++              expect(body, isEmpty);
++              expect(steps, [1, 2]);
++              return {'id': id, 'state': 'queued'};
++            }
++            expect(steps, [1]);
++            expect(body,
++                {'action': action.wire, 'target': target, 'peer_id': peer});
++            return {
++              'id': id,
++              'state': action == FixedAction.reboot ? 'confirm_again' : 'queued'
++            };
++          },
++          'toolbar/device/session',
++          peer,
++          option,
++          (step) async {
++            steps.add(step);
++            return true;
++          },
++          () async => true);
++      expect(requests.length, action == FixedAction.reboot ? 2 : 1);
++    });
++  }
++  test('second-confirm cancel or stale session does not queue reboot',
++      () async {
++    for (final stale in [true, false]) {
++      int requests = 0;
++      bool current = true;
++      await submitFixed(
++          (_, __, [___]) async {
++            requests++;
++            return {'id': id, 'state': 'confirm_again'};
++          },
++          'toolbar/device/session',
++          peer,
++          const FixedOption(FixedAction.reboot, target, 'Demo terminal'),
++          (step) async {
++            if (step == 2) {
++              current = !stale;
++              return stale;
++            }
++            return true;
++          },
++          () async => current);
++      expect(requests, 1);
++    }
++  });
++  test('empty inventory, unavailable safety and unexpected fields fail closed',
++      () {
++    final valid = {
++      'action': 'print_test',
++      'target': target,
++      'label': 'Demo receipt'
++    };
++    expect(
++        FixedOption.options({
++          'available': true,
++          'options': [valid]
++        })!
++            .single
++            .target,
++        target);
++    expect(FixedOption.options({'available': true, 'options': []}), isEmpty);
++    expect(
++        FixedOption.options({
++          'available': false,
++          'options': [valid]
++        }),
++        isNull);
++    for (final bad in [
++      {...valid, 'ip': '192.0.2.1'},
++      {...valid, 'target': 'unalisted'},
++      {...valid, 'action': 'free_command'}
++    ]) {
++      expect(
++          FixedOption.options({
++            'available': true,
++            'options': [bad]
++          }),
++          isNull);
++    }
++    expect(
++        FixedOffer.parse({
++          'id': id,
++          'action': 'open_settings',
++          'target_label': 'Demo terminal'
++        }),
++        isNotNull);
++    expect(
++        FixedOffer.parse({
++          'id': id,
++          'action': 'open_settings',
++          'target_label': 'Demo terminal',
++          'extra': true
++        }),
++        isNull);
++  });
++  testWidgets(
++      'the staff chooses a registered target then presses two distinct reboot confirmations',
++      (tester) async {
++    const targets = [
++      FixedOption(FixedAction.reboot, target, 'Demo till A'),
++      FixedOption(
++          FixedAction.reboot, 'i_10000000000000000000000000', 'Demo till B')
++    ];
++    final requests = <String>[];
++    await tester.pumpWidget(MaterialApp(
++        home: Builder(
++            builder: (ctx) => Scaffold(
++                body: TextButton(
++                    onPressed: () async {
++                      final selected = await showDialog<FixedOption>(
++                          context: ctx,
++                          builder: (d) => fixedTargetDialog(
++                              d, FixedAction.reboot, targets));
++                      if (selected == null) return;
++                      await submitFixed((method, path, [body]) async {
++                        requests.add(path);
++                        if (path.endsWith('confirm')) {
++                          return {'id': id, 'state': 'queued'};
++                        }
++                        expect(body?['target'], targets.last.target);
++                        return {'id': id, 'state': 'confirm_again'};
++                      },
++                          'fixture',
++                          peer,
++                          selected,
++                          (step) async =>
++                              await showDialog<bool>(
++                                  context: ctx,
++                                  builder: (d) =>
++                                      fixedConfirmDialog(d, selected, step)) ==
++                              true,
++                          () async => true);
++                    },
++                    child: const Text('open'))))));
++    await tester.tap(find.text('open'));
++    await tester.pumpAndSettle();
++    await tester.tap(find.text('Demo till B'));
++    await tester.pumpAndSettle();
++    expect(find.textContaining('目标：Demo till B'), findsOneWidget);
++    expect(requests, isEmpty);
++    await tester.tap(find.text('确认'));
++    await tester.pumpAndSettle();
++    expect(requests, ['fixture/fixed-actions']);
++    expect(find.text('再次确认重启设备'), findsOneWidget);
++    await tester.tap(find.text('确认重启'));
++    await tester.pumpAndSettle();
++    expect(requests.last, 'fixture/fixed-actions/$id/confirm');
++  });
++
++  testWidgets(
++      'merchant offer is visibly rendered before acknowledgement and revoked by pause',
++      (tester) async {
++    final calls = <String>[];
++    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
++    await tester.pumpWidget(MaterialApp(
++        home: Scaffold(
++            body: FixedMerchantNotice(
++                label: (s) => s,
++                call: (input) async {
++                  calls.add(input);
++                  return input == 'poll'
++                      ? {
++                          'id': id,
++                          'action': 'print_test',
++                          'target_label': 'Demo printer',
++                          'link': 'fixture-link'
++                        }
++                      : null;
++                }))));
++    await tester.pump(const Duration(seconds: 3));
++    await tester.pump();
++    expect(find.textContaining('Support is printing a test page.'),
++        findsOneWidget);
++    expect(calls, ['poll']);
++    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
++    await tester.pump(const Duration(seconds: 2));
++    await tester.pump();
++    expect(calls, ['poll', 'release']);
++    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
++    await tester.pump(const Duration(seconds: 3));
++    await tester.pump();
++    expect(find.textContaining('Demo printer'), findsOneWidget);
++    await tester.pump(const Duration(seconds: 2));
++    await tester.pump();
++    expect(calls.last, contains('"id":"$id"'));
++    await tester.pumpWidget(const SizedBox.shrink());
++  });
++}
+diff --git a/flutter/test/steaddesk/fixed_role_test.dart b/flutter/test/steaddesk/fixed_role_test.dart
+new file mode 100644
+index 0000000..764184e
+--- /dev/null
++++ b/flutter/test/steaddesk/fixed_role_test.dart
+@@ -0,0 +1,30 @@
++import 'package:flutter/material.dart';
++import 'package:flutter_test/flutter_test.dart';
++import 'package:flutter_hbb/steaddesk/fixed_build.dart';
++import 'package:flutter_hbb/steaddesk/fixed/protocol.dart';
++import 'package:flutter_hbb/steaddesk/toolbar/actions.dart';
++import 'package:flutter_hbb/steaddesk/toolbar/host.dart';
++
++void main() {
++  test('read-only toolbar and fixed actions expose only the opted-in entries',
++      () {
++    final entries = toolbarMenuEntries(() => true, 'Windows', [])
++        .whereType<PopupMenuItem<Object>>();
++    expect(entries.map((e) => e.value).whereType<ToolbarAction>().toList(),
++        readToolbarEnabled ? ToolbarAction.values : []);
++    expect(entries.map((e) => e.value).whereType<FixedAction>().toList(),
++        fixedSupportEnabled ? FixedAction.values : []);
++    for (final e in entries.where((e) => e.value is FixedAction)) {
++      expect(e.enabled, isFalse);
++      expect((e.child as Text).data, contains('此设备不支持'));
++    }
++    if (!readToolbarEnabled) {
++      expect(toolbarEnabled, isFalse);
++      expect(
++          toolbarCaseAttachments(
++              account: 'fixture', peer: '123456789', caseId: 'fixture'),
++          isA<SizedBox>());
++    }
++    expect(sessionToolbarEnabled, readToolbarEnabled || fixedSupportEnabled);
++  });
++}
+diff --git a/src/lang/cn.rs b/src/lang/cn.rs
+index 046b539..6cfdc95 100644
+--- a/src/lang/cn.rs
++++ b/src/lang/cn.rs
+@@ -54,6 +54,11 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
+         ("Stop status unavailable", "无法读取停止状态"),
+         ("Previous process exit", "上一次进程退出"),
+         ("Recorded", "已记录"),
++        ("Support is restarting the POS app.", "客服正在重启 POS 应用。"),
++        ("Support is reconnecting SteadDesk to the printer.", "客服正在重新建立 SteadDesk 打印连接。"),
++        ("Support is printing a test page.", "客服正在打印测试页。"),
++        ("Support is opening network settings.", "客服正在打开网络设置。"),
++        ("Support is restarting this device.", "客服正在重启此设备。"),
+         ("Pause remote support", "暂停远程支持"),
+         ("Resume remote support", "恢复"),
+         ("Remote support is paused", "远程支持已暂停"),
+diff --git a/src/lang/es.rs b/src/lang/es.rs
+index b9bd847..f4a83a3 100644
+--- a/src/lang/es.rs
++++ b/src/lang/es.rs
+@@ -56,6 +56,11 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
+         ("Stop status unavailable", "No se pudo consultar el estado de detención"),
+         ("Previous process exit", "Salida anterior del proceso"),
+         ("Recorded", "Registrado"),
++        ("Support is restarting the POS app.", "El personal de soporte está reiniciando la aplicación del punto de venta."),
++        ("Support is reconnecting SteadDesk to the printer.", "El personal de soporte está reconectando SteadDesk a la impresora."),
++        ("Support is printing a test page.", "El personal de soporte está imprimiendo una página de prueba."),
++        ("Support is opening network settings.", "El personal de soporte está abriendo la configuración de red."),
++        ("Support is restarting this device.", "El personal de soporte está reiniciando este dispositivo."),
+         ("Pause remote support", "Pausar el soporte remoto"),
+         ("Resume remote support", "Reanudar"),
+         ("Remote support is paused", "El soporte remoto está en pausa"),
+diff --git a/src/lib.rs b/src/lib.rs
+index 92d4175..c1b7fa9 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -7,7 +7,9 @@ mod steaddesk_help;
+ mod steaddesk_toolbar;
+ #[cfg(steaddesk_merchant)]
+ mod steaddesk_merchant_logs;
+-#[cfg(any(steaddesk_merchant, steaddesk_qc_merchant, steaddesk_tb_merchant))]
++#[cfg(steaddesk_fixed_merchant)]
++mod steaddesk_fixed;
++#[cfg(any(steaddesk_merchant, steaddesk_qc_merchant, steaddesk_tb_merchant, steaddesk_fixed_merchant))]
+ mod steaddesk_device_signature;
+ #[cfg(steaddesk_qc_merchant)]
+ mod steaddesk_check_signer;
+diff --git a/src/platform/fixed_actions.cpp b/src/platform/fixed_actions.cpp
+new file mode 100644
+index 0000000..739d53a
+--- /dev/null
++++ b/src/platform/fixed_actions.cpp
+@@ -0,0 +1,146 @@
++// Windows interactive merchant process. Only the signed inventory AUMID reaches this adapter.
++#define WIN32_LEAN_AND_MEAN
++#ifndef _WIN32_WINNT
++#define _WIN32_WINNT 0x0A00
++#endif
++#include <windows.h>
++#include <appmodel.h>
++#include <restartmanager.h>
++#include <shellapi.h>
++#include <tlhelp32.h>
++#include <cwctype>
++#include <cstring>
++#include <string>
++#include <vector>
++
++namespace {
++struct Handle {
++    HANDLE value;
++    explicit Handle(HANDLE h) : value(h) {}
++    ~Handle() { if (value && value != INVALID_HANDLE_VALUE) CloseHandle(value); }
++    Handle(const Handle&) = delete;
++    Handle& operator=(const Handle&) = delete;
++};
++
++bool foreground() {
++    HWND hwnd = GetForegroundWindow();
++    DWORD pid = 0;
++    return hwnd && IsWindowVisible(hwnd) && !IsIconic(hwnd) &&
++        GetWindowThreadProcessId(hwnd, &pid) && pid == GetCurrentProcessId();
++}
++bool privilege() {
++    HANDLE raw;
++    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &raw)) return false;
++    Handle token(raw);
++    PRIVILEGE_SET wanted{};
++    wanted.PrivilegeCount = 1;
++    wanted.Control = PRIVILEGE_SET_ALL_NECESSARY;
++    if (!LookupPrivilegeValueW(nullptr, SE_SHUTDOWN_NAME, &wanted.Privilege[0].Luid)) return false;
++    wanted.Privilege[0].Attributes = SE_PRIVILEGE_ENABLED;
++    BOOL enabled = FALSE;
++    return PrivilegeCheck(token.value, &wanted, &enabled) && enabled;
++}
++bool sameUser(HANDLE process) {
++    auto identity = [](HANDLE proc, std::vector<BYTE>& storage) {
++        HANDLE raw;
++        if (!OpenProcessToken(proc, TOKEN_QUERY, &raw)) return false;
++        Handle token(raw);
++        DWORD size = 0;
++        GetTokenInformation(raw, TokenUser, nullptr, 0, &size);
++        if (!size || size > 65536) return false;
++        storage.resize(size);
++        return GetTokenInformation(raw, TokenUser, storage.data(), size, &size) != FALSE;
++    };
++    std::vector<BYTE> caller, owner;
++    return identity(GetCurrentProcess(), caller) && identity(process, owner) &&
++        EqualSid(reinterpret_cast<TOKEN_USER*>(caller.data())->User.Sid,
++                 reinterpret_cast<TOKEN_USER*>(owner.data())->User.Sid);
++}
++
++bool eligible(HANDLE process, const wchar_t* registered) {
++    wchar_t aumid[256]{};
++    UINT32 len = static_cast<UINT32>(sizeof(aumid)/sizeof(*aumid));
++    if (GetApplicationUserModelId(process,&len,aumid) != ERROR_SUCCESS || wcscmp(aumid,registered)!=0) return false;
++    wchar_t full[256]{};
++    len = static_cast<UINT32>(sizeof(full)/sizeof(*full));
++    if (GetPackageFullName(process,&len,full) != ERROR_SUCCESS) return false;
++    using OriginFn = LONG(WINAPI*)(PCWSTR, PackageOrigin*);
++    const FARPROC entry=GetProcAddress(GetModuleHandleW(L"kernelbase.dll"),"GetStagedPackageOrigin");
++    OriginFn originFn=nullptr;
++    static_assert(sizeof(entry)==sizeof(originFn),"Windows procedure pointer size");
++    std::memcpy(&originFn,&entry,sizeof(originFn));
++    PackageOrigin origin=PackageOrigin_Unknown;
++    if (!originFn || originFn(full,&origin)!=ERROR_SUCCESS ||
++        (origin!=PackageOrigin_Store && origin!=PackageOrigin_DeveloperSigned && origin!=PackageOrigin_LineOfBusiness)) return false;
++    std::wstring normalized(aumid);
++    for (auto& ch:normalized) ch=static_cast<wchar_t>(towlower(ch));
++    if (normalized.rfind(L"microsoft.",0)==0 || normalized.rfind(L"windows.",0)==0 ||
++        normalized.find(L"_cw5n1h2txyewy!")!=std::wstring::npos ||
++        normalized.find(L"_8wekyb3d8bbwe!")!=std::wstring::npos ||
++        normalized.find(L"_49e5m5gk8mf0t!")!=std::wstring::npos) return false;
++    // Restart Manager checks registration via bRestartable and RmShutdownOnlyRegistered.
++    // No caller-provided or application-registered command line is read here.
++    return sameUser(process);
++}
++typedef int (*Guard)(const void*);
++bool matchProcess(const wchar_t* aumid, RM_UNIQUE_PROCESS& target) {
++    DWORD session=0;
++    if (!ProcessIdToSessionId(GetCurrentProcessId(), &session) || !session) return false;
++    Handle snapshot(CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS,0));
++    if (snapshot.value==INVALID_HANDLE_VALUE) return false;
++    PROCESSENTRY32W row{};row.dwSize=sizeof(row);
++    if (!Process32FirstW(snapshot.value,&row)) return false;
++    bool found=false;
++    do {
++        DWORD other=0;
++        if(row.th32ProcessID==GetCurrentProcessId() || !ProcessIdToSessionId(row.th32ProcessID,&other) || other!=session) continue;
++        Handle proc(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,FALSE,row.th32ProcessID));
++        if(!proc.value || !eligible(proc.value,aumid)) continue;
++        FILETIME exited{},kernel{},user{};
++        if(found || !GetProcessTimes(proc.value,&target.ProcessStartTime,&exited,&kernel,&user)) return false;
++        target.dwProcessId=row.th32ProcessID;
++        found=true;
++    } while(Process32NextW(snapshot.value,&row));
++    return found && GetLastError()==ERROR_NO_MORE_FILES;
++}
++int registeredPos(const wchar_t* id,Guard guard,const void* scope,bool inspect) {
++    RM_UNIQUE_PROCESS target{};
++    if (!id || !*id || !matchProcess(id,target)) return 2;
++    DWORD handle=0;
++    wchar_t key[CCH_RM_SESSION_KEY+1]{};
++    if(RmStartSession(&handle,0,key)!=ERROR_SUCCESS) return 2;
++    struct Session {DWORD id; ~Session(){RmEndSession(id);}} session{handle};
++    if(RmRegisterResources(handle,0,nullptr,1,&target,0,nullptr)!=ERROR_SUCCESS) return 2;
++    UINT needed=0,count=1;
++    DWORD reasons=0;
++    RM_PROCESS_INFO process{};
++    if(RmGetList(handle,&needed,&count,&process,&reasons)!=ERROR_SUCCESS || count!=1 || reasons ||
++       process.Process.dwProcessId!=target.dwProcessId || CompareFileTime(&process.Process.ProcessStartTime,&target.ProcessStartTime)!=0 ||
++       !process.bRestartable || process.ApplicationType!=RmMainWindow) return 2;
++    if(inspect) return foreground()?1:2;
++    if(!guard(scope) || !foreground()) return 3;
++    if(RmShutdown(handle,RmShutdownOnlyRegistered,nullptr)!=ERROR_SUCCESS) return 0;
++    // Restart is the recovery half of the same cooperative operation.
++    return RmRestart(handle,0,nullptr)==ERROR_SUCCESS ? 1 : 0;
++}
++}
++extern "C" int sd_fixed_foreground(){return foreground()?1:0;}
++extern "C" int sd_fixed_pos_supported(const wchar_t* package){
++    return foreground() && registeredPos(package,nullptr,nullptr,true)==1 ? 1 : 0;
++}
++extern "C" int sd_fixed_capability(int action){
++    if(!foreground() || action<0 || action>4) return 0;
++    if(action==4) return privilege()?1:0;
++    return 1;
++}
++extern "C" int sd_fixed_windows(int action,const wchar_t* package, Guard guard,const void* scope) {
++    if (!guard || !scope || !guard(scope) || !foreground()) return 3;
++    switch(action){
++        case 0:return registeredPos(package,guard,scope,false);
++        case 3:return reinterpret_cast<INT_PTR>(ShellExecuteW(nullptr,L"open",L"ms-settings:network-status",nullptr,nullptr,SW_SHOWNORMAL))>32?1:0;
++        case 4:
++            if(!privilege()) return 2;
++            return ExitWindowsEx(EWX_REBOOT,SHTDN_REASON_MAJOR_APPLICATION|SHTDN_REASON_MINOR_MAINTENANCE|SHTDN_REASON_FLAG_PLANNED)?1:0;
++        default:return 2;
++    }
++}
+diff --git a/src/steaddesk_fixed.rs b/src/steaddesk_fixed.rs
+new file mode 100644
+index 0000000..cbe1acc
+--- /dev/null
++++ b/src/steaddesk_fixed.rs
+@@ -0,0 +1,797 @@
++//! Scoped merchant control plane. The UI can only poll and acknowledge its visible offer.
++use hbb_common::config::Config;
++use reqwest::{blocking::Client, redirect::Policy, Url};
++use serde_derive::Deserialize;
++use serde_json::{json, Value};
++use std::{
++    collections::{BTreeMap, HashSet},
++    io::{Read, Write},
++    net::{Ipv4Addr, SocketAddr, TcpStream},
++    panic::catch_unwind,
++    slice,
++    sync::{Mutex, OnceLock},
++    time::Duration,
++};
++
++const IDENTITY: &str = "/ops/v1/device/update-identity";
++const POLL: &str = "/ops/v1/device/fixed-poll";
++const PERMIT: &str = "/ops/v1/device/fixed-permit";
++const RESULT: &str = "/ops/v1/device/fixed-result";
++const ACTIONS: [&str; 5] = [
++    "restart_pos",
++    "reconnect_printer",
++    "print_test",
++    "open_settings",
++    "reboot",
++];
++const PAGE: &[u8] = b"SteadDesk printer test\n\n\n";
++#[cfg(target_os = "android")]
++const PLATFORM: &str = "android";
++#[cfg(windows)]
++const PLATFORM: &str = "windows";
++
++#[derive(Clone, PartialEq)]
++struct Scope {
++    origin: Url,
++    device: String,
++    peer: String,
++    link: String,
++    restart: bool,
++}
++#[derive(Deserialize)]
++#[serde(deny_unknown_fields)]
++struct Offer {
++    id: String,
++    action: String,
++    target_label: String,
++}
++#[derive(Deserialize)]
++#[serde(deny_unknown_fields)]
++struct PollReply {
++    job: Option<Offer>,
++    pos_package: Option<String>,
++}
++#[derive(Deserialize)]
++#[serde(deny_unknown_fields)]
++struct Permit {
++    id: String,
++    action: String,
++    target: Target,
++}
++#[derive(Deserialize)]
++#[serde(deny_unknown_fields)]
++struct Target {
++    id: String,
++    #[serde(rename = "type")]
++    kind: String,
++    ip: Ipv4Addr,
++    package: Option<String>,
++}
++struct Pending {
++    scope: Scope,
++    offer: Offer,
++    version: u64,
++}
++#[derive(Default)]
++struct Ledger {
++    link: String,
++    spent: HashSet<String>,
++    pending: Option<Pending>,
++    profile: Option<(Scope, String)>,
++}
++impl Ledger {
++    fn offer(&mut self, pending: Pending) -> bool {
++        if self.link != pending.scope.link {
++            self.link = pending.scope.link.clone();
++            self.spent.clear();
++            self.pending = None;
++        }
++        if self.spent.len() >= 512 || self.spent.contains(&pending.offer.id) {
++            return false;
++        }
++        self.pending = Some(pending);
++        true
++    }
++    fn consume(&mut self, id: &str, link: &str) -> Option<Pending> {
++        if self.link != link || !self.pending.as_ref().is_some_and(|p| p.offer.id == id) {
++            return None;
++        }
++        let p = self.pending.take()?;
++        self.spent.insert(p.offer.id.clone());
++        Some(p)
++    }
++}
++fn ledger() -> &'static Mutex<Ledger> {
++    static STATE: OnceLock<Mutex<Ledger>> = OnceLock::new();
++    STATE.get_or_init(|| Mutex::new(Ledger::default()))
++}
++
++fn valid_id(s: &str, prefix: &str) -> bool {
++    s.strip_prefix(prefix).is_some_and(|id| {
++        id.len() == 26
++            && id
++                .bytes()
++                .all(|c| b"0123456789ABCDEFGHJKMNPQRSTVWXYZ".contains(&c))
++    })
++}
++fn peer(s: &str) -> bool {
++    (9..=10).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_digit())
++}
++
++#[cfg(windows)]
++fn unpaused() -> bool {
++    use crate::ipc::{connect, Data};
++    use hbb_common::tokio;
++    // Query the live service. The ordinary option getter falls back to cached settings.
++    #[tokio::main(flavor = "current_thread")]
++    async fn read() -> Option<bool> {
++        let mut ipc = connect(700, "").await.ok()?;
++        ipc.send(&Data::Options(None)).await.ok()?;
++        match ipc.next_timeout(700).await.ok()? {
++            Some(Data::Options(Some(options))) => Some(
++                options
++                    .get("stop-service")
++                    .map_or(true, |v| v.is_empty() || v == "N"),
++            ),
++            _ => None,
++        }
++    }
++    read() == Some(true)
++}
++#[cfg(target_os = "android")]
++fn unpaused() -> bool {
++    ["steaddesk_remote_paused", "steaddesk_fixed_peer_stopped"]
++        .iter()
++        .all(|key| {
++            scrap::android::call_main_service_get_by_name(key)
++                .ok()
++                .as_deref()
++                == Some("false")
++        })
++}
++
++#[cfg(windows)]
++extern "C" {
++    fn sd_fixed_foreground() -> i32;
++    fn sd_fixed_capability(action: i32) -> i32;
++    fn sd_fixed_pos_supported(package: *const u16) -> i32;
++    fn sd_fixed_windows(
++        action: i32,
++        package: *const u16,
++        guard: extern "C" fn(*const std::ffi::c_void) -> i32,
++        scope: *const std::ffi::c_void,
++    ) -> i32;
++}
++#[cfg(target_os = "android")]
++fn android(name: &str) -> bool {
++    scrap::android::call_main_service_get_by_name(name)
++        .ok()
++        .as_deref()
++        == Some("true")
++}
++fn foreground() -> bool {
++    #[cfg(windows)]
++    {
++        unsafe { sd_fixed_foreground() == 1 }
++    }
++    #[cfg(target_os = "android")]
++    {
++        android("steaddesk_fixed_visible")
++    }
++}
++fn scope(visible: bool) -> Option<Scope> {
++    if (visible && !foreground()) || !unpaused() {
++        return None;
++    }
++    let (support, link, restart) = crate::ui_cm_interface::fixed_desktop_connection()?;
++    let origin = Url::parse(&Config::get_option("api-server")).ok()?;
++    let device = Config::get_id_or(String::new());
++    if !peer(&device)
++        || !peer(&support)
++        || origin.scheme() != "https"
++        || origin.host().is_none()
++        || !origin.username().is_empty()
++        || origin.password().is_some()
++        || origin.query().is_some()
++        || origin.fragment().is_some()
++        || origin.path() != "/"
++    {
++        return None;
++    }
++    Some(Scope {
++        origin,
++        device,
++        peer: support,
++        link,
++        restart,
++    })
++}
++fn current(s: &Scope) -> bool {
++    scope(true).as_ref() == Some(s)
++}
++fn supports(s: &Scope, a: &str) -> bool {
++    if !ACTIONS.contains(&a) || a == "reboot" && !s.restart {
++        return false;
++    }
++    #[cfg(windows)]
++    {
++        ACTIONS
++            .iter()
++            .position(|x| *x == a)
++            .is_some_and(|n| unsafe { sd_fixed_capability(n as i32) == 1 })
++    }
++    #[cfg(target_os = "android")]
++    {
++        matches!(a, "reconnect_printer" | "print_test")
++            || a == "open_settings" && android("steaddesk_fixed_settings_supported")
++    }
++}
++fn valid_package(p: &str) -> bool {
++    let Some((family, app)) = p.split_once('!') else {
++        return false;
++    };
++    let Some((name, publisher)) = family.rsplit_once('_') else {
++        return false;
++    };
++    p.len() <= 128
++        && !name.is_empty()
++        && !app.is_empty()
++        && publisher.len() == 13
++        && publisher.bytes().all(|b| b.is_ascii_alphanumeric())
++        && [name, app].iter().all(|s| {
++            s.bytes()
++                .all(|b| b.is_ascii_alphanumeric() || b".-".contains(&b))
++        })
++}
++#[cfg(windows)]
++fn pos_supported(package: &str) -> bool {
++    if !valid_package(package) {
++        return false;
++    }
++    let wide: Vec<_> = package.encode_utf16().chain(Some(0)).collect();
++    unsafe { sd_fixed_pos_supported(wide.as_ptr()) == 1 }
++}
++#[cfg(target_os = "android")]
++fn pos_supported(_: &str) -> bool {
++    false
++}
++fn client() -> Option<Client> {
++    Client::builder()
++        .redirect(Policy::none())
++        .no_proxy()
++        .connect_timeout(Duration::from_secs(3))
++        .timeout(Duration::from_secs(7))
++        .build()
++        .ok()
++}
++fn request(c: &Client, s: &Scope, path: &'static str, body: Value, version: u64) -> Option<Value> {
++    let method = match path {
++        IDENTITY if version == 0 && body == json!({}) => "GET",
++        POLL | PERMIT | RESULT
++            if version > 0 && body["peer_id"] == s.peer && body["link"] == s.link =>
++        {
++            "POST"
++        }
++        _ => return None,
++    };
++    if scope(path != RESULT).as_ref() != Some(s) {
++        return None;
++    }
++    let canonical: BTreeMap<_, _> = body.as_object()?.iter().collect();
++    let signed =
++        super::steaddesk_device_signature::sign(&s.device, version, |id, stamp, nonce| {
++            let mut bytes = b"SteadDesk-fleet-v1\0".to_vec();
++            bytes.extend(
++                serde_json::to_vec(&(method, path, &canonical, id, version, stamp, nonce)).ok()?,
++            );
++            Some(bytes)
++        })?;
++    let url = s.origin.join(path).ok()?;
++    let mut req = if method == "GET" {
++        c.get(url)
++    } else {
++        c.post(url).json(&body)
++    };
++    for (k, v) in serde_json::from_slice::<BTreeMap<String, String>>(&signed).ok()? {
++        req = req.header(k, v)
++    }
++    let r = req.send().ok()?;
++    if !r.status().is_success() {
++        return None;
++    }
++    let mut data = Vec::new();
++    r.take(8193).read_to_end(&mut data).ok()?;
++    if data.len() > 8192 {
++        return None;
++    }
++    serde_json::from_slice(&data).ok()
++}
++
++fn poll() -> Option<Value> {
++    let Some(s) = scope(true) else {
++        release_printer();
++        return None;
++    };
++    if let Ok(mut held) = PRINTER.lock() {
++        if held.as_ref().is_some_and(|p| p.binding.scope != s) {
++            held.take();
++        }
++    }
++    let c = client()?;
++    let v = request(&c, &s, IDENTITY, json!({}), 0)?["key_version"].as_u64()?;
++    let previous = ledger().lock().ok()?.profile.clone();
++    let checked = previous.and_then(|(owner, p)| (owner == s && pos_supported(&p)).then_some(p));
++    let mut caps: Vec<_> = ACTIONS
++        .iter()
++        .filter(|x| **x != "restart_pos" && supports(&s, x))
++        .copied()
++        .collect();
++    let mut body = json!({"peer_id":s.peer,"link":s.link,"platform":PLATFORM,"capabilities":caps});
++    if let Some(candidate) = checked.as_ref() {
++        caps.push("restart_pos");
++        body["capabilities"] = json!(caps);
++        body["pos_package"] = json!(candidate);
++    }
++    let reply = request(&c, &s, POLL, body, v)?;
++    let offered: PollReply = serde_json::from_value(reply).ok()?;
++    let package = offered
++        .pos_package
++        .filter(|p| PLATFORM == "windows" && valid_package(p));
++    ledger().lock().ok()?.profile = package.clone().map(|p| (s.clone(), p));
++    let job = offered.job?;
++    if !valid_id(&job.id, "t_")
++        || (job.action == "restart_pos" && (checked.is_none() || checked != package))
++        || !supports(&s, &job.action)
++        || job.target_label.trim().is_empty()
++        || job.target_label.len() > 600
++        || job.target_label.chars().any(char::is_control)
++        || !current(&s)
++    {
++        return None;
++    }
++    let out =
++        json!({"id":job.id,"action":job.action,"target_label":job.target_label,"link":s.link});
++    if ledger().lock().ok()?.offer(Pending {
++        scope: s,
++        offer: job,
++        version: v,
++    }) {
++        Some(out)
++    } else {
++        None
++    }
++}
++
++fn validate(t: &Target, a: &str) -> bool {
++    if !valid_id(&t.id, "i_") || !t.ip.is_private() {
++        return false;
++    }
++    if matches!(a, "reconnect_printer" | "print_test") {
++        return t.kind == "printer" && t.package.is_none();
++    }
++    if t.kind != "host" {
++        return false;
++    }
++    match (a, t.package.as_deref()) {
++        ("restart_pos", Some(p)) => valid_package(p),
++        ("open_settings" | "reboot", None) => true,
++        _ => false,
++    }
++}
++
++#[derive(PartialEq, Clone)]
++struct PrinterBinding {
++    scope: Scope,
++    target: String,
++    addr: SocketAddr,
++}
++struct OwnedPrinter {
++    binding: PrinterBinding,
++    stream: TcpStream,
++    opened: std::time::Instant,
++}
++static PRINTER: Mutex<Option<OwnedPrinter>> = Mutex::new(None);
++const PRINTER_TTL: Duration = Duration::from_secs(600);
++
++pub(crate) fn release_printer() {
++    if let Ok(mut session) = PRINTER.lock() {
++        session.take();
++    }
++}
++
++fn printer(s: &Scope, t: &Target, print: bool) -> &'static str {
++    let binding = PrinterBinding {
++        scope: s.clone(),
++        target: t.id.clone(),
++        addr: SocketAddr::from((t.ip, 9100)),
++    };
++    let mut slot = match PRINTER.lock() {
++        Ok(slot) => slot,
++        Err(_) => return "failed",
++    };
++    let result = transfer_printer(
++        &mut slot,
++        &binding,
++        || TcpStream::connect_timeout(&binding.addr, Duration::from_secs(2)),
++        || current(s),
++        print,
++    );
++    if !print && result == "completed" {
++        let Some(opened) = slot.as_ref().map(|p| p.opened) else {
++            return "failed";
++        };
++        if std::thread::Builder::new()
++            .name("fixed-printer-expiry".into())
++            .spawn(move || {
++                std::thread::sleep(PRINTER_TTL);
++                if let Ok(mut held) = PRINTER.lock() {
++                    if held.as_ref().is_some_and(|p| p.opened == opened) {
++                        held.take();
++                    }
++                }
++            })
++            .is_err()
++        {
++            slot.take();
++            return "failed";
++        }
++    }
++    result
++}
++
++fn transfer_printer(
++    slot: &mut Option<OwnedPrinter>,
++    binding: &PrinterBinding,
++    dial: impl FnOnce() -> std::io::Result<TcpStream>,
++    allowed: impl Fn() -> bool,
++    print: bool,
++) -> &'static str {
++    // Taking ownership before every attempt means an uncertain write can never fall back to a second connection.
++    let previous = slot
++        .take()
++        .filter(|p| p.binding == *binding && p.opened.elapsed() < PRINTER_TTL);
++    if !allowed() {
++        return "cancelled";
++    }
++    if !print {
++        drop(previous);
++        let Ok(stream) = dial() else { return "failed" };
++        if !allowed() {
++            return "cancelled";
++        }
++        *slot = Some(OwnedPrinter {
++            binding: binding.clone(),
++            stream,
++            opened: std::time::Instant::now(),
++        });
++        return "completed";
++    }
++    let mut stream = match previous {
++        Some(p) => p.stream,
++        None => match dial() {
++            Ok(stream) => stream,
++            Err(_) => return "failed",
++        },
++    };
++    if !allowed() {
++        return "cancelled";
++    }
++    if stream
++        .set_write_timeout(Some(Duration::from_secs(2)))
++        .is_err()
++        || stream.write_all(PAGE).is_err()
++    {
++        return "failed";
++    }
++    "completed"
++}
++
++#[cfg(windows)]
++extern "C" fn valid_guard(ptr: *const std::ffi::c_void) -> i32 {
++    (!ptr.is_null() && catch_unwind(|| current(unsafe { &*ptr.cast::<Scope>() })).unwrap_or(false))
++        as i32
++}
++#[cfg(target_os = "android")]
++static WIFI_PERMIT: Mutex<Option<(String, String)>> = Mutex::new(None);
++
++#[cfg(target_os = "android")]
++#[no_mangle]
++pub extern "system" fn Java_com_carriez_flutter_1hbb_FixedWifiSettings_consumePermit(
++    _: jni::JNIEnv,
++    _: jni::objects::JClass,
++) -> jni::sys::jboolean {
++    catch_unwind(|| {
++        let Some((peer, link)) = WIFI_PERMIT.lock().ok().and_then(|mut g| g.take()) else {
++            return false;
++        };
++        crate::ui_cm_interface::fixed_desktop_connection()
++            .is_some_and(|(p, l, _)| p == peer && l == link)
++    })
++    .unwrap_or(false) as jni::sys::jboolean
++}
++fn execute(s: &Scope, p: &Permit) -> &'static str {
++    if p.action == "restart_pos"
++        && !ledger().lock().ok().is_some_and(|state| {
++            state.profile.as_ref().is_some_and(|(owner, registered)| {
++                owner == s
++                    && p.target.package.as_ref() == Some(registered)
++                    && pos_supported(registered)
++            })
++        })
++    {
++        return "unsupported";
++    }
++    if !validate(&p.target, &p.action) || !supports(s, &p.action) {
++        return "unsupported";
++    }
++    if !current(s) {
++        return "cancelled";
++    }
++    if matches!(p.action.as_str(), "reconnect_printer" | "print_test") {
++        return printer(s, &p.target, p.action == "print_test");
++    }
++    #[cfg(target_os = "android")]
++    {
++        if p.action != "open_settings" {
++            return "unsupported";
++        }
++        let Ok(mut permit) = WIFI_PERMIT.lock() else {
++            return "failed";
++        };
++        *permit = Some((s.peer.clone(), s.link.clone()));
++        drop(permit);
++        let ok = android("steaddesk_fixed_settings");
++        if let Ok(mut slot) = WIFI_PERMIT.lock() {
++            *slot = None;
++        }
++        if ok {
++            "completed"
++        } else {
++            "failed"
++        }
++    }
++    #[cfg(windows)]
++    {
++        let Some(n) = ACTIONS.iter().position(|x| *x == p.action) else {
++            return "unsupported";
++        };
++        let pkg: Vec<u16> = p
++            .target
++            .package
++            .as_deref()
++            .unwrap_or("")
++            .encode_utf16()
++            .chain(Some(0))
++            .collect();
++        match unsafe {
++            sd_fixed_windows(
++                n as i32,
++                pkg.as_ptr(),
++                valid_guard,
++                (s as *const Scope).cast(),
++            )
++        } {
++            1 if p.action == "reboot" => "initiated",
++            1 => "completed",
++            2 => "unsupported",
++            3 => "cancelled",
++            _ => "failed",
++        }
++    }
++}
++
++fn acknowledged(id: &str, link: &str) -> Option<Value> {
++    let pending = ledger().lock().ok()?.consume(id, link)?;
++    let s = pending.scope;
++    if !current(&s) || !supports(&s, &pending.offer.action) {
++        return None;
++    }
++    if pending.offer.action == "restart_pos"
++        && !ledger()
++            .lock()
++            .ok()?
++            .profile
++            .as_ref()
++            .is_some_and(|(owner, p)| *owner == s && pos_supported(p))
++    {
++        return None;
++    }
++    let c = client()?;
++    let binding = json!({"id":id,"peer_id":s.peer,"link":s.link});
++    let permit = request(&c, &s, PERMIT, binding.clone(), pending.version);
++    let outcome = match permit {
++        None => return None,
++        Some(value) => {
++            let fields = value["target"].as_object();
++            let exact = fields.is_some_and(|m| {
++                m.len() == 4
++                    && ["id", "type", "ip", "package"]
++                        .iter()
++                        .all(|k| m.contains_key(*k))
++            });
++            match serde_json::from_value::<Permit>(value) {
++                Ok(p) if exact && p.id == id && p.action == pending.offer.action => execute(&s, &p),
++                _ => "unsupported",
++            }
++        }
++    };
++    let mut body = binding;
++    body["result"] = json!(outcome);
++    request(&c, &s, RESULT, body, pending.version)?;
++    Some(json!({"result":outcome}))
++}
++
++#[derive(Deserialize)]
++#[serde(deny_unknown_fields)]
++struct Displayed {
++    id: String,
++    link: String,
++}
++#[no_mangle]
++pub unsafe extern "C" fn steaddesk_fixed_notice(
++    src: *const u8,
++    size: usize,
++    dst: *mut u8,
++    capacity: usize,
++) -> usize {
++    if src.is_null() || dst.is_null() || size == 0 || size > 256 || capacity != 2048 {
++        return 0;
++    }
++    catch_unwind(|| {
++        let raw = slice::from_raw_parts(src, size);
++        let val = if raw == b"release" {
++            release_printer();
++            None
++        } else if raw == b"poll" {
++            poll()
++        } else {
++            serde_json::from_slice::<Displayed>(raw)
++                .ok()
++                .and_then(|d| acknowledged(&d.id, &d.link))
++        };
++        let Some(bytes) = val.and_then(|v| serde_json::to_vec(&v).ok()) else {
++            return 0;
++        };
++        if bytes.len() > capacity {
++            return 0;
++        }
++        std::ptr::copy_nonoverlapping(bytes.as_ptr(), dst, bytes.len());
++        bytes.len()
++    })
++    .unwrap_or(0)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    fn sample() -> Scope {
++        Scope {
++            origin: Url::parse("https://fixture.invalid").unwrap(),
++            device: "123456789".into(),
++            peer: "987654321".into(),
++            link: "b80fcb44-45cc-4001-abcd-400000000011".into(),
++            restart: true,
++        }
++    }
++    fn offered() -> Pending {
++        Pending {
++            scope: sample(),
++            offer: Offer {
++                id: format!("t_{}", "0".repeat(26)),
++                action: "reboot".into(),
++                target_label: "Lab".into(),
++            },
++            version: 1,
++        }
++    }
++    #[test]
++    fn actual_owned_socket_reconnect_and_fixed_page() {
++        use std::net::TcpListener;
++        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
++        let addr = listener.local_addr().unwrap();
++        let binding = PrinterBinding {
++            scope: sample(),
++            target: "fixture".into(),
++            addr,
++        };
++        let mut held = None;
++        let dial = || TcpStream::connect(addr);
++        assert_eq!(
++            transfer_printer(&mut held, &binding, dial, || true, false),
++            "completed"
++        );
++        let (mut connected, _) = listener.accept().unwrap();
++        assert_eq!(
++            transfer_printer(
++                &mut held,
++                &binding,
++                || panic!("must use restored socket"),
++                || true,
++                true
++            ),
++            "completed"
++        );
++        let mut received = Vec::new();
++        connected.read_to_end(&mut received).unwrap();
++        assert_eq!(received, PAGE);
++        assert!(held.is_none());
++        assert_eq!(
++            transfer_printer(
++                &mut held,
++                &binding,
++                || panic!("blocked before dial"),
++                || false,
++                true
++            ),
++            "cancelled"
++        );
++        assert_eq!(
++            transfer_printer(&mut held, &binding, dial, || true, false),
++            "completed"
++        );
++        let (mut old, _) = listener.accept().unwrap();
++        let other = PrinterBinding {
++            target: "another".into(),
++            ..binding.clone()
++        };
++        assert_eq!(
++            transfer_printer(&mut held, &other, dial, || true, true),
++            "completed"
++        );
++        let mut bytes = Vec::new();
++        old.read_to_end(&mut bytes).unwrap();
++        assert!(bytes.is_empty());
++        let (mut new, _) = listener.accept().unwrap();
++        new.read_to_end(&mut bytes).unwrap();
++        assert_eq!(bytes, PAGE);
++    }
++    #[test]
++    fn losing_a_permit_or_repolling_the_same_link_never_reexecutes() {
++        let mut ledger = Ledger::default();
++        let id = offered().offer.id;
++        let link = sample().link;
++        assert!(ledger.offer(offered()));
++        assert!(ledger.consume(&id, "another-link").is_none());
++        assert!(ledger.consume(&id, &link).is_some());
++        assert!(ledger.consume(&id, &link).is_none());
++        assert!(!ledger.offer(offered()));
++    }
++    #[test]
++    fn only_registered_fixed_printers_or_hosts_can_execute() {
++        let mut t = Target {
++            id: format!("i_{}", "1".repeat(26)),
++            kind: "printer".into(),
++            ip: "10.1.2.3".parse().unwrap(),
++            package: None,
++        };
++        assert!(validate(&t, "reconnect_printer") && validate(&t, "print_test"));
++        assert_eq!(PAGE, b"SteadDesk printer test\n\n\n");
++        for bad in ["payment", "unknown", "host"] {
++            t.kind = bad.into();
++            assert!(!validate(&t, "print_test"));
++        }
++        t.kind = "host".into();
++        assert!(validate(&t, "open_settings") && validate(&t, "reboot"));
++        t.package = Some("Vendor.Pos_abcd123456789!Till".into());
++        assert!(validate(&t, "restart_pos"));
++        for bad in [
++            "C:\\Windows\\cmd.exe",
++            "helper.exe --arguments",
++            "x://bad",
++            "",
++        ] {
++            t.package = Some(bad.into());
++            assert!(!validate(&t, "restart_pos"));
++        }
++        t.kind = "printer".into();
++        t.package = None;
++        for outside in ["192.0.2.1", "127.0.0.1", "169.254.1.2", "224.0.0.1"] {
++            t.ip = outside.parse().unwrap();
++            assert!(!validate(&t, "print_test"));
++        }
++        assert!(serde_json::from_value::<Target>(
++            json!({"id":t.id,"type":"printer","ip":"10.0.0.1","package":null,"port":22})
++        )
++        .is_err());
++    }
++}
+diff --git a/src/steaddesk_fixed_enabled.rs b/src/steaddesk_fixed_enabled.rs
+new file mode 100644
+index 0000000..c508d53
+--- /dev/null
++++ b/src/steaddesk_fixed_enabled.rs
+@@ -0,0 +1 @@
++false
+diff --git a/src/ui_cm_interface.rs b/src/ui_cm_interface.rs
+index 2cf9013..7017e85 100644
+--- a/src/ui_cm_interface.rs
++++ b/src/ui_cm_interface.rs
+@@ -128,6 +128,12 @@ pub fn check_file_count_limit(file_count: usize) -> Result<(), String> {
+ 
+ #[derive(Serialize, Clone)]
+ pub struct Client {
++    #[cfg(steaddesk_fixed_merchant)]
++    #[serde(skip)]
++    fixed_link: String,
++    #[cfg(steaddesk_fixed_merchant)]
++    #[serde(skip)]
++    fixed_denied: [bool; 2],
+     pub id: i32,
+     pub authorized: bool,
+     pub disconnected: bool,
+@@ -238,6 +244,10 @@ impl<T: InvokeUiCM> ConnectionManager<T> {
+         #[cfg(not(any(target_os = "ios")))] tx: mpsc::UnboundedSender<Data>,
+     ) {
+         let client = Client {
++            #[cfg(steaddesk_fixed_merchant)]
++            fixed_link: uuid::Uuid::new_v4().to_string(),
++            #[cfg(steaddesk_fixed_merchant)]
++            fixed_denied: [false; 2],
+             id,
+             authorized,
+             disconnected: false,
+@@ -269,6 +279,8 @@ impl<T: InvokeUiCM> ConnectionManager<T> {
+         CLIENTS.write().unwrap().insert(id, client.clone());
+         #[cfg(steaddesk_tb_merchant)]
+         crate::steaddesk_toolbar::start();
++        #[cfg(steaddesk_fixed_merchant)]
++        crate::steaddesk_fixed::release_printer();
+         self.ui_handler.add_connection(&client);
+     }
+ 
+@@ -315,6 +327,8 @@ impl<T: InvokeUiCM> ConnectionManager<T> {
+             }
+         }
+ 
++        #[cfg(steaddesk_fixed_merchant)]
++        crate::steaddesk_fixed::release_printer();
+         self.ui_handler.remove_connection(id, close);
+     }
+ 
+@@ -376,6 +390,10 @@ pub fn authorize(id: i32) {
+ #[inline]
+ #[cfg(not(any(target_os = "ios")))]
+ pub fn close(id: i32) {
++    #[cfg(steaddesk_fixed_merchant)]
++    if let Some(client) = CLIENTS.write().unwrap().get_mut(&id) {
++        client.fixed_denied[0] = true;
++    }
+     if let Some(client) = CLIENTS.read().unwrap().get(&id) {
+         allow_err!(client.tx.send(Data::Close));
+     };
+@@ -425,6 +443,16 @@ pub fn switch_permission(id: i32, name: String, enabled: bool) {
+         );
+         return;
+     }
++    #[cfg(steaddesk_fixed_merchant)]
++    if !enabled {
++        if let Some(client) = CLIENTS.write().unwrap().get_mut(&id) {
++            match name.as_str() {
++                "keyboard" => client.fixed_denied[0] = true,
++                "restart" => client.fixed_denied[1] = true,
++                _ => {}
++            }
++        }
++    }
+     if let Some(client) = CLIENTS.read().unwrap().get(&id) {
+         allow_err!(client.tx.send(Data::SwitchPermission { name, enabled }));
+     };
+@@ -446,6 +474,12 @@ pub fn switch_permission_all(name: String, enabled: bool) {
+         );
+         return;
+     }
++    #[cfg(steaddesk_fixed_merchant)]
++    if !enabled && name == "keyboard" {
++        for client in CLIENTS.write().unwrap().values_mut() {
++            client.fixed_denied[0] = true;
++        }
++    }
+     for (_, client) in CLIENTS.read().unwrap().iter() {
+         allow_err!(client.tx.send(Data::SwitchPermission {
+             name: name.clone(),
+@@ -462,6 +496,20 @@ pub fn get_clients_state() -> String {
+     serde_json::to_string(&res).unwrap_or("".into())
+ }
+ 
++#[cfg(steaddesk_fixed_merchant)]
++pub(crate) fn fixed_desktop_connection() -> Option<(String, String, bool)> {
++    let clients = CLIENTS.read().ok()?;
++    let mut active = clients.values().filter(|client| {
++        client.authorized && !client.disconnected && !client.is_file_transfer
++            && !client.is_view_camera && !client.is_terminal && client.port_forward.is_empty()
++    });
++    let one = active.next()?;
++    if active.next().is_some() || !one.keyboard || one.fixed_denied[0] {
++        return None;
++    }
++    Some((one.peer_id.clone(), one.fixed_link.clone(), one.restart && !one.fixed_denied[1]))
++}
++
+ #[cfg(steaddesk_tb_merchant)]
+ pub(crate) fn toolbar_desktop_connections() -> Vec<i32> {
+     CLIENTS.read().unwrap().values()
+@@ -1851,6 +1899,26 @@ mod tests {
+     use hbb_common::tokio::{runtime::Runtime, sync::mpsc::unbounded_channel};
+     use std::fs;
+ 
++    #[cfg(steaddesk_fixed_merchant)]
++    #[test]
++    fn fixed_actions_stop_before_the_close_message_is_processed() {
++        let (tx,mut rx)=unbounded_channel();
++        let client=Client {
++            id:18001, authorized:true, disconnected:false, is_file_transfer:false,
++            is_view_camera:false, is_terminal:false, port_forward:String::new(), name:String::new(),
++            avatar:String::new(), peer_id:"123456789".into(), keyboard:true, clipboard:false,
++            audio:false, file:false, restart:true, recording:false, block_input:false, privacy_mode:false,
++            from_switch:false, in_voice_call:false, incoming_voice_call:false,
++            fixed_link:"fixture-link".into(),fixed_denied:[false;2],tx,
++        };
++        CLIENTS.write().unwrap().insert(client.id,client);
++        assert!(fixed_desktop_connection().is_some());
++        close(18001);
++        assert!(fixed_desktop_connection().is_none());
++        assert!(matches!(rx.try_recv(),Ok(Data::Close)));
++        CLIENTS.write().unwrap().remove(&18001);
++    }
++
+     #[test]
+     #[cfg(not(any(target_os = "ios")))]
+     fn read_all_files_success() {
