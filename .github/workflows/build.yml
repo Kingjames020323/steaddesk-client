@@ -10,6 +10,14 @@ name: Build SteadDesk
         description: Include the merchant update client in this preview test build
         type: boolean
         default: false
+      fleet_ops_origin:
+        description: HTTPS control-plane origin for the opt-in merchant test build
+        type: string
+        required: false
+      fleet_artifact_origin:
+        description: HTTPS artifact origin for that build (defaults to its control-plane origin)
+        type: string
+        required: false
       steaddesk_cases:
         description: Enable case closing in the Windows support build
         type: boolean
@@ -18,8 +26,8 @@ permissions:
   contents: read
 env:
   STEADDESK_FLEET_UPDATE: ${{ github.event_name == 'workflow_dispatch' && github.ref_type == 'branch' && inputs.steaddesk_fleet_update && 'true' || 'false' }}
-  STEADDESK_FLEET_OPS_ORIGIN: ${{ vars.STEADDESK_FLEET_OPS_ORIGIN }}
-  STEADDESK_FLEET_ARTIFACT_ORIGIN: ${{ vars.STEADDESK_FLEET_ARTIFACT_ORIGIN }}
+  STEADDESK_FLEET_OPS_ORIGIN: ${{ inputs.fleet_ops_origin || vars.STEADDESK_FLEET_OPS_ORIGIN }}
+  STEADDESK_FLEET_ARTIFACT_ORIGIN: ${{ inputs.fleet_artifact_origin || vars.STEADDESK_FLEET_ARTIFACT_ORIGIN }}
   STEADDESK_FLEET_TEST_PUBLIC_KEY: ${{ vars.STEADDESK_FLEET_TEST_PUBLIC_KEY }}
   STEADDESK_FLEET_TEST_KEY_ID: ${{ vars.STEADDESK_FLEET_TEST_KEY_ID }}
   STEADDESK_FLEET_SILENT_PROFILE: ${{ vars.STEADDESK_FLEET_SILENT_PROFILE }}
