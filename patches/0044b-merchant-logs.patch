@@ -1,0 +1,514 @@
+diff --git a/build.rs b/build.rs
+index 5f28318..8271f69 100644
+--- a/build.rs
++++ b/build.rs
+@@ -103,6 +103,11 @@ fn main() {
+     match std::fs::read_to_string(selector).expect("configured edition").trim() {
+         "false" => {
+             println!("cargo:rustc-cfg=steaddesk_help_merchant");
++            let toolbar = "src/steaddesk_tb.rs";
++            println!("cargo:rerun-if-changed={toolbar}");
++            if target_os == "windows" && std::fs::read_to_string(toolbar).map(|s| s.trim() == "true").unwrap_or(false) {
++                println!("cargo:rustc-cfg=steaddesk_tb_merchant");
++            }
+             let qc = "src/steaddesk_qc2.rs";
+             println!("cargo:rerun-if-changed={qc}");
+             if matches!(target_os.as_str(), "windows" | "android") &&
+diff --git a/src/lib.rs b/src/lib.rs
+index ca8a4c6..d2fcae6 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -3,6 +3,10 @@ mod audio_resampler;
+ mod keyboard;
+ #[cfg(steaddesk_help_merchant)]
+ mod steaddesk_help;
++#[cfg(steaddesk_tb_merchant)]
++mod steaddesk_toolbar;
++#[cfg(any(steaddesk_qc_merchant, steaddesk_tb_merchant))]
++mod steaddesk_device_signature;
+ #[cfg(steaddesk_qc_merchant)]
+ mod steaddesk_check_signer;
+ #[cfg(all(windows, steaddesk_fleet_windows))]
+diff --git a/src/steaddesk_check_signer.rs b/src/steaddesk_check_signer.rs
+index 1064635..c7ed008 100644
+--- a/src/steaddesk_check_signer.rs
++++ b/src/steaddesk_check_signer.rs
+@@ -1,17 +1,12 @@
+ //! Merchant-only device proofs for three fixed operations. No key material crosses the C ABI.
+ use hbb_common::{
+-    base64::{engine::general_purpose::STANDARD, Engine},
+     config::Config,
+     sha2::{Digest, Sha256},
+-    sodiumoxide::{self, crypto::sign, randombytes::randombytes_into, utils::memzero},
++    sodiumoxide::{self, crypto::sign, utils::memzero},
+ };
+ use serde_derive::{Deserialize, Serialize};
+ use serde_json::{json, Value};
+-use std::{
+-    panic::catch_unwind,
+-    slice,
+-    time::{SystemTime, UNIX_EPOCH},
+-};
++use std::{panic::catch_unwind, slice};
+ 
+ #[derive(Deserialize)]
+ #[serde(deny_unknown_fields)]
+@@ -107,27 +102,14 @@ fn headers(input: Input) -> Option<Vec<u8>> {
+         }
+         let (mut secret, public) = Config::get_existing_key_pair()?;
+         memzero(&mut secret);
+-        sign::PublicKey::from_slice(&public)?;
++        let _ = sign::PublicKey::from_slice(&public)?;
+         return serde_json::to_vec(&json!({"fingerprint":format!("{:x}",Sha256::digest(&public))}))
+             .ok();
+     }
+     let version = input.key_version;
+-    let ts = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
+-    let mut salt = [0u8; 16];
+-    randombytes_into(&mut salt);
+-    let nonce: String = salt.iter().map(|b| format!("{b:02x}")).collect();
+-    let message = proof(input, &device, ts, &nonce)?;
+-    let (mut secret, public) = Config::get_existing_key_pair()?;
+-    let key = sign::SecretKey::from_slice(&secret);
+-    memzero(&mut secret);
+-    let key = key?;
+-    let public = sign::PublicKey::from_slice(&public)?;
+-    let signature = sign::sign_detached(&message, &key);
+-    if !sign::verify_detached(&signature, &message, &public) {
+-        return None;
+-    }
+-    serde_json::to_vec(&json!({"X-Fleet-Device":device,"X-Fleet-Key-Version":version.to_string(),
+-        "X-Fleet-Time":ts.to_string(),"X-Fleet-Nonce":nonce,"X-Fleet-Signature":STANDARD.encode(signature.to_bytes())})).ok()
++    super::steaddesk_device_signature::sign(&device, version, |id, ts, nonce| {
++        proof(input, id, ts, nonce)
++    })
+ }
+ 
+ /// # Safety
+diff --git a/src/steaddesk_device_signature.rs b/src/steaddesk_device_signature.rs
+new file mode 100644
+index 0000000..ae79d73
+--- /dev/null
++++ b/src/steaddesk_device_signature.rs
+@@ -0,0 +1,34 @@
++use hbb_common::{
++    base64::{engine::general_purpose::STANDARD, Engine},
++    config::Config,
++    sodiumoxide::{self, crypto::sign, randombytes::randombytes_into, utils::memzero},
++};
++use serde_json::json;
++use std::time::{SystemTime, UNIX_EPOCH};
++
++pub(super) fn sign(
++    device: &str,
++    version: u64,
++    proof: impl FnOnce(&str, u64, &str) -> Option<Vec<u8>>,
++) -> Option<Vec<u8>> {
++    sodiumoxide::init().ok()?;
++    if !(9..=10).contains(&device.len()) || !device.bytes().all(|b| b.is_ascii_digit()) {
++        return None;
++    }
++    let ts = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
++    let mut salt = [0u8; 16];
++    randombytes_into(&mut salt);
++    let nonce: String = salt.iter().map(|b| format!("{b:02x}")).collect();
++    let message = proof(device, ts, &nonce)?;
++    let (mut secret, public) = Config::get_existing_key_pair()?;
++    let key = sign::SecretKey::from_slice(&secret);
++    memzero(&mut secret);
++    let key = key?;
++    let public = sign::PublicKey::from_slice(&public)?;
++    let signature = sign::sign_detached(&message, &key);
++    if !sign::verify_detached(&signature, &message, &public) {
++        return None;
++    }
++    serde_json::to_vec(&json!({"X-Fleet-Device":device,"X-Fleet-Key-Version":version.to_string(),
++        "X-Fleet-Time":ts.to_string(),"X-Fleet-Nonce":nonce,"X-Fleet-Signature":STANDARD.encode(signature.to_bytes())})).ok()
++}
+diff --git a/src/steaddesk_tb.rs b/src/steaddesk_tb.rs
+new file mode 100644
+index 0000000..c508d53
+--- /dev/null
++++ b/src/steaddesk_tb.rs
+@@ -0,0 +1 @@
++false
+diff --git a/src/steaddesk_toolbar.rs b/src/steaddesk_toolbar.rs
+new file mode 100644
+index 0000000..b1f63d3
+--- /dev/null
++++ b/src/steaddesk_toolbar.rs
+@@ -0,0 +1,346 @@
++//! Windows merchant Connection Manager. Only an authenticated, registered device can retrieve
++//! its pending human-requested job. Signing and collection have no external callable interface.
++use hbb_common::config::Config;
++use reqwest::{blocking::Client, redirect::Policy, Url};
++use serde_derive::Serialize;
++use serde_json::{json, Value};
++use std::{
++    collections::BTreeMap,
++    fs::{self, File, OpenOptions},
++    io::Read,
++    path::Path,
++    sync::Once,
++    time::Duration,
++};
++
++const BYTE_LIMIT: usize = 2 * 1024 * 1024;
++const IDENTITY: &str = "/ops/v1/device/update-identity";
++const JOB: &str = "/ops/v1/device/toolbar-log-job";
++const RESULT: &str = "/ops/v1/device/toolbar-log-result";
++
++#[derive(Clone, Copy, Serialize)]
++struct Entry {
++    event: &'static str,
++    source: &'static str,
++}
++
++fn project(line: &[u8]) -> Option<&'static str> {
++    // flexi_logger opt_format: [timestamp] LEVEL [source:line] message
++    if line.len() > 4096 || !line.starts_with(b"[") {
++        return None;
++    }
++    let line = std::str::from_utf8(line).ok()?.trim_end_matches('\r');
++    let (_, record) = line.split_once("] ")?;
++    let (level, detail) = record.split_once(" [")?;
++    let (site, message) = detail.split_once("] ")?;
++    if site.contains("ui_cm_interface.rs:") {
++        if message == "Got new connection" {
++            return Some("connected");
++        }
++        if message.starts_with("cm ipc connection closed")
++            || message == "cm ipc connection disconnect"
++        {
++            return Some("disconnected");
++        }
++        if message == "Clipboard message from client peer, but not authorized" {
++            return Some("denied");
++        }
++        if message.starts_with("Failed to start cm ipc server:")
++            || message.starts_with("error encountered in IPC task, quitting:")
++        {
++            return Some("failed");
++        }
++    }
++    match level {
++        "DEBUG" => Some("debug"),
++        "INFO" => Some("info"),
++        "WARN" => Some("warn"),
++        "ERROR" => Some("error"),
++        _ => None,
++    }
++}
++
++fn read_log(file: impl Read, entries: &mut Vec<Entry>) -> std::io::Result<()> {
++    let mut data = Vec::new();
++    file.take((BYTE_LIMIT + 1) as u64).read_to_end(&mut data)?;
++    let mut cut = data.len() > BYTE_LIMIT;
++    data.truncate(BYTE_LIMIT);
++    // Never parse the incomplete final record of an actively written or capped file.
++    for line in data.split_inclusive(|b| *b == b'\n') {
++        if entries.len() >= 32000 || !line.ends_with(b"\n") {
++            cut = true;
++            break;
++        }
++        if line.len() > 4096 {
++            cut = true;
++            continue;
++        }
++        if let Some(event) = project(&line[..line.len() - 1]) {
++            entries.push(Entry {
++                source: "steaddesk",
++                event,
++            });
++        }
++    }
++    if cut {
++        entries.push(Entry {
++            source: "steaddesk",
++            event: "truncated",
++        });
++    }
++    Ok(())
++}
++
++fn open_log(path: &Path) -> Option<File> {
++    let mut options = OpenOptions::new();
++    options.read(true);
++    #[cfg(windows)]
++    {
++        use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
++        const REPARSE: u32 = 0x400;
++        if path
++            .ancestors()
++            .any(|p| fs::symlink_metadata(p).map_or(true, |m| m.file_attributes() & REPARSE != 0))
++        {
++            return None;
++        }
++        options.custom_flags(0x00200000); // FILE_FLAG_OPEN_REPARSE_POINT
++        let file = options.open(path).ok()?;
++        let metadata = file.metadata().ok()?;
++        if !metadata.is_file() || metadata.file_attributes() & REPARSE != 0 {
++            return None;
++        }
++        return Some(file);
++    }
++    #[cfg(not(windows))]
++    {
++        if !fs::symlink_metadata(path).ok()?.is_file() {
++            return None;
++        }
++        options.open(path).ok()
++    }
++}
++
++fn collect() -> Vec<Vec<Entry>> {
++    let root = Config::log_path();
++    let mut entries = vec![
++        Entry {
++            source: "agent",
++            event: "unavailable",
++        },
++        Entry {
++            source: "self_heal",
++            event: "unavailable",
++        },
++    ];
++    if root.is_absolute() {
++        for relative in ["cm/SteadDesk_rCURRENT.log", "SteadDesk_rCURRENT.log"] {
++            if let Some(file) = open_log(&root.join(relative)) {
++                let _ = read_log(file, &mut entries);
++            }
++        }
++    }
++    if entries.len() == 2 {
++        entries.push(Entry {
++            source: "steaddesk",
++            event: "unavailable",
++        });
++    }
++    // A fixed-vocabulary serialized entry is at most 47 ASCII bytes. These bounds keep every
++    // chunk below 32 KiB, the combined document below 2 MiB, and the chunk count below 128.
++    entries.chunks(600).map(|chunk| chunk.to_vec()).collect()
++}
++
++fn request(
++    client: &Client,
++    origin: &Url,
++    path: &'static str,
++    body: Value,
++    version: u64,
++    device: &str,
++) -> Option<Value> {
++    let method = match path {
++        IDENTITY if version == 0 && body == json!({}) => "GET",
++        JOB if version > 0 && body == json!({}) => "GET",
++        RESULT if version > 0 => "POST",
++        _ => return None,
++    };
++    let headers = super::steaddesk_device_signature::sign(device, version, |id, stamp, nonce| {
++        let mut bytes = b"SteadDesk-fleet-v1\0".to_vec();
++        bytes.extend(serde_json::to_vec(&(method, path, &body, id, version, stamp, nonce)).ok()?);
++        Some(bytes)
++    })?;
++    let url = origin.join(path).ok()?;
++    let mut request = if method == "GET" {
++        client.get(url)
++    } else {
++        client.post(url).json(&body)
++    };
++    for (name, value) in serde_json::from_slice::<BTreeMap<String, String>>(&headers).ok()? {
++        request = request.header(name, value);
++    }
++    let response = request.send().ok()?;
++    if response.status().as_u16() != 200 {
++        return None;
++    }
++    let mut bytes = Vec::new();
++    response.take(16385).read_to_end(&mut bytes).ok()?;
++    if bytes.len() > 16384 {
++        return None;
++    }
++    serde_json::from_slice(&bytes).ok()
++}
++
++fn valid_job(job: &str) -> bool {
++    job.len() == 28
++        && job.starts_with("t_")
++        && job.as_bytes()[2..]
++            .iter()
++            .all(|b| b"0123456789ABCDEFGHJKMNPQRSTVWXYZ".contains(b))
++}
++
++struct Pending {
++    job: String,
++    origin: Url,
++    device: String,
++    sessions: Vec<i32>,
++    chunks: Vec<Vec<Entry>>,
++    next: usize,
++}
++
++fn poll(client: &Client, pending: &mut Option<Pending>) -> Option<()> {
++    let sessions = super::ui_cm_interface::toolbar_desktop_connections();
++    let still_open = |ids: &[i32]| {
++        super::ui_cm_interface::toolbar_desktop_connections()
++            .iter()
++            .any(|id| ids.contains(id))
++    };
++    if sessions.is_empty() {
++        *pending = None;
++        return None;
++    }
++    let origin = Url::parse(&Config::get_option("api-server")).ok()?;
++    if origin.scheme() != "https"
++        || origin.host().is_none()
++        || !origin.username().is_empty()
++        || origin.password().is_some()
++        || origin.query().is_some()
++        || origin.fragment().is_some()
++        || origin.path() != "/"
++    {
++        return None;
++    }
++    let device = Config::get_id_or(String::new());
++    let version =
++        request(client, &origin, IDENTITY, json!({}), 0, &device)?["key_version"].as_u64()?;
++    let reply = request(client, &origin, JOB, json!({}), version, &device)?;
++    if reply.as_object()?.len() != 1 {
++        return None;
++    }
++    let Some(job) = reply["job_id"].as_str() else {
++        *pending = None;
++        return None;
++    };
++    if !valid_job(job) || !still_open(&sessions) {
++        return None;
++    }
++    if let Some(snapshot) = pending.as_ref() {
++        if snapshot.job == job
++            && (snapshot.origin != origin
++                || snapshot.device != device
++                || !still_open(&snapshot.sessions))
++        {
++            return None;
++        }
++    }
++    if pending.as_ref().map_or(true, |s| s.job != job) {
++        *pending = Some(Pending {
++            job: job.into(),
++            origin: origin.clone(),
++            device: device.clone(),
++            sessions,
++            chunks: collect(),
++            next: 0,
++        });
++    }
++    let snapshot = pending.as_mut()?;
++    while snapshot.next < snapshot.chunks.len() {
++        let index = snapshot.next;
++        let entries = &snapshot.chunks[index];
++        if !still_open(&snapshot.sessions)
++            || Config::get_id_or(String::new()) != device
++            || Url::parse(&Config::get_option("api-server")).ok().as_ref() != Some(&origin)
++        {
++            return None;
++        }
++        let total = snapshot.chunks.len();
++        let body = json!({"entries":entries,"index":index,"job_id":job,"total":total});
++        let reply = request(client, &origin, RESULT, body, version, &device)?;
++        if reply["accepted"] != true || (index + 1 == total && reply["complete"] != true) {
++            return None;
++        }
++        snapshot.next += 1;
++    }
++    *pending = None;
++    Some(())
++}
++
++pub(crate) fn start() {
++    static START: Once = Once::new();
++    START.call_once(|| {
++        std::thread::spawn(|| {
++            let Ok(client) = Client::builder()
++                .no_proxy()
++                .redirect(Policy::none())
++                .connect_timeout(Duration::from_secs(3))
++                .timeout(Duration::from_secs(8))
++                .build()
++            else {
++                return;
++            };
++            let mut pending = None;
++            loop {
++                poll(&client, &mut pending);
++                std::thread::sleep(Duration::from_secs(12));
++            }
++        });
++    });
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    #[test]
++    fn projects_events_and_drops_secrets_and_personal_fields() {
++        let raw = b"[2026-01-02 03:04:05.000000 +00:00] INFO [src/ui_cm_interface.rs:552] cm ipc connection closed: password=fixture token=secret Alice 555-0100 a@example.invalid\n[2026-01-02 03:04:05.000000 +00:00] WARN [src/common.rs:1] fixture\n{malformed}\n";
++        let mut entries = Vec::new();
++        read_log(&raw[..], &mut entries).unwrap();
++        assert_eq!(
++            serde_json::to_value(entries).unwrap(),
++            json!([
++                {"source":"steaddesk","event":"disconnected"},{"source":"steaddesk","event":"warn"}
++            ])
++        );
++    }
++    #[test]
++    fn caps_oversized_lines_input_output_and_chunks() {
++        let mut entries = Vec::new();
++        read_log(&vec![b'a'; BYTE_LIMIT + 5][..], &mut entries).unwrap();
++        assert_eq!(entries[0].event, "truncated");
++        let lines = "[x] INFO [source:1] name=fixture\n".repeat(75000);
++        read_log(lines.as_bytes(), &mut entries).unwrap();
++        let chunks = entries.chunks(600).collect::<Vec<_>>();
++        assert!(chunks.len() <= 128 && chunks.len() > 1);
++        assert!(serde_json::to_vec(&entries).unwrap().len() <= BYTE_LIMIT);
++        assert!(chunks
++            .iter()
++            .all(|chunk| serde_json::to_vec(chunk).unwrap().len() <= 32768));
++        assert_eq!(entries.last().unwrap().event, "truncated");
++    }
++    #[test]
++    fn rejects_job_with_extra_arguments_or_nonregistered_shape() {
++        assert!(valid_job("t_0123456789ABCDEFGHJKMNPQRS"));
++        assert!(!valid_job("t_0123456789ABCDEFGHJKMNPQR/"));
++        assert!(!valid_job("t_0123456789ABCDEFGHJKMNPQRS C:/Logs"));
++    }
++}
+diff --git a/src/ui_cm_interface.rs b/src/ui_cm_interface.rs
+index 99c7718..2cf9013 100644
+--- a/src/ui_cm_interface.rs
++++ b/src/ui_cm_interface.rs
+@@ -267,6 +267,8 @@ impl<T: InvokeUiCM> ConnectionManager<T> {
+             .unwrap()
+             .retain(|_, c| !(c.disconnected && c.peer_id == client.peer_id));
+         CLIENTS.write().unwrap().insert(id, client.clone());
++        #[cfg(steaddesk_tb_merchant)]
++        crate::steaddesk_toolbar::start();
+         self.ui_handler.add_connection(&client);
+     }
+ 
+@@ -460,6 +462,14 @@ pub fn get_clients_state() -> String {
+     serde_json::to_string(&res).unwrap_or("".into())
+ }
+ 
++#[cfg(steaddesk_tb_merchant)]
++pub(crate) fn toolbar_desktop_connections() -> Vec<i32> {
++    CLIENTS.read().unwrap().values()
++        .filter(|c| c.authorized && !c.disconnected && !c.is_file_transfer && !c.is_view_camera &&
++            !c.is_terminal && c.port_forward.is_empty())
++        .map(|c| c.id).collect()
++}
++
+ #[inline]
+ pub fn get_clients_length() -> usize {
+     let clients = CLIENTS.read().unwrap();
