@@ -1,0 +1,288 @@
+diff --git a/build.rs b/build.rs
+index 4bc2c43..5f28318 100644
+--- a/build.rs
++++ b/build.rs
+@@ -103,6 +103,12 @@ fn main() {
+     match std::fs::read_to_string(selector).expect("configured edition").trim() {
+         "false" => {
+             println!("cargo:rustc-cfg=steaddesk_help_merchant");
++            let qc = "src/steaddesk_qc2.rs";
++            println!("cargo:rerun-if-changed={qc}");
++            if matches!(target_os.as_str(), "windows" | "android") &&
++                std::fs::read_to_string(qc).map(|s| s.trim() == "true").unwrap_or(false) {
++                println!("cargo:rustc-cfg=steaddesk_qc_merchant");
++            }
+             if target_os == "android" {
+                 println!("cargo:rustc-cfg=steaddesk_merchant");
+             }
+diff --git a/flutter/lib/steaddesk/help_signer.dart b/flutter/lib/steaddesk/help_signer.dart
+index 3233054..66b11c9 100644
+--- a/flutter/lib/steaddesk/help_signer.dart
++++ b/flutter/lib/steaddesk/help_signer.dart
+@@ -19,6 +19,39 @@ class MerchantHelpSigner {
+   final DynamicLibrary _core;
+   MerchantHelpSigner(this._core);
+ 
++  String quickCheckBinding() =>
++      _quickCheckCall('binding', 0, const {})['fingerprint']!;
++
++  Map<String, String> signQuickCheck(
++      String operation, int keyVersion, Map<String, dynamic> body) {
++    if (!const {'identity', 'inventory', 'report'}.contains(operation)) {
++      throw ArgumentError('Unsupported merchant check operation');
++    }
++    return _quickCheckCall(operation, keyVersion, body);
++  }
++
++  Map<String, String> _quickCheckCall(
++      String operation, int keyVersion, Map<String, dynamic> body) {
++    final bytes = utf8.encode(jsonEncode({
++      'operation': operation, 'key_version': keyVersion, 'body': body,
++    }));
++    const capacity = 1024;
++    if (bytes.length > 16384) throw ArgumentError('Check report too large');
++    final fn = _core.lookupFunction<_NativeSign, _Sign>('steaddesk_sign_quick_check');
++    final src = calloc<Uint8>(bytes.length);
++    final dst = calloc<Uint8>(capacity);
++    try {
++      src.asTypedList(bytes.length).setAll(0, bytes);
++      final count = fn(src, bytes.length, dst, capacity);
++      if (count <= 0 || count > capacity) throw StateError('Cannot sign quick check');
++      return Map<String, String>.from(
++          jsonDecode(utf8.decode(dst.asTypedList(count))) as Map);
++    } finally {
++      calloc.free(src);
++      calloc.free(dst);
++    }
++  }
++
+   SignedMerchantHelp sign(
+       {required String category,
+       String message = '',
+diff --git a/src/lib.rs b/src/lib.rs
+index 542fc71..ca8a4c6 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -3,6 +3,8 @@ mod audio_resampler;
+ mod keyboard;
+ #[cfg(steaddesk_help_merchant)]
+ mod steaddesk_help;
++#[cfg(steaddesk_qc_merchant)]
++mod steaddesk_check_signer;
+ #[cfg(all(windows, steaddesk_fleet_windows))]
+ mod steaddesk_fleet_windows;
+ #[cfg(all(target_os = "android", steaddesk_fleet_merchant))]
+diff --git a/src/steaddesk_check_signer.rs b/src/steaddesk_check_signer.rs
+new file mode 100644
+index 0000000..1064635
+--- /dev/null
++++ b/src/steaddesk_check_signer.rs
+@@ -0,0 +1,208 @@
++//! Merchant-only device proofs for three fixed operations. No key material crosses the C ABI.
++use hbb_common::{
++    base64::{engine::general_purpose::STANDARD, Engine},
++    config::Config,
++    sha2::{Digest, Sha256},
++    sodiumoxide::{self, crypto::sign, randombytes::randombytes_into, utils::memzero},
++};
++use serde_derive::{Deserialize, Serialize};
++use serde_json::{json, Value};
++use std::{
++    panic::catch_unwind,
++    slice,
++    time::{SystemTime, UNIX_EPOCH},
++};
++
++#[derive(Deserialize)]
++#[serde(deny_unknown_fields)]
++struct Input {
++    operation: String,
++    key_version: u64,
++    body: Value,
++}
++
++// Fields are declared in canonical (alphabetical) wire order for the signed JSON.
++#[derive(Deserialize, Serialize)]
++#[serde(deny_unknown_fields)]
++struct Report {
++    observed_at: u64,
++    results: Vec<Row>,
++    revision: String,
++}
++#[derive(Deserialize, Serialize)]
++#[serde(deny_unknown_fields)]
++struct Row {
++    id: String,
++    latency_ms: Option<u32>,
++    outcome: String,
++}
++
++fn proof(input: Input, device: &str, stamp: u64, nonce: &str) -> Option<Vec<u8>> {
++    let Input {
++        operation,
++        key_version,
++        body,
++    } = input;
++    let (method, path, payload) = match operation.as_str() {
++        "identity" if key_version == 0 && body == json!({}) => {
++            ("GET", "/ops/v1/device/update-identity", body)
++        }
++        "inventory" if key_version > 0 && body == json!({}) => {
++            ("GET", "/ops/v1/device/check-inventory", body)
++        }
++        "report" if key_version > 0 => {
++            let report: Report = serde_json::from_value(body.clone()).ok()?;
++            if report.observed_at == 0
++                || report.revision.len() != 64
++                || !report
++                    .revision
++                    .bytes()
++                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
++                || report.results.is_empty()
++                || report.results.len() > 32
++            {
++                return None;
++            }
++            for row in &report.results {
++                if row.id.is_empty()
++                    || row.id.len() > 128
++                    || !row
++                        .id
++                        .bytes()
++                        .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b))
++                    || !matches!(
++                        row.outcome.as_str(),
++                        "reachable" | "unreachable" | "timeout" | "unknown"
++                    )
++                    || (row.outcome == "reachable" && row.latency_ms.is_none())
++                    || row.latency_ms.map_or(false, |ms| ms > 60000)
++                {
++                    return None;
++                }
++            }
++            let normalized = serde_json::to_value(report).ok()?;
++            if normalized != body {
++                return None;
++            }
++            ("POST", "/ops/v1/device/check-reports", normalized)
++        }
++        _ => return None,
++    };
++    let mut bytes = b"SteadDesk-fleet-v1\0".to_vec();
++    bytes.extend(
++        serde_json::to_vec(&(method, path, payload, device, key_version, stamp, nonce)).ok()?,
++    );
++    Some(bytes)
++}
++
++fn headers(input: Input) -> Option<Vec<u8>> {
++    sodiumoxide::init().ok()?;
++    let device = Config::get_id_or(String::new());
++    if !(9..=10).contains(&device.len()) || !device.bytes().all(|b| b.is_ascii_digit()) {
++        return None;
++    }
++    if input.operation == "binding" {
++        if input.key_version != 0 || input.body != json!({}) {
++            return None;
++        }
++        let (mut secret, public) = Config::get_existing_key_pair()?;
++        memzero(&mut secret);
++        sign::PublicKey::from_slice(&public)?;
++        return serde_json::to_vec(&json!({"fingerprint":format!("{:x}",Sha256::digest(&public))}))
++            .ok();
++    }
++    let version = input.key_version;
++    let ts = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
++    let mut salt = [0u8; 16];
++    randombytes_into(&mut salt);
++    let nonce: String = salt.iter().map(|b| format!("{b:02x}")).collect();
++    let message = proof(input, &device, ts, &nonce)?;
++    let (mut secret, public) = Config::get_existing_key_pair()?;
++    let key = sign::SecretKey::from_slice(&secret);
++    memzero(&mut secret);
++    let key = key?;
++    let public = sign::PublicKey::from_slice(&public)?;
++    let signature = sign::sign_detached(&message, &key);
++    if !sign::verify_detached(&signature, &message, &public) {
++        return None;
++    }
++    serde_json::to_vec(&json!({"X-Fleet-Device":device,"X-Fleet-Key-Version":version.to_string(),
++        "X-Fleet-Time":ts.to_string(),"X-Fleet-Nonce":nonce,"X-Fleet-Signature":STANDARD.encode(signature.to_bytes())})).ok()
++}
++
++/// # Safety
++/// The caller owns separate buffers of the indicated lengths for the duration of the call.
++#[no_mangle]
++pub unsafe extern "C" fn steaddesk_sign_quick_check(
++    src: *const u8,
++    size: usize,
++    dst: *mut u8,
++    capacity: usize,
++) -> usize {
++    if src.is_null() || dst.is_null() || size == 0 || size > 16384 || capacity != 1024 {
++        return 0;
++    }
++    catch_unwind(|| {
++        let Some(response) = serde_json::from_slice(slice::from_raw_parts(src, size))
++            .ok()
++            .and_then(headers)
++        else {
++            return 0;
++        };
++        if response.len() > capacity {
++            return 0;
++        }
++        std::ptr::copy_nonoverlapping(response.as_ptr(), dst, response.len());
++        response.len()
++    })
++    .unwrap_or(0)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use hbb_common::sha2::{Digest, Sha256};
++    fn canonical(op: &str, version: u64, body: Value) -> Option<Vec<u8>> {
++        proof(
++            Input {
++                operation: op.into(),
++                key_version: version,
++                body,
++            },
++            "123456789",
++            1800000000,
++            "0123456789abcdef0123456789abcdef",
++        )
++    }
++    #[test]
++    fn fixed_independent_interoperability_vectors() {
++        let bytes = canonical("inventory", 1, json!({})).unwrap();
++        assert_eq!(
++            format!("{:x}", Sha256::digest(bytes)),
++            "b7767d9001a8d6bc0d36fc3e10ff45ef7122afd783fb627bf40f7c26908fcde5"
++        );
++        let report = json!({"results":[{"outcome":"unknown","id":"i_fixture","latency_ms":null}],"revision":"a".repeat(64),"observed_at":1800000000});
++        assert_eq!(
++            format!(
++                "{:x}",
++                Sha256::digest(canonical("report", 1, report).unwrap())
++            ),
++            "d2b1cbcf7970e701c5ec7262da9d1dbdc013d5e338cc305f50d318b7d2c347e6"
++        );
++    }
++    #[test]
++    fn cannot_select_a_different_route_or_sign_extra_fields() {
++        for op in [
++            "update-attempts",
++            "https://example.invalid",
++            "reports",
++            "log",
++        ] {
++            assert!(canonical(op, 1, json!({})).is_none());
++        }
++        assert!(canonical("identity", 1, json!({})).is_none());
++        assert!(canonical("inventory", 0, json!({})).is_none());
++        assert!(canonical("inventory", 1, json!({"store":"other"})).is_none());
++        assert!(canonical("report",1,json!({"results":[{"id":"x","outcome":"reachable","latency_ms":null}],"revision":"a".repeat(64),"observed_at":1})).is_none());
++    }
++}

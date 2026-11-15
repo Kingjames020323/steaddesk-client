@@ -29,6 +29,15 @@ if cases not in ("", "0", "1", "false", "true"):
     raise ValueError("STEADDESK_CASES must be true, false, 1 or 0")
 cases = not merchant and cases in ("true", "1")
 lib = tree / "flutter/lib/steaddesk"
+quick = os.environ.get("STEADDESK_QUICK_CHECK", "").strip().lower()
+if quick not in ("", "0", "1", "false", "true"):
+    raise ValueError("STEADDESK_QUICK_CHECK must be true, false, 1 or 0")
+quick_enabled = quick in ("true", "1")
+for role in ("merchant", "support"):
+    selected = role if quick_enabled and (role == "merchant") == merchant else role + "_off"
+    (lib / f"quick_{role}_api.dart").write_text(f"export 'quick/{selected}.dart';\n", encoding="utf-8")
+(tree / "src").mkdir(exist_ok=True)
+(tree / "src/steaddesk_qc2.rs").write_text(str(quick_enabled and merchant).lower() + "\n", encoding="utf-8")
 fleet_admin = os.environ.get("STEADDESK_FLEET_ADMIN", "").strip().lower()
 if fleet_admin not in ("", "0", "1", "false", "true"):
     raise ValueError("STEADDESK_FLEET_ADMIN must be true, false, 1 or 0")

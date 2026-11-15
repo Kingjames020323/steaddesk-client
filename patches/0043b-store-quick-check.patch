@@ -1,0 +1,1524 @@
+diff --git a/flutter/lib/steaddesk/device_card.dart b/flutter/lib/steaddesk/device_card.dart
+index f2d8f4e..56ae607 100644
+--- a/flutter/lib/steaddesk/device_card.dart
++++ b/flutter/lib/steaddesk/device_card.dart
+@@ -2,8 +2,10 @@ part of 'support_home.dart';
+ 
+ enum _DeviceTab {
+   overview('Overview', true),
+-  peripherals('Peripherals and network',
+-      bool.fromEnvironment('STEADDESK_DEVICE_PERIPHERALS')),
++  peripherals(
++      'Peripherals and network',
++      supportQuickEnabled ||
++          bool.fromEnvironment('STEADDESK_DEVICE_PERIPHERALS')),
+   reports(
+       'Historical reports', bool.fromEnvironment('STEADDESK_DEVICE_REPORTS'));
+ 
+@@ -205,6 +207,11 @@ class _DeviceCardState extends State<_DeviceCard> {
+                     child: Text(value, style: const TextStyle(color: _blue))))
+       ]));
+ 
++  Widget _additionalTab(String device) =>
++      tab == _DeviceTab.peripherals && supportQuickEnabled
++          ? OpsHealthHost(HealthSurface.inventory, device: device)
++          : const SizedBox.shrink();
++
+   @override
+   Widget build(BuildContext context) {
+     final row = widget.row, d = row.device, dir = widget.directory;
+@@ -261,7 +268,7 @@ class _DeviceCardState extends State<_DeviceCard> {
+           const Divider(height: 1),
+           Expanded(
+               child: tab != _DeviceTab.overview
+-                  ? const SizedBox.shrink()
++                  ? _additionalTab(d.id)
+                   : ListView(padding: const EdgeInsets.all(16), children: [
+                       if (opsHealthEnabled)
+                         OpsHealthHost(HealthSurface.card, device: d.id),
+diff --git a/flutter/lib/steaddesk/merchant_panel.dart b/flutter/lib/steaddesk/merchant_panel.dart
+index b3fdf66..156c8ee 100644
+--- a/flutter/lib/steaddesk/merchant_panel.dart
++++ b/flutter/lib/steaddesk/merchant_panel.dart
+@@ -12,6 +12,7 @@ import '../models/server_model.dart';
+ import 'merchant_build.dart';
+ import 'help/merchant_help_off.dart'
+     if (dart.library.io) 'merchant_help_api.dart';
++import 'quick/merchant_off.dart' if (dart.library.io) 'quick_merchant_api.dart';
+ import 'merchant_pause_button.dart';
+ import 'merchant_window_stub.dart'
+     if (dart.library.io) 'merchant_window_io.dart';
+@@ -408,6 +409,10 @@ class _MerchantPanelState extends State<MerchantPanel>
+                     const TextStyle(fontWeight: FontWeight.w600, color: _ink))),
+         const SizedBox(height: 8),
+         Text(translate('Give your device ID to support.')),
++        if (merchantQuickEnabled &&
++            !widget.connectionManager &&
++            (merchantAndroid || merchantWindows))
++          merchantQuickEntry(),
+         if (helpEnabled && !widget.connectionManager) merchantHelpEntry(),
+         if (merchantPhone.trim().isNotEmpty) ...[
+           const SizedBox(height: 12),
+diff --git a/flutter/lib/steaddesk/ops_health.dart b/flutter/lib/steaddesk/ops_health.dart
+index 98e9a8d..50d4b03 100644
+--- a/flutter/lib/steaddesk/ops_health.dart
++++ b/flutter/lib/steaddesk/ops_health.dart
+@@ -75,6 +75,7 @@ class OpsHealthHttp implements HealthApi {
+       }
+       bytes.addAll(chunk);
+     }
++    if (res.statusCode == HttpStatus.noContent) return {};
+     return jsonDecode(utf8.decode(bytes)) as Map<String, dynamic>;
+   }
+ 
+@@ -208,6 +209,10 @@ class HealthStore extends ChangeNotifier {
+     }
+   }
+ 
++  Future<Map<String, dynamic>> resource(String method, String path,
++          [Map<String, dynamic>? body]) =>
++      _fetch(method, path, body);
++
+   Future<void> refresh() =>
+       _pending ??= _refresh().whenComplete(() => _pending = null);
+   Future<void> refreshAfterPending() async {
+diff --git a/flutter/lib/steaddesk/ops_health_host.dart b/flutter/lib/steaddesk/ops_health_host.dart
+index 9039ca8..0a2e0aa 100644
+--- a/flutter/lib/steaddesk/ops_health_host.dart
++++ b/flutter/lib/steaddesk/ops_health_host.dart
+@@ -6,6 +6,7 @@ import '../common.dart' show gFFI;
+ import '../models/platform_model.dart' show bind;
+ import 'ops_health.dart';
+ import 'ops_health_widgets.dart';
++import 'quick_support_api.dart';
+ 
+ typedef _Login = ({String name, String token});
+ _Login? _login() {
+@@ -94,7 +95,7 @@ class _EngineHealth extends ChangeNotifier {
+ 
+ final _engine = _EngineHealth();
+ 
+-enum HealthSurface { header, card, sidebar, overview }
++enum HealthSurface { header, card, sidebar, overview, inventory }
+ 
+ class OpsHealthHost extends StatefulWidget {
+   final HealthSurface surface;
+@@ -151,6 +152,12 @@ class _OpsHealthHostState extends State<OpsHealthHost> {
+                                   ])),
+                       child: Text(
+                           '告警 ${store.available ? store.alerts.length : '—'}'));
++                case HealthSurface.inventory:
++                  if (!store.available ||
++                      !store.devices.containsKey(widget.device)) {
++                    return Text(store.error ?? '设备清单暂不可用。');
++                  }
++                  return storeInventory(store, widget.device!);
+                 case HealthSurface.overview:
+                   return ListView(padding: const EdgeInsets.all(16), children: [
+                     if (store.error != null) Text(store.error!),
+@@ -159,7 +166,13 @@ class _OpsHealthHostState extends State<OpsHealthHost> {
+                     for (final id in store.devices.keys)
+                       ListTile(
+                           title: Text(id),
+-                          subtitle: HealthDeviceView(store: store, id: id)),
++                          subtitle: Column(
++                              crossAxisAlignment: CrossAxisAlignment.start,
++                              children: [
++                                HealthDeviceView(store: store, id: id),
++                                if (supportQuickEnabled && store.available)
++                                  merchantReport(store, id)
++                              ])),
+                   ]);
+                 default:
+                   return HealthDeviceView(
+diff --git a/flutter/lib/steaddesk/quick/check.dart b/flutter/lib/steaddesk/quick/check.dart
+new file mode 100644
+index 0000000..f3c9101
+--- /dev/null
++++ b/flutter/lib/steaddesk/quick/check.dart
+@@ -0,0 +1,328 @@
++import 'dart:async';
++import 'dart:convert';
++import 'dart:io';
++
++typedef Json = Map<String, dynamic>;
++typedef CheckScope = ({Uri origin, String device, String binding});
++typedef CheckOutcome = ({String outcome, int? latency});
++typedef CheckCall = Future<Json> Function(CheckScope, String, int, Json);
++const typeLabels = {
++  'printer': '打印机',
++  'host': '主机',
++  'secondary': '副机',
++  'payment': '支付设备',
++  'other': '其他'
++};
++const outcomeLabels = {
++  'reachable': 'Reachable',
++  'unreachable': 'Unreachable',
++  'timeout': 'Check timed out',
++  'unknown': 'Check unavailable'
++};
++
++bool privateV4(String address) {
++  final parts = address.split('.');
++  if (parts.length != 4) return false;
++  final bytes = <int>[];
++  for (final part in parts) {
++    final n = int.tryParse(part);
++    if (n == null || n < 0 || n > 255 || n.toString() != part) return false;
++    bytes.add(n);
++  }
++  return bytes[0] == 10 ||
++      bytes[0] == 172 && bytes[1] >= 16 && bytes[1] <= 31 ||
++      bytes[0] == 192 && bytes[1] == 168;
++}
++
++bool validId(Object? value) =>
++    value is String &&
++    value.isNotEmpty &&
++    value.length <= 128 &&
++    !RegExp(r'[^A-Za-z0-9_-]').hasMatch(value);
++
++List<Json> inventoryEntries(dynamic raw) {
++  if (raw is! List || raw.length > 32) throw const FormatException('设备表无效');
++  final ips = <String>{}, ids = <String>{};
++  return raw.map((row) {
++    if (row is! Json ||
++        !validId(row['id']) ||
++        !ids.add(row['id']) ||
++        row['ip'] is! String ||
++        !privateV4(row['ip']) ||
++        !ips.add(row['ip'])) {
++      throw const FormatException('设备地址或编号无效、重复');
++    }
++    for (final field in ['name', 'type', 'model']) {
++      final value = row[field];
++      if (value is! String ||
++          value.runes.length > 64 ||
++          (field != 'model' && value.trim().isEmpty) ||
++          RegExp(r'[\x00-\x1f\x7f]').hasMatch(value)) {
++        throw const FormatException('设备字段无效');
++      }
++    }
++    return {
++      for (final k in ['id', 'name', 'type', 'ip', 'model']) k: row[k]
++    };
++  }).toList();
++}
++
++class CheckFailure implements Exception {
++  final String message;
++  final int status;
++  const CheckFailure(this.message, [this.status = 0]);
++  @override
++  String toString() => message;
++}
++
++// Only the main merchant panel owns this journal. Persist the rate reservation
++// before the first probe, and persist the exact unsigned report before POST.
++class MerchantChecks {
++  final File journal;
++  final Future<CheckScope> Function() scope;
++  final CheckCall call;
++  final Future<CheckOutcome> Function(Json) probe;
++  final int Function() clock;
++  final int Function() rateClock;
++  MerchantChecks(this.journal, this.scope, this.call, this.probe,
++      {int Function()? clock})
++      : clock = clock ?? (() => DateTime.now().millisecondsSinceEpoch ~/ 1000),
++        rateClock = clock == null
++            ? (() => DateTime.now().millisecondsSinceEpoch)
++            : (() => clock() * 1000);
++
++  bool usedCache = false;
++  String delivery = 'Check report pending upload.';
++  static final _busy = <String>{};
++  Future<T> _withState<T>(
++      Future<T> Function(CheckScope, Json) operation) async {
++    final path = journal.absolute.path;
++    if (!_busy.add(path)) {
++      throw const CheckFailure(
++          'A quick check is in progress. Try again shortly.');
++    }
++    RandomAccessFile? lock;
++    try {
++      await journal.parent.create(recursive: true);
++      lock = await File('$path.lock').open(mode: FileMode.append);
++      await lock.lock(FileLock.exclusive);
++      final owner = await scope();
++      Json state = {};
++      if (await journal.exists()) {
++        if (await journal.length() > 512 * 1024) {
++          throw const CheckFailure('Check cache is invalid.');
++        }
++        state = jsonDecode(await journal.readAsString()) as Json;
++      }
++      if (state['origin'] != owner.origin.origin ||
++          state['device'] != owner.device ||
++          state['binding'] != owner.binding) {
++        final last = state['origin'] == owner.origin.origin &&
++                state['device'] == owner.device
++            ? state['last']
++            : null;
++        state = {
++          if (last is int) 'last': last,
++          'origin': owner.origin.origin,
++          'device': owner.device,
++          'binding': owner.binding,
++          'pending': []
++        };
++        await _save(state);
++      }
++      return await operation(owner, state);
++    } finally {
++      try {
++        await lock?.close();
++      } finally {
++        _busy.remove(path);
++      }
++    }
++  }
++
++  Future<void> _save(Json state) async {
++    final temp = File('${journal.path}.next');
++    await temp.writeAsString(jsonEncode(state), flush: true);
++    await temp.rename(journal.path);
++  }
++
++  Future<void> _same(CheckScope owner) async {
++    if (owner != await scope()) {
++      throw const CheckFailure(
++          'The device identity changed. Start a new check.');
++    }
++  }
++
++  Future<Json> _call(CheckScope owner, String op, int v, Json body) async {
++    await _same(owner);
++    final answer = await call(owner, op, v, body);
++    await _same(owner);
++    return answer;
++  }
++
++  Json _snapshot(dynamic data, CheckScope owner, {bool fresh = false}) {
++    final now = clock();
++    if (data is! Json ||
++        data['device_id'] != owner.device ||
++        !validId(data['store_id']) ||
++        data['allowed'] != true ||
++        data['expires_at'] is! int ||
++        data['expires_at'] <= now ||
++        data['expires_at'] > now + (fresh ? 930 : 900) ||
++        data['revision'] is! String ||
++        (data['revision'] as String).length != 64 ||
++        RegExp(r'[^a-f0-9]').hasMatch(data['revision'])) {
++      throw const CheckFailure(
++          'Store approval is missing or the offline inventory expired.');
++    }
++    return {
++      ...data,
++      'expires_at': (data['expires_at'] as int).clamp(now + 1, now + 900),
++      'entries': inventoryEntries(data['entries'])
++    };
++  }
++
++  Future<bool> _refresh(CheckScope owner, Json state) async {
++    try {
++      final identity = await _call(owner, 'identity', 0, {});
++      final version = identity['key_version'];
++      if (version is! int || version <= 0) {
++        throw const FormatException('设备身份无效');
++      }
++      if (state['version'] != null && state['version'] != version) {
++        state.remove('inventory');
++        state['pending'] = [];
++        await _save(state);
++      }
++      final data = await _call(owner, 'inventory', version, {});
++      if (data['allowed'] == false && data['device_id'] == owner.device) {
++        state.remove('inventory');
++        state['pending'] = [];
++      } else {
++        final inventory = _snapshot(data, owner, fresh: true);
++        if (state['version'] != version ||
++            state['store'] != inventory['store_id']) {
++          state['pending'] = [];
++        }
++        state['store'] = inventory['store_id'];
++        state['version'] = version;
++        state['inventory'] = inventory;
++      }
++      await _save(state);
++      return true;
++    } on SocketException {
++      return false;
++    } on TimeoutException {
++      return false;
++    } catch (e) {
++      state.remove('inventory');
++      if (e is CheckFailure && [401, 403, 404].contains(e.status)) {
++        state['pending'] = [];
++      }
++      await _save(state);
++      rethrow;
++    }
++  }
++
++  Future<void> _flush(CheckScope owner, Json state, [Json? current]) async {
++    final pending = state['pending'] as List;
++    while (pending.isNotEmpty) {
++      final body = pending.first as Json;
++      if (clock() - (body['observed_at'] as int) <= 86400) {
++        try {
++          final response =
++              await _call(owner, 'report', state['version'] as int, body);
++          if (response['state'] != 'completed' || !validId(response['id'])) {
++            throw const CheckFailure('Check receipt is invalid.');
++          }
++          if (identical(body, current)) delivery = 'Check report uploaded.';
++        } on SocketException {
++          return;
++        } on TimeoutException {
++          return;
++        } on CheckFailure catch (e) {
++          if (e.status == 400) {
++            delivery = 'The server declined the check report.';
++            return;
++          } else if ([409, 422].contains(e.status)) {
++            if (identical(body, current)) {
++              delivery = 'The server declined the check report.';
++            }
++          } else if (e.status == 429 || e.status >= 500) {
++            return;
++          } else {
++            if ([401, 403, 404].contains(e.status)) {
++              state.remove('inventory');
++              state['pending'] = [];
++              await _save(state);
++            }
++            rethrow;
++          }
++        }
++      }
++      pending.removeAt(0);
++      await _save(state);
++    }
++  }
++
++  Future<void> sync() => _withState((owner, state) async {
++        if (await _refresh(owner, state) && state['inventory'] != null) {
++          await _flush(owner, state);
++        }
++      });
++
++  Future<List<Json>> run() => _withState((owner, state) async {
++        final last = state['last'] as int?;
++        if (last != null && rateClock() - last < 60000) {
++          throw const CheckFailure('Wait one minute between quick checks.');
++        }
++        final online = await _refresh(owner, state);
++        usedCache = !online;
++        delivery = 'Check report pending upload.';
++        final inventory = _snapshot(state['inventory'], owner);
++        if ((inventory['entries'] as List).isEmpty) {
++          throw const CheckFailure('No registered devices at this store.');
++        }
++        if (online) await _flush(owner, state);
++        final pending = state['pending'] as List;
++        if (pending.length >= 32) {
++          throw const CheckFailure(
++              'Pending reports are full. Reconnect before checking again.');
++        }
++        final started = clock();
++        state['last'] = rateClock();
++        await _save(state);
++        final rows = <Json>[], results = <Json>[];
++        for (final entry in inventory['entries'] as List<Json>) {
++          await _same(owner);
++          if (clock() >= inventory['expires_at']) {
++            throw const CheckFailure(
++                'Check approval expired. Reconnect to refresh it.');
++          }
++          final r = await probe(entry);
++          results.add({
++            'id': entry['id'],
++            'outcome': r.outcome,
++            'latency_ms': r.latency
++          });
++          rows.add({...entry, 'outcome': r.outcome, 'latency_ms': r.latency});
++        }
++        await _same(owner);
++        final report = {
++          'revision': inventory['revision'],
++          'observed_at': started,
++          'results': results
++        };
++        pending.add(report);
++        await _save(state);
++        if (online) {
++          try {
++            await _flush(owner, state, report);
++          } on CheckFailure {
++            delivery = 'The server declined the check report.';
++          }
++        }
++        await _same(owner);
++        return rows;
++      });
++}
+diff --git a/flutter/lib/steaddesk/quick/http.dart b/flutter/lib/steaddesk/quick/http.dart
+new file mode 100644
+index 0000000..00e5b9a
+--- /dev/null
++++ b/flutter/lib/steaddesk/quick/http.dart
+@@ -0,0 +1,57 @@
++import 'dart:async';
++import 'dart:convert';
++import 'dart:io';
++import 'check.dart';
++
++Future<Json> signedQuickCall(CheckScope scope, String op, int version,
++    Json body, Map<String, String> Function(String, int, Json) sign) async {
++  if (scope.origin.scheme != 'https' ||
++      scope.origin.host.isEmpty ||
++      scope.origin.userInfo.isNotEmpty ||
++      scope.origin.hasQuery ||
++      scope.origin.hasFragment ||
++      !{'', '/'}.contains(scope.origin.path)) {
++    throw const CheckFailure('Invalid check origin.');
++  }
++  final route = switch (op) {
++    'identity' => 'update-identity',
++    'inventory' => 'check-inventory',
++    'report' => 'check-reports',
++    _ => throw StateError('Unknown check operation')
++  };
++  final headers = sign(op, version, body);
++  final client = HttpClient()
++    ..connectionTimeout = const Duration(seconds: 4)
++    ..findProxy = (_) => 'DIRECT';
++  Future<Json> send() async {
++    final req = await client.openUrl(op == 'report' ? 'POST' : 'GET',
++        scope.origin.resolve('/ops/v1/device/$route'));
++    req.followRedirects = false;
++    headers.forEach((k, v) => req.headers.set(k, v));
++    if (op == 'report') {
++      req.headers.contentType = ContentType.json;
++      final bytes = utf8.encode(jsonEncode(body));
++      req.contentLength = bytes.length;
++      req.add(bytes);
++    }
++    final res = await req.close();
++    if (res.statusCode != 200) {
++      throw CheckFailure(
++          'The server declined the check request.', res.statusCode);
++    }
++    final bytes = <int>[];
++    await for (final chunk in res) {
++      if (bytes.length + chunk.length > 65536) {
++        throw const FormatException('响应过大');
++      }
++      bytes.addAll(chunk);
++    }
++    return jsonDecode(utf8.decode(bytes)) as Json;
++  }
++
++  try {
++    return await send().timeout(const Duration(seconds: 8));
++  } finally {
++    client.close(force: true);
++  }
++}
+diff --git a/flutter/lib/steaddesk/quick/merchant.dart b/flutter/lib/steaddesk/quick/merchant.dart
+new file mode 100644
+index 0000000..f08b081
+--- /dev/null
++++ b/flutter/lib/steaddesk/quick/merchant.dart
+@@ -0,0 +1,157 @@
++import 'dart:async';
++import 'dart:io';
++
++import 'package:flutter/material.dart';
++import 'package:path_provider/path_provider.dart';
++import '../../models/native_model.dart' show PlatformFFI;
++import '../../models/platform_model.dart' show bind;
++import '../help/merchant_help_client.dart' show configuredHelpOrigin;
++import 'check.dart';
++import 'probe.dart';
++import 'http.dart';
++import '../../common.dart' show translate;
++
++const merchantQuickEnabled = true;
++Widget merchantQuickEntry() => const _MerchantQuick();
++
++Future<CheckScope> _scope() async {
++  final origin =
++      configuredHelpOrigin(await bind.mainGetOption(key: 'api-server'));
++  final device = await bind.mainGetMyId();
++  if (!validId(device)) {
++    throw const CheckFailure('The device identity is not configured.');
++  }
++  final signer = PlatformFFI.instance.helpSigner;
++  if (signer == null) {
++    throw const CheckFailure('Device signing is unavailable.');
++  }
++  return (origin: origin, device: device, binding: signer.quickCheckBinding());
++}
++
++Future<Json> _signedCall(CheckScope scope, String op, int version, Json body) {
++  final signer = PlatformFFI.instance.helpSigner;
++  if (signer == null) {
++    throw const CheckFailure('Device signing is unavailable.');
++  }
++  return signedQuickCall(scope, op, version, body, signer.signQuickCheck);
++}
++
++class _MerchantQuick extends StatefulWidget {
++  const _MerchantQuick();
++  @override
++  State<_MerchantQuick> createState() => _MerchantQuickState();
++}
++
++class _MerchantQuickState extends State<_MerchantQuick>
++    with WidgetsBindingObserver {
++  MerchantChecks? client;
++  Timer? retry;
++  String? notice;
++  bool busy = false;
++  Future<void>? refreshing;
++  List<Json> rows = [];
++  @override
++  void initState() {
++    super.initState();
++    WidgetsBinding.instance.addObserver(this);
++    initialize();
++  }
++
++  Future<void> initialize() async {
++    try {
++      final dir = await getApplicationSupportDirectory();
++      if (!mounted) return;
++      setState(() => client = MerchantChecks(
++          File('${dir.path}/quick-check.json'),
++          _scope,
++          _signedCall,
++          checkRegisteredDevice));
++      await sync();
++      if (mounted) {
++        retry = Timer.periodic(const Duration(minutes: 1), (_) => sync());
++      }
++    } catch (_) {
++      if (mounted) setState(() => notice = 'Device storage is unavailable.');
++    }
++  }
++
++  Future<void> sync() async {
++    if (busy || client == null || refreshing != null) return;
++    try {
++      refreshing = client!.sync();
++      await refreshing;
++    } catch (_) {/* A click shows the current failure. */} finally {
++      refreshing = null;
++    }
++  }
++
++  @override
++  void didChangeAppLifecycleState(AppLifecycleState state) {
++    if (state == AppLifecycleState.resumed) sync();
++  }
++
++  @override
++  void dispose() {
++    retry?.cancel();
++    WidgetsBinding.instance.removeObserver(this);
++    super.dispose();
++  }
++
++  Future<void> run() async {
++    if (busy || client == null) return;
++    setState(() {
++      busy = true;
++      notice = null;
++      rows = [];
++    });
++    try {
++      try {
++        await refreshing;
++      } catch (_) {}
++      if (!mounted) return;
++      final found = await client!.run();
++      if (mounted) {
++        setState(() {
++          rows = found;
++          notice = client!.delivery;
++        });
++      }
++    } catch (e) {
++      if (mounted) {
++        setState(() => notice = e is CheckFailure
++            ? e.message
++            : 'Cannot check now. Verify the device configuration and try again.');
++      }
++    } finally {
++      if (mounted) setState(() => busy = false);
++    }
++  }
++
++  @override
++  Widget build(BuildContext context) =>
++      Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
++        TextButton.icon(
++            onPressed: busy || client == null ? null : run,
++            icon: const Icon(Icons.network_check),
++            label: Text(translate(
++                busy ? 'Checking registered devices…' : 'Quick check'))),
++        if (rows.isNotEmpty && client?.usedCache == true)
++          Text(translate('Using the offline store inventory.')),
++        if (notice != null) Text(translate(notice!)),
++        if (rows.any((r) => r['type'] == 'payment'))
++          Text(translate('Payment devices use ping only.')),
++        for (final row in rows)
++          Text(
++              "${row['name']} · ${translate(outcomeLabels[row['outcome']] ?? 'Check unavailable')} · ${row['latency_ms'] == null ? '—' : "${row['latency_ms']} ms"}"),
++        if (rows.any(
++            (r) => r['outcome'] == 'unreachable' || r['outcome'] == 'timeout'))
++          Text(translate(rows.any((r) =>
++                  r['type'] == 'printer' &&
++                  ['unreachable', 'timeout'].contains(r['outcome']))
++              ? 'Printer unreachable. Check its power and network cable.'
++              : 'Device unreachable. Check its power and network connection.')),
++        if (rows.any((r) => r['outcome'] == 'unknown'))
++          Text(translate(
++              'Some checks were unavailable. Check network permissions.')),
++      ]);
++}
+diff --git a/flutter/lib/steaddesk/quick/merchant_off.dart b/flutter/lib/steaddesk/quick/merchant_off.dart
+new file mode 100644
+index 0000000..3e9054a
+--- /dev/null
++++ b/flutter/lib/steaddesk/quick/merchant_off.dart
+@@ -0,0 +1,4 @@
++import 'package:flutter/widgets.dart';
++
++const merchantQuickEnabled = false;
++Widget merchantQuickEntry() => const SizedBox.shrink();
+diff --git a/flutter/lib/steaddesk/quick/probe.dart b/flutter/lib/steaddesk/quick/probe.dart
+new file mode 100644
+index 0000000..c59d86b
+--- /dev/null
++++ b/flutter/lib/steaddesk/quick/probe.dart
+@@ -0,0 +1,108 @@
++import 'dart:async';
++import 'dart:io';
++
++import 'check.dart';
++
++Future<String> _ping(String ip) async {
++  late String binary;
++  late List<String> args;
++  if (Platform.isAndroid) {
++    binary = '/system/bin/ping';
++    args = ['-n', '-c', '1', '-W', '1', ip];
++  } else if (Platform.isWindows) {
++    final root = Platform.environment['SystemRoot'];
++    if (root == null || !RegExp(r'^[A-Za-z]:\\').hasMatch(root)) {
++      return 'unknown';
++    }
++    binary = '$root\\System32\\PING.EXE';
++    args = ['-4', '-n', '1', '-w', '1000', ip];
++  } else {
++    return 'unknown';
++  }
++  Process? process;
++  try {
++    process = await Process.start(binary, args, runInShell: false);
++    final stdout = process.stdout.expand((b) => b).toList();
++    final stderr = process.stderr.expand((b) => b).toList();
++    final status = await process.exitCode.timeout(const Duration(seconds: 3));
++    final out = systemEncoding.decode(await stdout);
++    final err = systemEncoding.decode(await stderr);
++    return pingOutcome(ip, status, out, err, windows: Platform.isWindows);
++  } on TimeoutException {
++    return 'timeout';
++  } on IOException {
++    return 'unknown';
++  } finally {
++    process?.kill();
++  }
++}
++
++String pingOutcome(String ip, int status, String stdout, String stderr,
++    {required bool windows}) {
++  final out = stdout.toLowerCase();
++  if (stderr.trim().isNotEmpty ||
++      out.contains('permission denied') ||
++      out.contains('operation not permitted')) return 'unknown';
++  if (!windows) {
++    return switch (status) {
++      0 => 'reachable',
++      1 => 'unreachable',
++      _ => 'unknown'
++    };
++  }
++  // A Windows router ICMP error may yield exit code zero. Require the original
++  // target address and an echo TTL on the same reply line.
++  final peer = RegExp('(?:^|[^0-9.])${RegExp.escape(ip)}(?:[^0-9.]|\$)');
++  if (status == 0 &&
++      out.split('\n').any((line) =>
++          peer.hasMatch(line) && RegExp(r'\bttl\s*=').hasMatch(line))) {
++    return 'reachable';
++  }
++  if (RegExp(r'destination (host|net|network) unreachable|inaccesible|无法访问目标')
++      .hasMatch(out)) return 'unreachable';
++  if (RegExp(r'request timed out|tiempo de espera agotado|请求超时')
++      .hasMatch(out)) {
++    return 'timeout';
++  }
++  return 'unknown';
++}
++
++Future<String> _connect(String ip, int port) async {
++  try {
++    final socket = await Socket.connect(InternetAddress(ip), port,
++        timeout: const Duration(seconds: 1));
++    socket.destroy();
++    return 'reachable';
++  } on SocketException catch (e) {
++    final n = e.osError?.errorCode;
++    if ([13, 1, 10013].contains(n)) return 'unknown';
++    if ([110, 10060].contains(n)) return 'timeout';
++    if ([101, 111, 113, 10051, 10061, 10065].contains(n)) return 'unreachable';
++    return 'unknown';
++  }
++}
++
++Future<CheckOutcome> checkRegisteredDevice(Json row,
++    {Future<String> Function(String) ping = _ping,
++    Future<String> Function(String, int) connect = _connect}) async {
++  final ip = row['ip'];
++  if (ip is! String || !privateV4(ip)) throw const FormatException('无效地址');
++  final elapsed = Stopwatch()..start();
++  var outcome = await ping(ip);
++  if (row['type'] == 'printer' && outcome != 'reachable') {
++    final observed = {outcome};
++    for (final port in const [9100, 515, 631]) {
++      final result = await connect(ip, port);
++      observed.add(result);
++      if (result == 'reachable') break;
++    }
++    outcome = ['reachable', 'unknown', 'timeout', 'unreachable']
++        .firstWhere(observed.contains);
++  }
++  return (
++    outcome: outcome,
++    latency: outcome == 'unknown'
++        ? null
++        : elapsed.elapsedMilliseconds.clamp(0, 60000).toInt()
++  );
++}
+diff --git a/flutter/lib/steaddesk/quick/support.dart b/flutter/lib/steaddesk/quick/support.dart
+new file mode 100644
+index 0000000..72ed11d
+--- /dev/null
++++ b/flutter/lib/steaddesk/quick/support.dart
+@@ -0,0 +1,305 @@
++import 'package:flutter/material.dart';
++import '../ops_health.dart';
++import 'check.dart';
++
++const supportQuickEnabled = true;
++Widget storeInventory(HealthStore store, String device) =>
++    _StoreView(store, device,
++        key: ValueKey((store, device, store.scopeRevision)));
++Widget merchantReport(HealthStore store, String device) =>
++    _LatestReport(store, device,
++        key: ValueKey((store, device, store.scopeRevision)));
++
++class _StoreView extends StatefulWidget {
++  final HealthStore store;
++  final String device;
++  const _StoreView(this.store, this.device, {super.key});
++  @override
++  State<_StoreView> createState() => _StoreViewState();
++}
++
++class _StoreViewState extends State<_StoreView> {
++  List<Json> entries = [];
++  Json policy = {};
++  bool busy = true;
++  String? error;
++  String get path => 'devices/${widget.device}';
++  bool get current =>
++      mounted &&
++      widget.store.active &&
++      widget.store.devices.containsKey(widget.device);
++  bool get editable => current && policy['can_edit'] == true && !busy;
++  @override
++  void initState() {
++    super.initState();
++    load();
++  }
++
++  Future<void> load() async {
++    if (!mounted) return;
++    setState(() {
++      busy = true;
++      error = null;
++      policy = {};
++      entries = [];
++    });
++    try {
++      final data = await Future.wait([
++        widget.store.resource('GET', '$path/check-policy'),
++        widget.store.resource('GET', '$path/inventory')
++      ]);
++      if (current) {
++        setState(() {
++          entries = inventoryEntries(data[1]['entries']);
++          policy = data[0];
++        });
++      }
++    } catch (e) {
++      if (mounted) {
++        setState(
++            () => error = e is FormatException ? '设备清单格式不正确。' : e.toString());
++      }
++    } finally {
++      if (mounted) setState(() => busy = false);
++    }
++  }
++
++  Future<void> write(String method, String route, Json body) async {
++    if (!editable) return;
++    setState(() {
++      busy = true;
++      error = null;
++    });
++    try {
++      await widget.store.resource(method, route, body);
++    } catch (e) {
++      if (mounted) {
++        await load();
++        if (mounted) setState(() => error = e.toString());
++      }
++      return;
++    }
++    if (current) await load();
++  }
++
++  Future<void> edit([Json? row]) async {
++    if (!editable) return;
++    final value = await showDialog<Json>(
++        context: context, builder: (_) => _Editor(row, entries));
++    if (value != null && editable) {
++      await write(
++          row == null ? 'POST' : 'PATCH',
++          row == null ? '$path/inventory' : '$path/inventory/${row['id']}',
++          value);
++    }
++  }
++
++  Future<void> remove(Json row) async {
++    if (!editable) return;
++    final yes = await showDialog<bool>(
++        context: context,
++        builder: (ctx) => AlertDialog(
++                title: const Text('删除设备'),
++                content: Text('从本店移除「${row['name']}」？'),
++                actions: [
++                  TextButton(
++                      onPressed: () => Navigator.pop(ctx),
++                      child: const Text('取消')),
++                  TextButton(
++                      onPressed: () => Navigator.pop(ctx, true),
++                      child: const Text('删除'))
++                ]));
++    if (yes == true && editable) {
++      await write('DELETE', '$path/inventory/${row['id']}', {});
++    }
++  }
++
++  @override
++  Widget build(BuildContext context) =>
++      ListView(padding: const EdgeInsets.all(16), children: [
++        if (busy) const LinearProgressIndicator(),
++        if (error != null) Text(error!),
++        if (policy.isNotEmpty) ...[
++          Text('门店 · ${policy['store_id']}',
++              style: Theme.of(context).textTheme.titleMedium),
++          SwitchListTile(
++              contentPadding: EdgeInsets.zero,
++              title: const Text('允许这家店做快速检查'),
++              value: policy['enabled'] == true,
++              subtitle: policy['deployment_allowed'] == false
++                  ? const Text('部署审批或急停当前限制检查。')
++                  : null,
++              onChanged: editable
++                  ? (v) => write('PUT', '$path/check-policy', {'enabled': v})
++                  : null),
++          if (editable)
++            Align(
++                alignment: Alignment.centerLeft,
++                child: TextButton.icon(
++                    onPressed: entries.length < 32 ? () => edit() : null,
++                    icon: const Icon(Icons.add),
++                    label: const Text('新增设备'))),
++          if (entries.isEmpty) const Text('暂无已登记设备'),
++          for (final row in entries)
++            ListTile(
++                contentPadding: EdgeInsets.zero,
++                title: Text(row['name']),
++                subtitle: Text(
++                    "${typeLabels[row['type']] ?? row['type']} · ${row['ip']}\n${row['model']}"),
++                trailing: !editable
++                    ? null
++                    : Wrap(children: [
++                        IconButton(
++                            tooltip: '编辑设备',
++                            onPressed: () => edit(row),
++                            icon: const Icon(Icons.edit_outlined)),
++                        IconButton(
++                            tooltip: '删除设备',
++                            onPressed: () => remove(row),
++                            icon: const Icon(Icons.delete_outline))
++                      ])),
++        ],
++        Align(
++            alignment: Alignment.centerLeft,
++            child: TextButton(
++                onPressed: busy ? null : load, child: const Text('刷新设备表'))),
++      ]);
++}
++
++class _Editor extends StatefulWidget {
++  final Json? row;
++  final List<Json> entries;
++  const _Editor(this.row, this.entries);
++  @override
++  State<_Editor> createState() => _EditorState();
++}
++
++class _EditorState extends State<_Editor> {
++  final form = GlobalKey<FormState>();
++  late final values = {
++    for (final k in ['name', 'ip', 'model']) k: widget.row?[k] as String? ?? ''
++  };
++  late String type = typeLabels.containsKey(widget.row?['type'])
++      ? widget.row!['type'] as String
++      : 'other';
++  @override
++  Widget build(BuildContext context) => AlertDialog(
++          title: Text(widget.row == null ? '新增设备' : '编辑设备'),
++          content: SingleChildScrollView(
++              child: Form(
++                  key: form,
++                  child: Column(mainAxisSize: MainAxisSize.min, children: [
++                    for (final field in ['name', 'ip', 'model'])
++                      TextFormField(
++                          initialValue: values[field],
++                          maxLength: field == 'ip' ? 15 : 64,
++                          decoration: InputDecoration(
++                              labelText: const {
++                            'name': '名称',
++                            'ip': '私有 IPv4 地址',
++                            'model': '型号'
++                          }[field]),
++                          onChanged: (v) => values[field] = v.trim(),
++                          validator: (text) {
++                            final s = (text ?? '').trim();
++                            if (field == 'name' && s.isEmpty) return '请输入设备名称';
++                            if (field != 'ip') {
++                              return RegExp(r'[\x00-\x1f\x7f]').hasMatch(s)
++                                  ? '请输入可显示字符'
++                                  : null;
++                            }
++                            if (!privateV4(s)) return '请输入规范的私有 IPv4 地址';
++                            if (widget.entries.any((e) =>
++                                e['ip'] == s && e['id'] != widget.row?['id'])) {
++                              return '本店已登记此 IP';
++                            }
++                            return null;
++                          }),
++                    DropdownButtonFormField<String>(
++                        value: type,
++                        decoration: const InputDecoration(labelText: '类型'),
++                        items: [
++                          for (final entry in typeLabels.entries)
++                            DropdownMenuItem(
++                                value: entry.key, child: Text(entry.value))
++                        ],
++                        onChanged: (v) {
++                          if (v != null) setState(() => type = v);
++                        }),
++                  ]))),
++          actions: [
++            TextButton(
++                onPressed: () => Navigator.pop(context),
++                child: const Text('取消')),
++            TextButton(
++                onPressed: () {
++                  if (form.currentState!.validate()) {
++                    Navigator.pop(context, {...values, 'type': type});
++                  }
++                },
++                child: const Text('保存')),
++          ]);
++}
++
++class _LatestReport extends StatefulWidget {
++  final HealthStore store;
++  final String device;
++  const _LatestReport(this.store, this.device, {super.key});
++  @override
++  State<_LatestReport> createState() => _LatestReportState();
++}
++
++class _LatestReportState extends State<_LatestReport> {
++  bool busy = false, loaded = false;
++  Json? latest;
++  String? error;
++  Future<void> read() async {
++    if (busy) return;
++    setState(() {
++      busy = true;
++      error = null;
++      latest = null;
++    });
++    try {
++      final data =
++          await widget.store.resource('GET', 'devices/${widget.device}/health');
++      final reports = data['merchant_checks'] as List;
++      if (mounted && widget.store.active) {
++        setState(() {
++          latest = reports.isEmpty ? null : reports.first as Json;
++          loaded = true;
++        });
++      }
++    } catch (e) {
++      if (mounted) setState(() => error = e.toString());
++    } finally {
++      if (mounted) setState(() => busy = false);
++    }
++  }
++
++  @override
++  Widget build(BuildContext context) =>
++      Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
++        TextButton(
++            onPressed: busy ? null : read,
++            child: Text(busy ? '读取中…' : '最近商户快速检查')),
++        if (error != null) Text(error!),
++        if (loaded && !busy && latest == null && error == null)
++          const Text('暂无商户上报'),
++        if (latest != null) ...[
++          Text(DateTime.fromMillisecondsSinceEpoch(
++                  (latest!['observed_at'] as int) * 1000)
++              .toLocal()
++              .toString()
++              .split('.')
++              .first),
++          for (final row in latest!['results'] as List)
++            Text("${row['name']} · ${row['ip']} · ${const {
++                  'reachable': '通',
++                  'unreachable': '不通',
++                  'timeout': '超时',
++                  'unknown': '未知'
++                }[row['outcome']] ?? '未知'} · ${row['latency_ms'] == null ? '—' : "${row['latency_ms']} ms"}"),
++        ],
++      ]);
++}
+diff --git a/flutter/lib/steaddesk/quick/support_off.dart b/flutter/lib/steaddesk/quick/support_off.dart
+new file mode 100644
+index 0000000..c4af48a
+--- /dev/null
++++ b/flutter/lib/steaddesk/quick/support_off.dart
+@@ -0,0 +1,5 @@
++import 'package:flutter/widgets.dart';
++
++const supportQuickEnabled = false;
++Widget storeInventory(Object store, String device) => const SizedBox.shrink();
++Widget merchantReport(Object store, String device) => const SizedBox.shrink();
+diff --git a/flutter/lib/steaddesk/support_home.dart b/flutter/lib/steaddesk/support_home.dart
+index f3e3d66..bfbf4c8 100644
+--- a/flutter/lib/steaddesk/support_home.dart
++++ b/flutter/lib/steaddesk/support_home.dart
+@@ -19,6 +19,7 @@ import '../models/peer_model.dart';
+ import '../models/peer_tab_model.dart';
+ import '../models/ab_model.dart';
+ import 'ops_health_host.dart';
++import 'quick_support_api.dart' show supportQuickEnabled;
+ import 'fleet_admin_api.dart';
+ import 'support_help_header_api.dart';
+ import 'case_inbox_api.dart' show PendingCasesBar;
+@@ -401,7 +402,7 @@ class _SupportHomeState extends State<SupportHome> {
+       case SupportPage.favorites:
+         return _Directory(page, search.text, _ops, key: directoryKeys[page]);
+       case SupportPage.health:
+-        if (opsHealthEnabled) return const OpsHealthHost(HealthSurface.overview);
++        if (opsHealthEnabled || supportQuickEnabled) return const OpsHealthHost(HealthSurface.overview);
+         return Center(child: Text(translate('Coming soon')));
+       default:
+         return Center(child: Text(translate('Coming soon')));
+diff --git a/flutter/test/steaddesk/quick_check_test.dart b/flutter/test/steaddesk/quick_check_test.dart
+new file mode 100644
+index 0000000..51f7384
+--- /dev/null
++++ b/flutter/test/steaddesk/quick_check_test.dart
+@@ -0,0 +1,162 @@
++import 'dart:io';
++import 'package:flutter_test/flutter_test.dart';
++import 'package:flutter_hbb/steaddesk/quick/check.dart';
++import 'package:flutter_hbb/steaddesk/quick/probe.dart';
++
++void main() {
++  final printer = {
++    'id': 'i_a',
++    'name': 'Demo printer',
++    'type': 'printer',
++    'model': 'Sample',
++    'ip': '192.168.20.10'
++  };
++  final payment = {
++    'id': 'i_b',
++    'name': 'Demo terminal',
++    'type': 'payment',
++    'model': 'Sample',
++    'ip': '10.3.2.1'
++  };
++  test('only canonical RFC1918 unicast literals and unique inventory addresses',
++      () {
++    for (final ip in [
++      '10.0.0.1',
++      '172.16.0.1',
++      '172.31.255.2',
++      '192.168.0.1'
++    ]) {
++      expect(privateV4(ip), isTrue);
++    }
++    for (final ip in [
++      '127.0.0.1',
++      '8.8.8.8',
++      '172.32.0.1',
++      '10.01.2.3',
++      '10.0.1.4/24',
++      '10.0.1.4:631',
++      '10.0.1.4\n',
++      '10.0.1.256',
++      '192.168.a.1',
++      'demo.invalid'
++    ]) {
++      expect(privateV4(ip), isFalse, reason: ip);
++    }
++    expect(
++        () => inventoryEntries([
++              printer,
++              {...payment, 'ip': printer['ip']}
++            ]),
++        throwsFormatException);
++  });
++  test(
++      'Windows echo needs the target TTL; system and permission failures remain unknown',
++      () {
++    const ip = '10.0.0.1';
++    expect(
++        pingOutcome(
++            ip, 0, 'Reply from 10.0.0.2: Destination host unreachable.', '',
++            windows: true),
++        'unreachable');
++    expect(
++        pingOutcome(ip, 0, 'Reply from 10.0.0.10: bytes=32 TTL=64', '',
++            windows: true),
++        'unknown');
++    expect(
++        pingOutcome(ip, 0, '来自 10.0.0.1 的回复: 字节=32 TTL=64', '', windows: true),
++        'reachable');
++    expect(
++        pingOutcome(ip, 1, 'Reply from 10.0.0.1: General failure.', '',
++            windows: true),
++        'unknown');
++    expect(pingOutcome(ip, 1, '', 'Operation not permitted', windows: false),
++        'unknown');
++  });
++  test(
++      'registered printer fallback uses only fixed ports, payment and unknown kinds never connect',
++      () async {
++    final ports = <int>[];
++    Future<String> connect(String ip, int port) async {
++      ports.add(port);
++      return 'unreachable';
++    }
++
++    Future<String> ping(String ip) async => 'unreachable';
++    await checkRegisteredDevice(printer, ping: ping, connect: connect);
++    expect(ports, [9100, 515, 631]);
++    ports.clear();
++    for (final kind in [
++      'payment',
++      'unclassified',
++      'host',
++      'other',
++      'secondary'
++    ]) {
++      await checkRegisteredDevice({...payment, 'type': kind},
++          ping: ping, connect: connect);
++    }
++    expect(ports, isEmpty);
++  });
++  test(
++      'cached approved inventory works offline, limits across restarts, flushes when online, and revocation clears it',
++      () async {
++    final dir = await Directory.systemTemp.createTemp('quick-check-');
++    addTearDown(() => dir.delete(recursive: true));
++    var binding = 'demo-key-one';
++    CheckScope scope() => (
++          origin: Uri.parse('https://example.invalid'),
++          device: '123456789',
++          binding: binding
++        );
++    int now = 1800000000, probes = 0;
++    bool online = true, allowed = true;
++    final reports = <Json>[];
++    MerchantChecks open() =>
++        MerchantChecks(File('${dir.path}/journal'), () async => scope(),
++            (s, op, version, body) async {
++          if (!online) throw const SocketException('offline fixture');
++          if (op == 'identity') return {'key_version': 2};
++          if (op == 'inventory')
++            return {
++              'device_id': s.device,
++              'store_id': 'g_demo',
++              'allowed': allowed,
++              'expires_at': now + 902,
++              'revision': 'a' * 64,
++              'entries': allowed ? [printer, payment] : []
++            };
++          reports.add(body);
++          return {'id': 'r_demo', 'state': 'completed'};
++        }, (row) async {
++          probes++;
++          return (outcome: 'reachable', latency: 2);
++        }, clock: () => now);
++    await open().sync();
++    expect(probes, 0);
++    online = false;
++    final result = await open().run();
++    expect(result.map((r) => r['name']), ['Demo printer', 'Demo terminal']);
++    expect(probes, 2);
++    await expectLater(open().run(), throwsA(isA<CheckFailure>()));
++    expect(probes, 2);
++    online = true;
++    await open().sync();
++    expect(reports.single['results'], [
++      {'id': 'i_a', 'outcome': 'reachable', 'latency_ms': 2},
++      {'id': 'i_b', 'outcome': 'reachable', 'latency_ms': 2}
++    ]);
++    now += 60;
++    allowed = false;
++    await open().sync();
++    online = false;
++    await expectLater(open().run(), throwsA(isA<CheckFailure>()));
++    expect(probes, 2);
++    allowed = true;
++    online = true;
++    await open().sync();
++    online = false;
++    binding = 'demo-key-two';
++    await expectLater(open().run(), throwsA(isA<CheckFailure>()));
++    expect(probes, 2);
++  });
++}
+diff --git a/flutter/test/steaddesk/quick_support_test.dart b/flutter/test/steaddesk/quick_support_test.dart
+new file mode 100644
+index 0000000..fbf8c6d
+--- /dev/null
++++ b/flutter/test/steaddesk/quick_support_test.dart
+@@ -0,0 +1,112 @@
++import 'package:flutter/material.dart';
++import 'package:flutter_test/flutter_test.dart';
++import 'package:flutter_hbb/steaddesk/ops_health.dart';
++import 'package:flutter_hbb/steaddesk/quick/support.dart';
++import 'package:flutter_hbb/steaddesk/quick/check.dart';
++
++class _Fixture implements HealthApi {
++  bool admin = false, enabled = false;
++  List<Json> rows = [
++    {
++      'id': 'i_1',
++      'name': 'Demo printer',
++      'type': 'printer',
++      'ip': '192.168.2.5',
++      'model': 'Demo'
++    }
++  ];
++  final writes = <String>[];
++  @override
++  Future<Json> request(String method, String route, [Json? body]) async {
++    if (method != 'GET') writes.add(method);
++    if (route.endsWith('/check-policy')) {
++      if (method == 'PUT') enabled = body!['enabled'];
++      return {
++        'enabled': enabled,
++        'deployment_allowed': true,
++        'allowed': enabled,
++        'can_edit': admin,
++        'store_id': 'demo'
++      };
++    }
++    if (route.endsWith('/health'))
++      return {
++        'merchant_checks': [
++          {
++            'observed_at': 1800000000,
++            'results': [
++              {
++                'name': 'Demo printer',
++                'ip': '192.168.2.5',
++                'outcome': 'reachable',
++                'latency_ms': 8
++              }
++            ]
++          }
++        ]
++      };
++    if (method == 'POST') rows.add({'id': 'i_2', ...body!});
++    if (method == 'PATCH') rows[1].addAll(body!);
++    if (method == 'DELETE') rows.removeLast();
++    return {'entries': rows};
++  }
++
++  @override
++  Stream<String> changes() => const Stream.empty();
++  @override
++  void close() {}
++}
++
++void main() {
++  testWidgets(
++      'server viewer can read inventory and last report; only admin can edit policy and inventory',
++      (t) async {
++    final api = _Fixture();
++    final store = HealthStore(api, isCurrent: () => true);
++    store.devices = {
++      '123': DeviceHealth.from(
++          {'device_id': '123', 'status': 'normal', 'reasons': []})
++    };
++    Future<void> show(Widget child) async {
++      await t.pumpWidget(MaterialApp(home: Scaffold(body: child)));
++      await t.pumpAndSettle();
++    }
++
++    await show(storeInventory(store, '123'));
++    expect(find.text('Demo printer'), findsOneWidget);
++    expect(find.text('新增设备'), findsNothing);
++    expect(t.widget<SwitchListTile>(find.byType(SwitchListTile)).onChanged,
++        isNull);
++    await show(merchantReport(store, '123'));
++    await t.tap(find.text('最近商户快速检查'));
++    await t.pumpAndSettle();
++    expect(find.textContaining('8 ms'), findsOneWidget);
++    api.admin = true;
++    await show(storeInventory(store, '123'));
++    await t.tap(find.byType(SwitchListTile));
++    await t.pumpAndSettle();
++    await t.tap(find.text('新增设备'));
++    await t.pumpAndSettle();
++    await t.enterText(find.byType(TextFormField).at(0), 'Demo host');
++    await t.enterText(find.byType(TextFormField).at(1), '192.168.2.5');
++    await t.tap(find.text('保存'));
++    await t.pumpAndSettle();
++    expect(find.text('本店已登记此 IP'), findsOneWidget);
++    await t.enterText(find.byType(TextFormField).at(1), '192.168.2.6');
++    await t.tap(find.text('保存'));
++    await t.pumpAndSettle();
++    expect(find.text('Demo host'), findsOneWidget);
++    await t.tap(find.byTooltip('编辑设备').last);
++    await t.pumpAndSettle();
++    await t.enterText(find.byType(TextFormField).at(0), 'Demo edited');
++    await t.tap(find.text('保存'));
++    await t.pumpAndSettle();
++    expect(find.text('Demo edited'), findsOneWidget);
++    await t.tap(find.byTooltip('删除设备').last);
++    await t.pumpAndSettle();
++    await t.tap(find.widgetWithText(TextButton, '删除'));
++    await t.pumpAndSettle();
++    expect(find.text('Demo edited'), findsNothing);
++    expect(api.writes, ['PUT', 'POST', 'PATCH', 'DELETE']);
++  });
++}
+diff --git a/src/lang/cn.rs b/src/lang/cn.rs
+index 0fed0aa..f099418 100644
+--- a/src/lang/cn.rs
++++ b/src/lang/cn.rs
+@@ -1,6 +1,33 @@
+ lazy_static::lazy_static! {
+ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
+     [
++        ("Quick check", "快速检查"),
++        ("Checking registered devices…", "正在检查已登记的设备…"),
++        ("Check timed out", "超时"),
++        ("Check unavailable", "未知"),
++        ("Using the offline store inventory.", "正在使用本店离线清单。"),
++        ("Check report pending upload.", "检查结果等待上报。"),
++        ("Check report uploaded.", "检查结果已上报。"),
++        ("The server declined the check report.", "服务器拒绝了本次上报。"),
++        ("Printer unreachable. Check its power and network cable.", "打印机连不上，请检查电源和网线。"),
++        ("Device unreachable. Check its power and network connection.", "设备连不上，请检查电源和网络连接。"),
++        ("Some checks were unavailable. Check network permissions.", "部分设备未能检测，请核对系统网络权限。"),
++        ("A quick check is in progress. Try again shortly.", "已有快速检查正在进行，请稍后再试。"),
++        ("Check cache is invalid.", "检查缓存无效。"),
++        ("The device identity changed. Start a new check.", "设备身份已更改，请重新检查。"),
++        ("Store approval is missing or the offline inventory expired.", "门店尚未获准检查，或离线清单已过期。"),
++        ("Check receipt is invalid.", "上报回执无效。"),
++        ("Wait one minute between quick checks.", "每分钟最多检查一次，请稍后再试。"),
++        ("No registered devices at this store.", "本店暂无已登记的设备。"),
++        ("Pending reports are full. Reconnect before checking again.", "待上报记录已满，请联网后再试。"),
++        ("Check approval expired. Reconnect to refresh it.", "检查授权已过期，请联网刷新。"),
++        ("The device identity is not configured.", "尚未配置设备身份。"),
++        ("Device storage is unavailable.", "设备存储不可用。"),
++        ("Cannot check now. Verify the device configuration and try again.", "暂时无法检查，请核对设备配置后重试。"),
++        ("Device signing is unavailable.", "设备签名不可用。"),
++        ("Invalid check origin.", "检查服务器地址无效。"),
++        ("The server declined the check request.", "服务器未接受检查请求。"),
++        ("Payment devices use ping only.", "支付设备仅检查网络连通性（ping）。"),
+         ("Merchant force-stopped the app", "商户已强行停止应用"),
+         ("Merchant paused remote support", "商户已暂停远程支持"),
+         ("Stop status unavailable", "无法读取停止状态"),
+diff --git a/src/lang/es.rs b/src/lang/es.rs
+index 7bb83f1..42341dd 100644
+--- a/src/lang/es.rs
++++ b/src/lang/es.rs
+@@ -1,6 +1,35 @@
+ lazy_static::lazy_static! {
+ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
+     [
++        ("Quick check", "Comprobación rápida"),
++        ("Checking registered devices…", "Comprobando los dispositivos registrados…"),
++        ("Reachable", "Accesible"),
++        ("Unreachable", "Inaccesible"),
++        ("Check timed out", "Tiempo de espera agotado"),
++        ("Check unavailable", "Comprobación no disponible"),
++        ("Using the offline store inventory.", "Se está utilizando el inventario sin conexión de esta tienda."),
++        ("Check report pending upload.", "El resultado está pendiente de envío."),
++        ("Check report uploaded.", "El resultado se ha enviado."),
++        ("The server declined the check report.", "El servidor rechazó el resultado."),
++        ("Printer unreachable. Check its power and network cable.", "No se puede acceder a la impresora. Compruebe la alimentación y el cable de red."),
++        ("Device unreachable. Check its power and network connection.", "No se puede acceder al dispositivo. Compruebe la alimentación y la conexión de red."),
++        ("Some checks were unavailable. Check network permissions.", "Algunas comprobaciones no estuvieron disponibles. Revise los permisos de red."),
++        ("A quick check is in progress. Try again shortly.", "Ya hay una comprobación en curso. Inténtelo más tarde."),
++        ("Check cache is invalid.", "La caché de comprobaciones no es válida."),
++        ("The device identity changed. Start a new check.", "La identidad del dispositivo cambió. Inicie otra comprobación."),
++        ("Store approval is missing or the offline inventory expired.", "Falta la aprobación de la tienda o su inventario sin conexión ha caducado."),
++        ("Check receipt is invalid.", "El acuse de recibo del resultado no es válido."),
++        ("Wait one minute between quick checks.", "Espere un minuto entre comprobaciones rápidas."),
++        ("No registered devices at this store.", "Esta tienda no tiene dispositivos registrados."),
++        ("Pending reports are full. Reconnect before checking again.", "La cola de resultados está llena. Vuelva a conectarse antes de repetir la comprobación."),
++        ("Check approval expired. Reconnect to refresh it.", "La autorización ha caducado. Conéctese para renovarla."),
++        ("The device identity is not configured.", "La identidad del dispositivo no está configurada."),
++        ("Device storage is unavailable.", "El almacenamiento del dispositivo no está disponible."),
++        ("Cannot check now. Verify the device configuration and try again.", "No se puede comprobar ahora. Revise la configuración del dispositivo y vuelva a intentarlo."),
++        ("Device signing is unavailable.", "La firma del dispositivo no está disponible."),
++        ("Invalid check origin.", "La dirección del servidor de comprobaciones no es válida."),
++        ("The server declined the check request.", "El servidor rechazó la solicitud de comprobación."),
++        ("Payment devices use ping only.", "Los dispositivos de pago solo se comprueban con ping."),
+         ("Merchant force-stopped the app", "El comercio forzó la detención de la aplicación"),
+         ("Merchant paused remote support", "El comercio pausó el soporte remoto"),
+         ("Stop status unavailable", "No se pudo consultar el estado de detención"),
