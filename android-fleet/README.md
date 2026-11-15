@@ -3,7 +3,11 @@
 The normal merchant application starts this component through `FleetEntry` after
 native initialization, on merchant app launch, on boot/package replacement, through
 the existing authenticated merchant recovery wake, and through a persisted six-hour
-JobScheduler task. Wake only requests evaluation. It grants no installation rights.
+JobScheduler task. Wake only requests evaluation. It grants no installation rights. Receivers only
+persist short OS callback facts and schedule a job; they never wait for the worker
+queue or perform network/download work. Jobs drain the private callback inbox,
+then reconcile installed state, and retain matching system confirmation intents
+for a user-tapped notification.
 The support and disabled merchant source selections contain only a no-op entry.
 Neither selection includes the updater's classes, manifest entries or APK verifier.
 

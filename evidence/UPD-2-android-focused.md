@@ -26,11 +26,18 @@ The dependency digests used for these local checks:
 | com.android.tools.build:apksig:8.1.4 | `468ee1852fa12461c6629608fe47be70e50f60be7c4744bb7f62ca48e85c0a6c` |
 | google-java-format 1.24.0 all-deps | `812f805f58112460edf01bf202a8e61d0fd1f35c0d4fabd54220640776ec57a1` |
 
-Java production sources were formatted once with the pinned formatter after
-implementation. No formatter dependency is added to the shipped app.
+Java production sources were formatted with the pinned formatter after
+implementation and review fixes. No formatter dependency is added to the shipped app.
 
 Native proof / root / selector / JNI evidence is recorded separately in
 `UPD-2-native-focused.md`. The emulator fixture owns its separate real HTTPS and
 PackageInstaller evidence and records source hashes. No physical firmware approval,
 production authorization, four-hour observation acceptance, or full application
 build is inferred from these focused checks.
+
+The production receiver was reviewed for Android execution limits and changed to
+short durable capture plus JobScheduler scheduling only. Callback queue snapshots
+and acknowledgments hold no locks across network or installer work. The full set
+of production Java sources, including this inbox and receiver, passes the focused
+SDK36/apksig compile; receiver/job lifecycle on a device remains outside the runtime
+fixture coverage. Runtime and policy source hashes are unchanged by this adapter fix.

@@ -8,7 +8,7 @@ public final class FleetJobService extends JobService {
     FleetUpdater.WORK.execute(
         () -> {
           try {
-            FleetUpdater.runtime(this).tick();
+            FleetUpdater.run(this);
           } catch (Exception | LinkageError ignored) {
           } finally {
             jobFinished(parameters, false);

@@ -8,7 +8,7 @@ import java.util.concurrent.*;
 
 /** Normal launch, six-hour job, package-replaced/boot and local wake all share this entry. */
 public final class FleetUpdater {
-  static final int POLL_JOB = 67021, OBSERVE_JOB = 67022, OFFER = 67023;
+  static final int POLL_JOB = 67021, OBSERVE_JOB = 67022, OFFER = 67023, WAKE_JOB = 67024;
   static final ExecutorService WORK = Executors.newSingleThreadExecutor();
 
   static FleetRuntime runtime(Context context) {
@@ -16,16 +16,36 @@ public final class FleetUpdater {
   }
 
   public static void start(Context context) {
+    schedule(context);
+  }
+
+  /** Receiver-safe: only local scheduler calls, no executor queue waits or native/network work. */
+  public static void schedule(Context context) {
     if (Build.VERSION.SDK_INT < 28) return;
     Context app = context.getApplicationContext();
     JobScheduler scheduler = app.getSystemService(JobScheduler.class);
+    if (scheduler.getPendingJob(POLL_JOB) == null)
+      scheduler.schedule(
+          new JobInfo.Builder(POLL_JOB, new ComponentName(app, FleetJobService.class))
+              .setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY)
+              .setPersisted(true)
+              .setPeriodic(6 * 60 * 60 * 1000L)
+              .build());
     scheduler.schedule(
-        new JobInfo.Builder(POLL_JOB, new ComponentName(app, FleetJobService.class))
+        new JobInfo.Builder(WAKE_JOB, new ComponentName(app, FleetJobService.class))
             .setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY)
+            .setMinimumLatency(0)
+            .setOverrideDeadline(30_000)
             .setPersisted(true)
-            .setPeriodic(6 * 60 * 60 * 1000L)
             .build());
-    tick(app);
+  }
+
+  static void run(Context context) throws Exception {
+    try {
+      FleetInbox.drain(context);
+    } finally {
+      runtime(context).tick();
+    }
   }
 
   public static void tick(Context context) {
@@ -33,7 +53,7 @@ public final class FleetUpdater {
     WORK.execute(
         () -> {
           try {
-            runtime(app).tick();
+            run(app);
           } catch (Exception | LinkageError ignored) {
             /* durable fixed-code evidence is written by runtime */
           }
