@@ -72,3 +72,11 @@ Keys and every generated binary are destroyed with the temporary directory.
 It does **not** prove WinVerifyTrust, native installation, service identity or
 Windows trust-store behavior. See `EVIDENCE-local.json` for the observed local
 results and explicit Windows NOT_RUN boundary.
+
+Receipt-gap regressions additionally reload a durable known installer result
+after trusted time fails before its receipt can be queued. A strict mock backend
+checks legal Windows report transitions: 3010 replays pending_reboot before
+postboot health, failure replays install_failed, and code0 advances the server
+with an OS-only receipt while native readback remains unverified. Queued pending
+receipts retain their original body and sequence across send failure and ACK
+loss. None of these recovery paths repeats preparation, authorization or launch.

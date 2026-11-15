@@ -1,15 +1,32 @@
 {
   "authenticode_valid_vectors": 5,
   "controller_tests": {
-    "core_sha256": "edeac63296853072e9593f3692a6e46e3e55c7b5e29de450c44353887bf93690",
+    "core_sha256": "a8b32ea4f5151629f7f26ce5320642d96166eb3f828c0c7557b576f367e1a322",
     "failed": 0,
     "final_barrier_cases": [
       "permit expires during submitted-state fsync: zero launches",
       "same-build service PID/creation/hash changes during submitted-state fsync: zero launches",
       "active/unknown recovery session is not merchant_pause"
     ],
-    "passed": 17,
+    "passed": 21,
     "public_patch_source_matches": true,
+    "receipt_gap_regression": {
+      "after_fix": {
+        "failed": 0,
+        "passed": 21
+      },
+      "before_fix": {
+        "failed": 3,
+        "passed": 17
+      },
+      "cases": [
+        "durable3010 replays pending_reboot3010 before postboot health",
+        "durable1603 replays failed/install_failed before local freeze",
+        "durable0 with unverified readback replays one OS receipt without health, later heartbeat only after readback",
+        "queued3010 preserves exact body/seq for transport failure and ACK loss"
+      ],
+      "install_operations_repeated": false
+    },
     "scope": "actual portable controller and real cryptography with explicit mocked OS/HTTP Host"
   },
   "cross_compile": {
