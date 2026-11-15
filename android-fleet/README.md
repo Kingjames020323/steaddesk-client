@@ -67,6 +67,21 @@ the device obtains a new nonce-bound online safety permit and a new server commi
 with `install_authorized=true`. Cached permits, identical commit retries, push
 messages and reconciliation responses never authorize installation.
 
+Before assignment polling, the production host archives the installed base APK and
+all installed splits under `noBackupFilesDir/fleet-update/baselines/version-N`.
+Every archived APK passes complete platform-level apksig verification and matches
+the installed signer. The archive checks that the installed version and paths stay
+stable while copying, fsyncs each file and a canonical identity receipt, then
+atomically renames the directory. The receipt records archive schema 1, the actual
+package/version/certificate, every artifact digest and a digest of the identity.
+The app data schema is explicitly undeclared; automatic rollback is always false.
+Insufficient space (including a 16 MiB margin), changed identity or an equivocal
+existing archive stops evaluation. Existing archives are not overwritten.
+The exact previously verified release envelope is retained when known. The initial
+or otherwise untracked package records that its baseline manifest is unavailable.
+The saved archive is checked again before sending the installation attempt, and
+cannot itself authorize any install or rollback.
+
 `noBackupFilesDir/fleet-update` holds an atomic state file, a process/OS file lock,
 private candidate APK, an ordered durable report outbox and fixed-code JSONL
 events. Identity secrets, authentication headers and permits are not logged or

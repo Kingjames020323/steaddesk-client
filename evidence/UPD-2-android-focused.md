@@ -41,3 +41,13 @@ and acknowledgments hold no locks across network or installer work. The full set
 of production Java sources, including this inbox and receiver, passes the focused
 SDK36/apksig compile; receiver/job lifecycle on a device remains outside the runtime
 fixture coverage. Runtime and policy source hashes are unchanged by this adapter fix.
+
+The S-05 baseline-retention follow-up adds `FleetArchive`: private fsynced and
+atomically published base/split APKs, full apksig certificate verification,
+installed identity stability checks and a canonical schema/digest receipt. First
+baseline manifest absence and undeclared app data schema are recorded explicitly;
+no archive can authorize rollback. Its seven focused space-reservation boundary
+checks pass (exact reserve, insufficient space, zero/negative size, overflow and
+normal large artifact). Real baseline-file and corruption-rejection evidence is
+tracked separately in the emulator fixture report. This note does not promote those
+checks into completed emulator evidence before that fixture's report exists.

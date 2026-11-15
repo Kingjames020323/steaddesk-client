@@ -21,6 +21,8 @@ final class FleetHost implements FleetRuntime.Host {
   public JSONObject proof(String method, String path, String body, long version) throws Exception {
     FleetPolicy.require(
         FleetNative.initialize(io.flutter.util.PathUtils.getDataDirectory(context)), "no_safety");
+    if (path.equals("/ops/v1/device/update-assignment")) FleetArchive.preserve(context);
+    if (path.equals("/ops/v1/device/update-attempts")) FleetArchive.requireCurrent(context);
     String value = FleetNative.proof(method, path, body, version);
     FleetPolicy.require(value != null && !value.isEmpty(), "no_safety");
     return FleetPolicy.Strict.parse(value);

@@ -476,7 +476,13 @@ public final class FleetRuntime {
               .put("sha256", manifest.getString("sha256"))
               .put("signer", manifest.getString("signer_cert_sha256"))
               .put("started", at)
-              .put("sequence", manifest.getLong("sequence"));
+              .put("sequence", manifest.getLong("sequence"))
+              .put(
+                  "release_envelope",
+                  new JSONObject()
+                      .put("key_id", assignment.getString("key_id"))
+                      .put("manifest", assignment.getString("manifest"))
+                      .put("signature", assignment.getString("signature")));
       state.put("transaction", transaction).put("last_day", day).put("last_started", at);
       save();
       reserved = true;
