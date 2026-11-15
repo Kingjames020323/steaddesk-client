@@ -29,6 +29,12 @@ if cases not in ("", "0", "1", "false", "true"):
     raise ValueError("STEADDESK_CASES must be true, false, 1 or 0")
 cases = not merchant and cases in ("true", "1")
 lib = tree / "flutter/lib/steaddesk"
+fleet_admin = os.environ.get("STEADDESK_FLEET_ADMIN", "").strip().lower()
+if fleet_admin not in ("", "0", "1", "false", "true"):
+    raise ValueError("STEADDESK_FLEET_ADMIN must be true, false, 1 or 0")
+fleet_admin_enabled = not merchant and fleet_admin in ("true", "1")
+fleet_module = "fleet_admin_host" if fleet_admin_enabled else "fleet_admin_off"
+(lib / "fleet_admin_api.dart").write_text(f"export 'fleet/{fleet_module}.dart';\n", encoding="utf-8")
 help_flag = os.environ.get("STEADDESK_HELP", "").strip().lower()
 if help_flag not in ("", "0", "1", "false", "true"):
     raise ValueError("STEADDESK_HELP must be true, false, 1 or 0")
@@ -70,6 +76,7 @@ def dart_string(value):
 
 (tree / "flutter/lib/steaddesk/merchant_build.dart").write_text(
     "const merchantEdition = " + str(merchant).lower() + ";\n"
+    "const fleetAdminEnabled = " + str(fleet_admin_enabled).lower() + ";\n"
     "const helpEnabled = " + str(help_enabled).lower() + ";\n"
     "const opsHealthEnabled = " + str(ops_health_enabled).lower() + ";\n"
     "const opsGroupsEnabled = " + str(ops_groups_enabled).lower() + ";\n"
