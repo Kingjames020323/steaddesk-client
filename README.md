@@ -67,6 +67,12 @@ Support builds can enable server-managed shared and personal groups with the bui
 
 Set `STEADDESK_OPS_HEALTH=true` for a Windows support build with the health API. It defaults to off, independently of the groups flag. Device cards and the session sidebar show the latest observation and its timestamp. After three minutes without a fresh observation the status changes to Unknown. The home alert list supports claiming and closing an alert with a reason. A device card can request a check of its registered store inventory using the existing signed-in API origin.
 
+### Windows merchant fleet preview
+
+Select `steaddesk_fleet_update` in a manual preview branch build to include the Windows x64 merchant updater. Configure the HTTPS origins and test public release key used for the preview. Set `STEADDESK_FLEET_WINDOWS_PROFILE` to the 64-character lowercase SHA-256 of the approved Windows installation profile. A missing or mismatched profile holds installation. The default build leaves the updater disabled.
+
+Sign the finished merchant EXE on the signing workstation before releasing it to test devices. Its signed version resource binds the SHA-256 of the service executable packed inside. A successful launcher exit records submission. Health requires a running replacement service at the expected path with the expected version and file digest. Exit 3010 also requires a later boot. An interrupted attempt with an unknown installer result requires manual review.
+
 ### Publisher and integration test builds
 
 On a preview branch, the **Build SteadDesk** manual workflow accepts
