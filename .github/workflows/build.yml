@@ -625,7 +625,7 @@ jobs:
       shell: bash
       run: bash .distribution/scripts/apply-patches.sh "$GITHUB_WORKSPACE"
     - name: Test signed Windows fleet packages with a disposable installer
-      if: matrix.edition == 'merchant'
+      if: matrix.edition == 'merchant' && matrix.job.arch == 'x86_64'
       shell: pwsh
       run: |
         pwsh -NoLogo -NoProfile -File .distribution/scripts/tests/windows-fleet/run.ps1 -RepoRoot .distribution
