@@ -54,7 +54,15 @@ fleet_module = "fleet_admin_host" if fleet_admin_enabled else "fleet_admin_off"
 help_flag = os.environ.get("STEADDESK_HELP", "").strip().lower()
 if help_flag not in ("", "0", "1", "false", "true"):
     raise ValueError("STEADDESK_HELP must be true, false, 1 or 0")
-help_enabled = help_flag in ("true", "1")
+callback = os.environ.get("STEADDESK_CALLBACK", "").strip().lower()
+if callback not in ("", "0", "1", "false", "true"):
+    raise ValueError("STEADDESK_CALLBACK must be true, false, 1 or 0")
+callback_enabled = callback in ("true", "1")
+(lib / "callback_build.dart").write_text(
+    f"const merchantCallbacksEnabled = {str(callback_enabled and merchant).lower()};\n"
+    f"const supportCallbacksEnabled = {str(callback_enabled and not merchant).lower()};\n",
+    encoding="utf-8")
+help_enabled = help_flag in ("true", "1") or callback_enabled
 support_help = not merchant and help_enabled
 module = "support_help_host" if support_help else "support_help_off"
 (lib / "support_help_header_api.dart").write_text(f"export '{module}.dart';\n", encoding="utf-8")

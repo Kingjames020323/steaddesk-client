@@ -186,5 +186,28 @@
     "Invalid check origin.",
     "The server declined the check request.",
     "Payment devices use ping only."
+  ],
+  "Merchant callback booking": [
+    "Contact name",
+    "Callback phone number",
+    "Preferred language",
+    "Reason for callback",
+    "Store time zone (IANA)",
+    "Store time zone: %s",
+    "Callback time",
+    "As soon as possible",
+    "In 30 minutes",
+    "After the store closes",
+    "Choose a store time",
+    "Store date and time (YYYY-MM-DDTHH:mm)",
+    "Confirm callback",
+    "Reschedule callback",
+    "Two calls were missed. Please schedule a new callback.",
+    "Check the callback details and store time.",
+    "The request changed. Review the latest callback options.",
+    "Callback booking is unavailable for this request.",
+    "Cannot reach callback service. Check your connection and retry.",
+    "Scheduled callback (store time): %s",
+    "The first call was missed. Support will try again."
   ]
 }

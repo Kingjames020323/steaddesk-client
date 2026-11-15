@@ -6,6 +6,10 @@ name: Build SteadDesk
     tags: ['v1.5.0-sd.*']
   workflow_dispatch:
     inputs:
+      steaddesk_callback:
+        description: Enable scheduled help callbacks on preview/ui-v7
+        type: boolean
+        default: false
       steaddesk_toolbar:
         description: Enable the three session support actions in this preview
         type: boolean
@@ -38,6 +42,7 @@ permissions:
   contents: read
 env:
   VERIFY_OPS_PROFILE: ${{ inputs.steaddesk_ops_integration && 'true' || 'false' }}
+  STEADDESK_CALLBACK: ${{ github.event_name == 'workflow_dispatch' && github.ref_type == 'branch' && github.ref == 'refs/heads/preview/ui-v7' && inputs.steaddesk_callback && 'true' || 'false' }}
   STEADDESK_TOOLBAR: ${{ github.event_name == 'workflow_dispatch' && github.ref_type == 'branch' && inputs.steaddesk_toolbar && 'true' || 'false' }}
   STEADDESK_FLEET_ADMIN: ${{ github.event_name == 'workflow_dispatch' && github.ref_type == 'branch' && inputs.steaddesk_fleet_admin && 'true' || 'false' }}
   STEADDESK_FLEET_UPDATE: ${{ github.event_name == 'workflow_dispatch' && github.ref_type == 'branch' && inputs.steaddesk_fleet_update && 'true' || 'false' }}

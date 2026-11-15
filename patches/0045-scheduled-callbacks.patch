@@ -1,0 +1,1411 @@
+diff --git a/flutter/lib/steaddesk/callback_build.dart b/flutter/lib/steaddesk/callback_build.dart
+new file mode 100644
+index 0000000..57822b3
+--- /dev/null
++++ b/flutter/lib/steaddesk/callback_build.dart
+@@ -0,0 +1,2 @@
++const merchantCallbacksEnabled = false;
++const supportCallbacksEnabled = false;
+diff --git a/flutter/lib/steaddesk/help/merchant_callback.dart b/flutter/lib/steaddesk/help/merchant_callback.dart
+new file mode 100644
+index 0000000..b4421f9
+--- /dev/null
++++ b/flutter/lib/steaddesk/help/merchant_callback.dart
+@@ -0,0 +1,207 @@
++import 'dart:convert';
++
++import 'package:flutter/material.dart';
++import 'package:uuid/uuid.dart';
++
++import 'merchant_help_client.dart';
++
++class MerchantCallback extends StatefulWidget {
++  final String Function(String) label;
++  final bool busy, reschedule;
++  final Future<HelpJson> Function() prepare;
++  final Future<void> Function(int version, HelpJson fields, String key) book;
++  const MerchantCallback({
++    super.key,
++    required this.label,
++    required this.busy,
++    required this.reschedule,
++    required this.prepare,
++    required this.book,
++  });
++  @override
++  State<MerchantCallback> createState() => _MerchantCallbackState();
++}
++
++class _MerchantCallbackState extends State<MerchantCallback> {
++  final name = TextEditingController();
++  final phone = TextEditingController();
++  final language = TextEditingController();
++  final reason = TextEditingController();
++  final custom = TextEditingController();
++  final manualZone = TextEditingController();
++  HelpJson? options;
++  String slot = 'asap';
++  String? error, retryPayload, retryKey;
++  bool working = false;
++
++  @override
++  void dispose() {
++    for (final c in [name, phone, language, reason, custom, manualZone]) {
++      c.dispose();
++    }
++    super.dispose();
++  }
++
++  Future<void> prepare() async {
++    setState(() {
++      working = true;
++      error = null;
++    });
++    try {
++      final data = await widget.prepare();
++      if (!mounted) return;
++      if (data['version'] is! int ||
++          data['after_close'] is! bool ||
++          data['manual_zone_required'] is! bool) throw const FormatException();
++      name.text = data['name'] as String? ?? '';
++      phone.text = data['phone'] as String? ?? '';
++      language.text = data['language'] as String? ?? '';
++      reason.text = data['reason'] as String? ?? '';
++      options = data;
++    } catch (e) {
++      error = errorLabel(e);
++    } finally {
++      if (mounted) setState(() => working = false);
++    }
++  }
++
++  String errorLabel(Object e) {
++    if (e is HelpFailure) {
++      if (e.status == 400 || e.status == 422)
++        return 'Check the callback details and store time.';
++      if (e.status == 409 || e.status == 412)
++        return 'The request changed. Review the latest callback options.';
++      if ([401, 403, 404].contains(e.status) || e.code == 'owner') {
++        return 'Callback booking is unavailable for this request.';
++      }
++    }
++    return 'Cannot reach callback service. Check your connection and retry.';
++  }
++
++  bool get valid {
++    final number = phone.text.trim();
++    final digits = number.replaceAll(RegExp('[^0-9]'), '');
++    return name.text.trim().isNotEmpty &&
++        language.text.trim().isNotEmpty &&
++        reason.text.trim().isNotEmpty &&
++        RegExp(r'^\+?[0-9() .-]+$').hasMatch(number) &&
++        digits.length >= 7 &&
++        digits.length <= 15 &&
++        (options?['manual_zone_required'] != true ||
++            manualZone.text.trim().isNotEmpty) &&
++        (slot != 'custom' ||
++            RegExp(r'^\d{4}-\d\d-\d\dT\d\d:\d\d$')
++                .hasMatch(custom.text.trim()));
++  }
++
++  Future<void> submit() async {
++    if (!valid || working) return;
++    final fields = <String, dynamic>{
++      'name': name.text.trim(),
++      'phone': phone.text.trim(),
++      'language': language.text.trim(),
++      'reason': reason.text.trim(),
++      'slot': slot,
++      if (slot == 'custom') 'local_time': custom.text.trim(),
++      if (options!['manual_zone_required'] == true)
++        'manual_zone': manualZone.text.trim(),
++    };
++    final payload = jsonEncode(fields);
++    if (payload != retryPayload) {
++      retryKey = const Uuid().v4();
++      retryPayload = payload;
++    }
++    setState(() {
++      working = true;
++      error = null;
++    });
++    try {
++      await widget.book(options!['version'], fields, retryKey!);
++      if (mounted) clear();
++    } catch (e) {
++      if (mounted) {
++        if (e is HelpFailure && [409, 412].contains(e.status)) clear();
++        error = errorLabel(e);
++      }
++    } finally {
++      if (mounted) setState(() => working = false);
++    }
++  }
++
++  void clear() {
++    for (final c in [name, phone, language, reason, custom, manualZone]) {
++      c.clear();
++    }
++    options = null;
++    retryPayload = retryKey = error = null;
++    slot = 'asap';
++  }
++
++  @override
++  Widget build(BuildContext context) {
++    final t = widget.label;
++    final ready = !working && !widget.busy;
++    Widget field(String label, TextEditingController c, int max,
++            {TextInputType? keyboard, String? hint}) =>
++        TextField(
++            controller: c,
++            enabled: ready,
++            maxLength: max,
++            keyboardType: keyboard,
++            autocorrect: false,
++            enableSuggestions: false,
++            enableIMEPersonalizedLearning: false,
++            decoration: InputDecoration(
++                labelText: t(label), hintText: hint, counterText: ''),
++            onChanged: (_) => setState(() {}));
++    return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
++      if (widget.reschedule)
++        Text(t('Two calls were missed. Please schedule a new callback.')),
++      if (options == null)
++        OutlinedButton(
++            onPressed: ready ? prepare : null,
++            child: Text(t(widget.reschedule
++                ? 'Reschedule callback'
++                : 'Request a callback')))
++      else ...[
++        field('Contact name', name, 100),
++        field('Callback phone number', phone, 48,
++            keyboard: TextInputType.phone),
++        field('Preferred language', language, 48),
++        field('Reason for callback', reason, 500),
++        if (options!['manual_zone_required'] == true)
++          field('Store time zone (IANA)', manualZone, 64,
++              hint: 'America/Los_Angeles')
++        else if (options!['zone'] is String)
++          Text(t('Store time zone: %s').replaceFirst('%s', options!['zone'])),
++        DropdownButtonFormField<String>(
++          value: slot,
++          decoration: InputDecoration(labelText: t('Callback time')),
++          items: [
++            for (final e in {
++              'asap': 'As soon as possible',
++              'in_30m': 'In 30 minutes',
++              if (options!['after_close'] == true)
++                'after_close': 'After the store closes',
++              'custom': 'Choose a store time',
++            }.entries)
++              DropdownMenuItem(value: e.key, child: Text(t(e.value))),
++          ],
++          onChanged: ready ? (v) => setState(() => slot = v!) : null,
++        ),
++        if (slot == 'custom')
++          field('Store date and time (YYYY-MM-DDTHH:mm)', custom, 16,
++              keyboard: TextInputType.datetime),
++        FilledButton(
++            onPressed: ready && valid ? submit : null,
++            child: Text(t('Confirm callback'))),
++        TextButton(
++            onPressed: ready ? () => setState(clear) : null,
++            child: Text(t('Cancel'))),
++      ],
++      if (error != null)
++        Text(t(error!),
++            style: TextStyle(color: Theme.of(context).colorScheme.error)),
++    ]);
++  }
++}
+diff --git a/flutter/lib/steaddesk/help/merchant_help_client.dart b/flutter/lib/steaddesk/help/merchant_help_client.dart
+index efae68b..d6cbef6 100644
+--- a/flutter/lib/steaddesk/help/merchant_help_client.dart
++++ b/flutter/lib/steaddesk/help/merchant_help_client.dart
+@@ -97,6 +97,7 @@ class MerchantHelpClient {
+   HelpJson? record, view;
+   List<HelpJson> cards = [];
+   bool screenshots = false;
++  bool? callbackAvailable;
+   String? notice;
+   bool get pending => record != null && view == null;
+   bool get attachmentPending => record?['png'] != null;
+@@ -146,11 +147,16 @@ class MerchantHelpClient {
+ 
+   Future<void> capabilities() async {
+     screenshots = false;
++    callbackAvailable = null;
+     final current = await owner();
+     try {
+       final data = await send(
+           current.origin, 'GET', 'capabilities', null, null, null, null);
++      await owner();
+       screenshots = data['screenshots'] == true;
++      callbackAvailable = data['callback'] == true;
++    } on HelpFailure catch (e) {
++      if (e.status == 404) callbackAvailable = false;
+     } catch (_) {/* Older or unreachable servers default to text only. */}
+   }
+ 
+@@ -236,7 +242,46 @@ class MerchantHelpClient {
+     record!.remove('signed');
+     final action = record!['action'];
+     if (action is Map && version > action['version']) record!.remove('action');
+-    record!['view'] = view = data;
++    // Journal only receipt status. Contact information belongs to the callback
++    // record even if a newer server extends its response with additional fields.
++    final callback = data['callback'];
++    final safeView = <String, dynamic>{
++      for (final field in [
++        'id',
++        'state',
++        'version',
++        'priority',
++        'position',
++        'created_at',
++        'updated_at',
++        'callback_requested_at',
++        'queued_at',
++        'lane',
++        'ahead',
++        'eta_minutes',
++        'queue_updated_at',
++        're_register_required',
++        'handler',
++        'claimed_at',
++        'ended_at',
++        'close_result',
++        'feedback'
++      ])
++        if (data.containsKey(field)) field: data[field],
++      if (callback is Map)
++        'callback': {
++          for (final field in [
++            'state',
++            'due_at',
++            'due_local',
++            'zone',
++            'attempts',
++            'slot'
++          ])
++            if (callback.containsKey(field)) field: callback[field]
++        },
++    };
++    record!['view'] = view = safeView;
+     if (data['state'] != 'queued') cards = [];
+     if (data['state'] == 'closed' || data['state'] == 'cancelled') {
+       record!.remove('png');
+@@ -323,7 +368,38 @@ class MerchantHelpClient {
+     await save();
+   }
+ 
++  Future<HelpJson> callbackOptions() async {
++    await syncAttachmentVersion();
++    return call('GET', 'me/callback-options');
++  }
++
++  Future<void> bookCallback(
++      String ticket, int version, HelpJson fields, String key) async {
++    await owner();
++    if (view?['id'] != ticket ||
++        view?['version'] != version ||
++        record?['action'] != null) {
++      throw HelpFailure(409);
++    }
++    try {
++      final result = await call('POST', 'me/callback',
++          body: fields, key: key, version: version);
++      await accept(result);
++    } catch (e) {
++      // The response may have been lost after commit. Reconcile the receipt
++      // before allowing another attempt. The booking body stays in RAM.
++      try {
++        await accept(await call('GET', 'me'));
++      } catch (_) {}
++      if (view?['id'] == ticket &&
++          view?['version'] != version &&
++          view?['callback']?['state'] == 'scheduled') return;
++      rethrow;
++    }
++  }
++
+   Future<void> act(String action, HelpJson body) async {
++    if (action == 'callback' && body.isNotEmpty) throw HelpFailure(400);
+     if (record!['action'] != null) {
+       await refresh();
+       return;
+diff --git a/flutter/lib/steaddesk/help/merchant_help_host.dart b/flutter/lib/steaddesk/help/merchant_help_host.dart
+index 3f0398c..6693363 100644
+--- a/flutter/lib/steaddesk/help/merchant_help_host.dart
++++ b/flutter/lib/steaddesk/help/merchant_help_host.dart
+@@ -15,6 +15,18 @@ import 'merchant_help_widget.dart';
+ Widget merchantHelpEntry() => MerchantHelpEntry(
+     label: translate,
+     pick: pickHelpScreenshot,
++    callbackProfile: () {
++      final raw = bind.mainGetLocalOption(key: 'user_info');
++      final profile = raw.isEmpty ? null : jsonDecode(raw);
++      final lang = bind.mainGetLocalOption(key: 'lang');
++      return {
++        if (profile is Map && profile['name'] is String)
++          'name': profile['name'],
++        if (profile is Map && profile['phone'] is String)
++          'phone': profile['phone'],
++        'language': lang.isEmpty ? Platform.localeName : lang,
++      };
++    },
+     open: () async {
+       final directory = await getApplicationSupportDirectory();
+       return MerchantHelpClient(
+diff --git a/flutter/lib/steaddesk/help/merchant_help_widget.dart b/flutter/lib/steaddesk/help/merchant_help_widget.dart
+index fdf01cd..517e52d 100644
+--- a/flutter/lib/steaddesk/help/merchant_help_widget.dart
++++ b/flutter/lib/steaddesk/help/merchant_help_widget.dart
+@@ -3,6 +3,8 @@ import 'dart:convert';
+ import 'dart:typed_data';
+ 
+ import 'package:flutter/material.dart';
++import '../callback_build.dart';
++import 'merchant_callback.dart';
+ import 'merchant_help_client.dart';
+ 
+ const helpCategories = {
+@@ -18,8 +20,15 @@ class MerchantHelpEntry extends StatefulWidget {
+   final Future<MerchantHelpClient> Function() open;
+   final String Function(String) label;
+   final Future<Uint8List?> Function() pick;
++  final bool callbacksEnabled;
++  final HelpJson Function()? callbackProfile;
+   const MerchantHelpEntry(
+-      {super.key, required this.open, required this.label, required this.pick});
++      {super.key,
++      required this.open,
++      required this.label,
++      required this.pick,
++      this.callbackProfile,
++      this.callbacksEnabled = merchantCallbacksEnabled});
+   @override
+   State<MerchantHelpEntry> createState() => _MerchantHelpEntryState();
+ }
+@@ -78,6 +87,16 @@ class _MerchantHelpEntryState extends State<MerchantHelpEntry> {
+     }
+   }
+ 
++  Future<T> callbackWork<T>(Future<T> Function() work) async {
++    if (busy) throw HelpFailure(409);
++    setState(() => busy = true);
++    try {
++      return await work();
++    } finally {
++      if (mounted) setState(() => busy = false);
++    }
++  }
++
+   Future<void> open() async {
+     await run(() async {
+       if (client == null) {
+@@ -141,6 +160,27 @@ class _MerchantHelpEntryState extends State<MerchantHelpEntry> {
+               now: c.now(),
+               online: online,
+               busy: busy,
++              callbackEntry: widget.callbacksEnabled &&
++                      c.callbackAvailable != false
++                  ? MerchantCallback(
++                      key: ValueKey((c.record?['owner'], v['id'])),
++                      label: t,
++                      busy: busy,
++                      reschedule:
++                          v['callback']?['state'] == 'reschedule_required',
++                      prepare: () => callbackWork(() async {
++                        final options = await c.callbackOptions();
++                        if (c.view?['id'] != v['id']) throw HelpFailure(409);
++                        return {
++                          ...?widget.callbackProfile?.call(),
++                          ...options,
++                          'version': c.view!['version']
++                        };
++                      }),
++                      book: (version, fields, key) => callbackWork(
++                          () => c.bookCallback(v['id'], version, fields, key)),
++                    )
++                  : null,
+               act: (name, body) => run(() => c.act(name, body)),
+               again: closed
+                   ? () => run(() async {
+@@ -278,6 +318,7 @@ class HelpWaiting extends StatelessWidget {
+   final String Function(String) label;
+   final void Function(String, HelpJson) act;
+   final VoidCallback? again;
++  final Widget? callbackEntry;
+   const HelpWaiting(
+       {super.key,
+       required this.view,
+@@ -287,7 +328,8 @@ class HelpWaiting extends StatelessWidget {
+       required this.busy,
+       required this.label,
+       required this.act,
+-      this.again});
++      this.again,
++      this.callbackEntry});
+   @override
+   Widget build(BuildContext context) {
+     final t = label;
+@@ -344,15 +386,19 @@ class HelpWaiting extends StatelessWidget {
+                           'card_version': card['card_version']
+                         }),
+                       ]))),
+-        button('Request a callback', 'callback'),
++        callbackEntry ?? button('Request a callback', 'callback'),
+       ] else if (state == 'claimed') ...[
+         Text(format('Handled by %s', view['handler'] ?? '—'),
+             style: Theme.of(context).textTheme.titleMedium),
+         if (view['claimed_at'] is int)
+           Text(format('Claimed at %s', time(view['claimed_at']))),
+-      ] else if (state == 'callback_requested')
+-        Text(t('Callback requested'))
+-      else if (closed) ...[
++      ] else if (state == 'callback_requested') ...[
++        if (callbackEntry != null &&
++            view['callback']?['state'] == 'reschedule_required')
++          callbackEntry!
++        else
++          Text(t('Callback requested')),
++      ] else if (closed) ...[
+         Text(t('Request closed'),
+             style: Theme.of(context).textTheme.titleMedium),
+         if (view['close_result'] != 'self_resolved' &&
+@@ -367,6 +413,17 @@ class HelpWaiting extends StatelessWidget {
+               onPressed: busy ? null : again,
+               child: Text(t('Start another request'))),
+       ],
++      if (callbackEntry != null &&
++          view['callback']?['state'] == 'scheduled' &&
++          view['callback']['due_at'] is int) ...[
++        if (view['callback']['due_local'] is String)
++          Text(format('Scheduled callback (store time): %s',
++              view['callback']['due_local'].replaceFirst('T', ' '))),
++        if (view['callback']['zone'] is String)
++          Text(format('Store time zone: %s', view['callback']['zone'])),
++        if (view['callback']['attempts'] == 1)
++          Text(t('The first call was missed. Support will try again.')),
++      ],
+       if (queued || state == 'claimed' || state == 'callback_requested')
+         button('Cancel help request', 'cancel'),
+     ]);
+diff --git a/flutter/lib/steaddesk/support_help.dart b/flutter/lib/steaddesk/support_help.dart
+index 9a50302..724d1e0 100644
+--- a/flutter/lib/steaddesk/support_help.dart
++++ b/flutter/lib/steaddesk/support_help.dart
+@@ -37,6 +37,7 @@ class HelpStaffError implements Exception {
+ 
+ class SupportHelpApi {
+   final Uri base;
++  bool callbackQueueAvailable = false;
+   final String account;
+   final String _token;
+   final bool Function() current;
+@@ -88,7 +89,46 @@ class SupportHelpApi {
+     return jsonDecode(utf8.decode(bytes)) as HelpRow;
+   }
+ 
+-  Future<List<HelpRow>> queue() async {
++  // SSE carries only a hint. Re-read the authorized queue to decide who may
++  // see a reminder, including after a new connection with no event backlog.
++  Future<void> callbackEvents(void Function() refresh) async {
++    check();
++    final req = await _http
++        .getUrl(base.resolve('events'))
++        .timeout(const Duration(seconds: 8));
++    check();
++    req.followRedirects = false;
++    req.headers.set(HttpHeaders.authorizationHeader, 'Bearer $_token');
++    req.headers.set(HttpHeaders.acceptHeader, 'text/event-stream');
++    final response = await req.close().timeout(const Duration(seconds: 12));
++    if (response.statusCode != 200 ||
++        response.headers.contentType?.mimeType != 'text/event-stream') {
++      await response.listen((_) {}).cancel();
++      throw HelpStaffError(response.statusCode);
++    }
++    check();
++    refresh();
++    bool changed = false;
++    await for (final line in response
++        .timeout(const Duration(seconds: 55))
++        .transform(utf8.decoder)
++        .transform(const LineSplitter())) {
++      check();
++      if (line.startsWith('event:')) {
++        final kind = line.substring(6).trim();
++        changed = kind == 'resync' ||
++            kind.startsWith('help.callback_') ||
++            kind == 'help.claimed' ||
++            kind == 'help.cancelled' ||
++            kind == 'help.closed';
++      } else if (line.isEmpty && changed) {
++        changed = false;
++        refresh();
++      }
++    }
++  }
++
++  Future<List<HelpRow>> queue({bool callbacks = false}) async {
+     final visible = <String, HelpRow>{};
+     for (final state in ['queued', 'callback_requested', 'claimed']) {
+       var offset = 0;
+@@ -112,6 +152,34 @@ class SupportHelpApi {
+         offset = next;
+       }
+     }
++    if (callbacks) {
++      var offset = 0;
++      while (true) {
++        final HelpRow page;
++        try {
++          page = await _request('help/callbacks', query: {
++            'limit': '100',
++            'offset': '$offset',
++          });
++          callbackQueueAvailable = true;
++        } on HelpStaffError catch (e) {
++          if (e.status != 404 || offset != 0) rethrow;
++          callbackQueueAvailable = false;
++          break; // Older servers still provide the regular HELP queue.
++        }
++        for (final row in (page['callbacks'] as List).cast<HelpRow>()) {
++          final id = row['id'] as String;
++          final existing = visible[id];
++          if (existing == null || row['version'] >= existing['version']) {
++            visible[id] = {...?existing, ...row};
++          }
++        }
++        final next = page['next_offset'];
++        if (next == null) break;
++        if (next is! int || next <= offset) throw const HelpStaffError(500);
++        offset = next;
++      }
++    }
+     return visible.values.toList();
+   }
+ 
+@@ -123,6 +191,16 @@ class SupportHelpApi {
+ 
+   Future<HelpRow> detail(String id) => _request(_ticket(id));
+ 
++  Future<HelpRow> callbackOutcome(HelpRow row, String outcome) {
++    if (!ownsCallback(row, account) ||
++        row['callback']['due'] != true ||
++        !{'connected', 'missed'}.contains(outcome)) {
++      throw const HelpStaffError(403);
++    }
++    return _request('${_ticket(row['id'])}/callback-outcome',
++        version: row['version'], body: {'outcome': outcome});
++  }
++
+   Future<String?> clientHealth(String id) async {
+     try {
+       final value = await _request('${_ticket(id)}/attachments/diagnostic');
+@@ -248,3 +326,45 @@ String helpDiagnostic(HelpRow row) {
+   final check = diag['check']?['state'];
+   return '设备健康：$health' + (check == null ? '' : ' · 快速检查 $check');
+ }
++
++bool ownsCallback(HelpRow row, String account) =>
++    row['state'] == 'claimed' &&
++    row['handler'] == account &&
++    row['callback']?['claimed_by_me'] == true;
++
++bool isDueCallback(HelpRow row, String account) {
++  final cb = row['callback'];
++  return cb is Map &&
++      cb['state'] == 'scheduled' &&
++      cb['due'] == true &&
++      cb['due_at'] is int &&
++      (ownsCallback(row, account) ||
++          (row['state'] == 'callback_requested' && row['handler'] == null));
++}
++
++String callbackPhone(HelpRow row, String account) {
++  final phone = row['callback']?['phone'];
++  if (phone is! String || phone.isEmpty) return '未提供';
++  if (ownsCallback(row, account)) return phone;
++  // Never rely solely on the server's masking when drawing a shared queue.
++  final digits = phone.replaceAll(RegExp('[^0-9]'), '');
++  return digits.length < 4
++      ? '••••'
++      : '•••• ${digits.substring(digits.length - 4)}';
++}
++
++class CallbackReminders {
++  final _seen = <(String, int)>{};
++  void clear() => _seen.clear();
++
++  int update(List<HelpRow> rows, String account) {
++    final due = rows
++        .where((r) => isDueCallback(r, account))
++        .map((r) => (r['id'] as String, r['callback']['due_at'] as int))
++        .toSet();
++    final count = due.difference(_seen).length;
++    _seen.retainAll(due);
++    _seen.addAll(due);
++    return count;
++  }
++}
+diff --git a/flutter/lib/steaddesk/support_help_host.dart b/flutter/lib/steaddesk/support_help_host.dart
+index c35b728..56bea04 100644
+--- a/flutter/lib/steaddesk/support_help_host.dart
++++ b/flutter/lib/steaddesk/support_help_host.dart
+@@ -5,6 +5,7 @@ import 'package:uuid/uuid.dart';
+ 
+ import '../common.dart' show connect, gFFI;
+ import '../models/platform_model.dart' show bind;
++import 'callback_build.dart';
+ import 'case_session_api.dart' show CaseSession;
+ import 'support_help.dart';
+ import 'support_help_queue.dart';
+@@ -57,7 +58,11 @@ class _SupportHelpHeaderState extends State<SupportHelpHeader> {
+   late final StreamSubscription<String> accountEvents;
+   final queueChanges = ValueNotifier(0);
+   Route<void>? opened;
+-  bool refreshing = false;
++  bool refreshing = false, refreshAgain = false;
++  SupportHelpApi? feed;
++  final reminders = CallbackReminders();
++  ScaffoldFeatureController<SnackBar, SnackBarClosedReason>? reminder;
++
+   @override
+   void initState() {
+     super.initState();
+@@ -68,6 +73,10 @@ class _SupportHelpHeaderState extends State<SupportHelpHeader> {
+ 
+   void _retire() {
+     version++;
++    feed = null;
++    reminders.clear();
++    reminder?.close();
++    reminder = null;
+     api?.dispose();
+     api = null;
+     tickets = null;
+@@ -76,6 +85,24 @@ class _SupportHelpHeaderState extends State<SupportHelpHeader> {
+     if (route != null && route.isActive) route.navigator?.removeRoute(route);
+   }
+ 
++  Future<void> _watch(SupportHelpApi active) async {
++    feed = active;
++    try {
++      await active.callbackEvents(() {
++        if (!mounted || api != active || !active.current()) return;
++        if (refreshing) {
++          refreshAgain = true;
++        } else {
++          unawaited(_refresh());
++        }
++      });
++    } catch (_) {
++      // Periodic snapshots cover outages. The next tick reopens the feed.
++    } finally {
++      if (feed == active) feed = null;
++    }
++  }
++
+   Future<void> _refresh() async {
+     if (!mounted) return;
+     final now = _login();
+@@ -104,8 +131,27 @@ class _SupportHelpHeaderState extends State<SupportHelpHeader> {
+               target == _configuredOrigin() &&
+               target == origin);
+       final active = api!;
+-      final rows = await active.queue();
++      final rows = await active.queue(callbacks: supportCallbacksEnabled);
+       if (!mounted || active != api || _login() != now) return;
++      active.check();
++      if (supportCallbacksEnabled &&
++          active.callbackQueueAvailable &&
++          feed != active) {
++        unawaited(_watch(active));
++      }
++      if (supportCallbacksEnabled && reminders.update(rows, now.account) > 0) {
++        reminder?.close();
++        reminder = ScaffoldMessenger.maybeOf(context)?.showSnackBar(SnackBar(
++            content: const Text('预约回电已到时间，请查看回电队列。'),
++            action: SnackBarAction(
++                label: '查看',
++                onPressed: () {
++                  if (mounted &&
++                      api == active &&
++                      active.current() &&
++                      opened == null) _open();
++                })));
++      }
+       setState(() {
+         tickets = rows;
+         error = null;
+@@ -123,7 +169,10 @@ class _SupportHelpHeaderState extends State<SupportHelpHeader> {
+       }
+     } finally {
+       refreshing = false;
+-      if (mounted && now != _login()) scheduleMicrotask(_refresh);
++      if (mounted && (refreshAgain || now != _login())) {
++        refreshAgain = false;
++        scheduleMicrotask(_refresh);
++      }
+     }
+   }
+ 
+@@ -186,5 +235,6 @@ class _SupportHelpHeaderState extends State<SupportHelpHeader> {
+   Widget build(BuildContext context) => TextButton(
+       onPressed: login == null ? null : _open,
+       child: Text(
+-          '求助 ${tickets?.where((r) => r['state'] != 'claimed').length ?? '—'}'));
++          '求助 ${tickets?.where((r) => r['state'] != 'claimed').length ?? '—'}'
++          '${supportCallbacksEnabled && (tickets?.any((r) => isDueCallback(r, login?.account ?? '')) ?? false) ? ' · 回电到时' : ''}'));
+ }
+diff --git a/flutter/lib/steaddesk/support_help_queue.dart b/flutter/lib/steaddesk/support_help_queue.dart
+index 0c8123f..34dc1a5 100644
+--- a/flutter/lib/steaddesk/support_help_queue.dart
++++ b/flutter/lib/steaddesk/support_help_queue.dart
+@@ -2,12 +2,14 @@ import 'package:flutter/material.dart';
+ import 'package:uuid/uuid.dart';
+ import 'cases/case_dialog.dart' show caseCategoryLabels, caseResultLabels;
+ import 'support_help.dart';
++import 'callback_build.dart';
+ import 'package:flutter_hbb/steaddesk/toolbar_api.dart';
+ 
+ class SupportHelpQueue extends StatefulWidget {
+   final SupportHelpApi api;
+   final List<HelpRow>? rows;
+   final String? error;
++  final bool callbacksEnabled;
+   final Future<void> Function() onRefresh;
+   final Future<void> Function(HelpRow) onConnect;
+   const SupportHelpQueue(
+@@ -15,6 +17,7 @@ class SupportHelpQueue extends StatefulWidget {
+       required this.api,
+       required this.rows,
+       required this.error,
++      this.callbacksEnabled = supportCallbacksEnabled,
+       required this.onRefresh,
+       required this.onConnect});
+   @override
+@@ -141,6 +144,87 @@ class _SupportHelpQueueState extends State<SupportHelpQueue> {
+     }
+   }
+ 
++  bool _isCallback(HelpRow row) =>
++      widget.callbacksEnabled &&
++      row['callback'] is Map &&
++      {'scheduled', 'reschedule_required'}.contains(row['callback']['state']);
++
++  Future<void> _callbackAction(HelpRow row, String action) async {
++    setState(() {
++      busy = row['id'];
++      issue = null;
++    });
++    try {
++      widget.api.check();
++      if (action == 'claim') {
++        await widget.api.claim(row);
++      } else {
++        await widget.api.callbackOutcome(row, action);
++      }
++    } catch (e) {
++      if (mounted)
++        setState(() => issue = e is HelpStaffError
++            ? e.toString()
++            : const HelpStaffError(0).toString());
++    } finally {
++      if (mounted) {
++        try {
++          await widget.onRefresh();
++        } finally {
++          if (mounted) setState(() => busy = null);
++        }
++      }
++    }
++  }
++
++  Widget _callbackEntry(HelpRow row) {
++    final cb = row['callback'] as Map;
++    final stamp = cb['due_at'];
++    final zone = cb['zone'];
++    final localTime = stamp is int
++        ? DateTime.fromMillisecondsSinceEpoch(stamp * 1000)
++            .toLocal()
++            .toString()
++            .split('.')
++            .first
++        : null;
++    final owned = ownsCallback(row, widget.api.account);
++    final scheduled = cb['state'] == 'scheduled';
++    return Card(
++        key: ValueKey(row['id']),
++        child: Padding(
++          padding: const EdgeInsets.all(12),
++          child:
++              Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
++            Text('${cb['name'] ?? '联系人待确认'} · ${cb['language'] ?? '语言待确认'}'),
++            if (scheduled && cb['due_local'] is String)
++              Text('门店回电时间：${cb['due_local'].replaceFirst('T', ' ')}'),
++            if (scheduled && localTime != null) Text('回电时间（客服本地）：$localTime'),
++            if (zone is String) Text('门店时区：$zone'),
++            Text('电话：${callbackPhone(row, widget.api.account)}'),
++            Text('原因：${cb['reason'] ?? '未提供'}'),
++            if (!scheduled)
++              const Text('两次未接通，等待商户重新预约。')
++            else if (row['state'] == 'callback_requested')
++              TextButton(
++                  onPressed:
++                      busy == null ? () => _callbackAction(row, 'claim') : null,
++                  child: const Text('认领回电'))
++            else if (owned)
++              Wrap(children: [
++                for (final e in {'connected': '已接通', 'missed': '没接通'}.entries)
++                  TextButton(
++                      onPressed: busy == null && cb['due'] == true
++                          ? () => _callbackAction(row, e.key)
++                          : null,
++                      child: Text(e.value)),
++              ])
++            else
++              const Text('其他客服已认领'),
++          ]),
++        ));
++  }
++
+   Widget _entry(HelpRow row) => FutureBuilder<HelpRow>(
+       key: ValueKey((row['id'], row['version'])),
+       future:
+@@ -166,18 +250,23 @@ class _SupportHelpQueueState extends State<SupportHelpQueue> {
+             '正在读取诊断…',
+           if (row['state'] == 'callback_requested') ...[
+             '申请回电：${callback is int ? DateTime.fromMillisecondsSinceEpoch(callback * 1000).toLocal().toString().split('.').first : '时间暂不可用'}',
+-            '电话：${detail?['callback_phone'] ?? '未提供'}',
++            '电话：未提供',
+           ]
+         ];
+         return ListTile(
+             title: Text('$store · ${helpReasons[row['category']] ?? '其他'}'),
+             subtitle: toolbarEnabled && verified && claimed
+-                ? Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+-                    Text(caption.join(' · ')),
+-                    toolbarCaseAttachments(account: widget.api.account,
+-                        peer: row['device_id'] ?? '', caseId: '', ticket: row['id'],
+-                        origin: widget.api.base.toString()),
+-                  ])
++                ? Column(
++                    crossAxisAlignment: CrossAxisAlignment.start,
++                    children: [
++                        Text(caption.join(' · ')),
++                        toolbarCaseAttachments(
++                            account: widget.api.account,
++                            peer: row['device_id'] ?? '',
++                            caseId: '',
++                            ticket: row['id'],
++                            origin: widget.api.base.toString()),
++                      ])
+                 : Text(caption.join(' · ')),
+             trailing: TextButton(
+                 onPressed:
+@@ -189,9 +278,15 @@ class _SupportHelpQueueState extends State<SupportHelpQueue> {
+   Widget build(BuildContext context) {
+     final rows = widget.rows ?? const <HelpRow>[];
+     final entries = <Object>[];
+-    void section(String label, bool Function(HelpRow) accept) {
++    void section(String label, bool Function(HelpRow) accept,
++        {bool byDueTime = false}) {
+       entries.add(label);
+       final matches = rows.where(accept).toList();
++      if (byDueTime) {
++        int order(HelpRow row) =>
++            row['callback']?['due_at'] as int? ?? 0x7fffffffffffffff;
++        matches.sort((a, b) => order(a).compareTo(order(b)));
++      }
+       if (matches.isEmpty) {
+         entries.add(const Text('暂无求助单'));
+       } else {
+@@ -203,8 +298,10 @@ class _SupportHelpQueueState extends State<SupportHelpQueue> {
+       section('已验证', (r) => r['state'] == 'queued' && r['lane'] == 'verified');
+       section('未验证 · 人工核验',
+           (r) => r['state'] == 'queued' && r['lane'] == 'unverified');
+-      section('预约回电', (r) => r['state'] == 'callback_requested');
+-      section('我已认领', (r) => r['state'] == 'claimed');
++      section(
++          '预约回电', (r) => r['state'] == 'callback_requested' || _isCallback(r),
++          byDueTime: widget.callbacksEnabled);
++      section('我已认领', (r) => r['state'] == 'claimed' && !_isCallback(r));
+     }
+     return AlertDialog(
+         title: const Text('求助队列'),
+@@ -220,7 +317,10 @@ class _SupportHelpQueueState extends State<SupportHelpQueue> {
+                       itemCount: entries.length,
+                       itemBuilder: (_, i) {
+                         final item = entries[i];
+-                        if (item is HelpRow) return _entry(item);
++                        if (item is HelpRow)
++                          return _isCallback(item)
++                              ? _callbackEntry(item)
++                              : _entry(item);
+                         if (item is Widget) return item;
+                         return Padding(
+                             padding: const EdgeInsets.symmetric(vertical: 8),
+diff --git a/flutter/test/steaddesk/callback_test.dart b/flutter/test/steaddesk/callback_test.dart
+new file mode 100644
+index 0000000..35b16b5
+--- /dev/null
++++ b/flutter/test/steaddesk/callback_test.dart
+@@ -0,0 +1,390 @@
++import 'dart:convert';
++import 'dart:io';
++
++import 'package:flutter/material.dart';
++import 'package:flutter_test/flutter_test.dart';
++import 'package:flutter_hbb/steaddesk/help/merchant_callback.dart';
++import 'package:flutter_hbb/steaddesk/help/merchant_help_client.dart';
++import 'package:flutter_hbb/steaddesk/help/merchant_help_widget.dart';
++import 'package:flutter_hbb/steaddesk/support_help.dart';
++import 'package:flutter_hbb/steaddesk/support_help_queue.dart';
++
++class _Network extends HttpOverrides {}
++
++const contact = {
++  'name': 'Callback contact',
++  'phone': '+1 (555) 010-2345',
++  'language': 'es',
++  'reason': 'Callback-only reason',
++  'slot': 'asap',
++};
++const booked = {
++  'id': 'ticket',
++  'state': 'callback_requested',
++  'version': 2,
++  'callback': {
++    'state': 'scheduled',
++    'zone': 'America/New_York',
++    'due_at': 3,
++    'due_local': '2026-11-14T13:00:00-05:00',
++    'attempts': 0,
++    ...contact,
++  }
++};
++final baseRow = <String, dynamic>{
++  'id': 'ticket',
++  'version': 2,
++  'state': 'callback_requested',
++  'handler': null,
++  'callback': {
++    'state': 'scheduled',
++    'due_at': 8,
++    'due': true,
++    'claimed_by_me': false,
++    'phone': contact['phone']
++  }
++};
++
++class _WaitingClient extends Fake implements MerchantHelpClient {
++  @override
++  final bool callbackAvailable;
++  _WaitingClient(this.callbackAvailable);
++  final actions = <String>[];
++  @override
++  final HelpJson record = {'owner': 'merchant'};
++  @override
++  final HelpJson view = {'id': 'ticket', 'state': 'queued', 'version': 1};
++  @override
++  final List<HelpJson> cards = [];
++  @override
++  String? get notice => null;
++  @override
++  bool get attachmentPending => false;
++  @override
++  int Function() get now => () => 0;
++  @override
++  Future<void> initialize() async {}
++  @override
++  Future<void> refresh() async {}
++  @override
++  Future<void> capabilities() async {}
++  @override
++  Future<HelpJson> callbackOptions() async => {
++        'zone': 'Europe/Madrid',
++        'reason': 'Printer',
++        'after_close': true,
++        'manual_zone_required': false
++      };
++  @override
++  Future<void> act(String action, HelpJson body) async {
++    actions.add(action);
++  }
++}
++
++class _QueueApi extends Fake implements SupportHelpApi {
++  final actions = <String>[];
++  @override
++  String get account => 'agent';
++  @override
++  void check() {}
++  @override
++  Future<HelpRow> claim(HelpRow row) async {
++    actions.add('claim');
++    return row;
++  }
++
++  @override
++  Future<HelpRow> callbackOutcome(HelpRow row, String outcome) async {
++    actions.add(outcome);
++    return row;
++  }
++}
++
++void main() {
++  for (final enabled in [false, true]) {
++    for (final capable in [false, true]) {
++      testWidgets(
++          'waiting entry with callback build=$enabled and service=$capable',
++          (t) async {
++        final client = _WaitingClient(capable);
++        await t.pumpWidget(MaterialApp(
++            home: Scaffold(
++                body: SingleChildScrollView(
++                    child: MerchantHelpEntry(
++                        open: () async => client,
++                        label: (s) => s,
++                        pick: () async => null,
++                        callbacksEnabled: enabled,
++                        callbackProfile: () => contact)))));
++        await t.pumpAndSettle();
++        await t.tap(find.text('View help request'));
++        await t.pumpAndSettle();
++        await t.tap(find.text('Request a callback'));
++        await t.pumpAndSettle();
++        if (enabled && capable) {
++          expect(find.text(contact['name']!), findsOneWidget);
++          expect(find.text('Printer'), findsOneWidget);
++          expect(client.actions, isEmpty);
++        } else {
++          expect(find.byType(TextField), findsNothing);
++          expect(client.actions, ['callback']);
++        }
++        await t.pumpWidget(const SizedBox.shrink());
++      });
++    }
++  }
++
++  testWidgets(
++      'callback queue claims without connecting and displays actions only to its owner',
++      (t) async {
++    final api = _QueueApi();
++    final row = {
++      ...baseRow,
++      'callback': {
++        ...baseRow['callback'],
++        'name': 'Contact',
++        'reason': 'Printer',
++        'language': 'es',
++        'due_local': '2026-11-14T20:00:00-05:00'
++      }
++    };
++    Future<void> draw(HelpRow r) async {
++      await t.pumpWidget(MaterialApp(
++          home: SupportHelpQueue(
++              api: api,
++              rows: [r],
++              callbacksEnabled: true,
++              error: null,
++              onRefresh: () async {},
++              onConnect: (_) async => fail('remote connect'))));
++      await t.pumpAndSettle();
++    }
++
++    await draw(row);
++    expect(find.text('电话：•••• 2345'), findsOneWidget);
++    expect(find.textContaining('20:00:00-05:00'), findsOneWidget);
++    await t.ensureVisible(find.text('认领回电'));
++    await t.tap(find.text('认领回电'));
++    await t.pumpAndSettle();
++    expect(api.actions, ['claim']);
++    final claimed = {
++      ...row,
++      'state': 'claimed',
++      'handler': 'agent',
++      'callback': {...row['callback'], 'claimed_by_me': true}
++    };
++    await draw(claimed);
++    expect(find.text('电话：${contact['phone']}'), findsOneWidget);
++    await t.ensureVisible(find.text('没接通'));
++    await t.tap(find.text('没接通'));
++    await t.pumpAndSettle();
++    await t.tap(find.text('已接通'));
++    await t.pumpAndSettle();
++    expect(api.actions, ['claim', 'missed', 'connected']);
++    await draw({...claimed, 'handler': 'elsewhere'});
++    expect(find.text('已接通'), findsNothing);
++    expect(find.textContaining(contact['phone']!), findsNothing);
++  });
++
++  test(
++      'booking lost reply recovers from receipt without saving contact details',
++      () async {
++    final dir = await Directory.systemTemp.createTemp();
++    addTearDown(() => dir.delete(recursive: true));
++    final file = File('${dir.path}/receipt');
++    String account = 'merchant';
++    bool old = false;
++    final client = MerchantHelpClient(
++        file,
++        () async => (
++              origin: Uri.https('example.invalid'),
++              device: '123456789',
++              account: account
++            ),
++        (_, __, ___, ____) => throw UnimplementedError(),
++        'test', send: (_, method, path, secret, body, key, version) async {
++      if (path == 'capabilities') return old ? {} : {'callback': true};
++      expect(secret, 'receipt');
++      if (path == 'me/callback-options') return {'after_close': true};
++      if (path == 'me') return booked;
++      expect([method, path, body, key, version],
++          ['POST', 'me/callback', contact, 'once', 1]);
++      for (final text in [
++        contact['name'],
++        contact['reason'],
++        contact['phone']
++      ]) {
++        expect(file.readAsStringSync(), isNot(contains(text)));
++      }
++      throw const SocketException('lost reply');
++    });
++    client.record = {
++      'owner': client.fingerprint(await client.scope()),
++      'secret': 'receipt'
++    };
++    await client.accept({'id': 'ticket', 'version': 1, 'state': 'queued'});
++    await client.capabilities();
++    expect(client.callbackAvailable, isTrue);
++    expect((await client.callbackOptions())['after_close'], true);
++    await client.bookCallback('ticket', 1, contact, 'once');
++    expect(client.view!['callback']['due_local'], '2026-11-14T13:00:00-05:00');
++    for (final text in [contact['name'], contact['reason'], contact['phone']]) {
++      expect(file.readAsStringSync(), isNot(contains(text)));
++    }
++    await expectLater(
++        client.act('callback', contact), throwsA(isA<HelpFailure>()));
++    old = true;
++    await client.capabilities();
++    expect(client.callbackAvailable, isFalse);
++    account = 'another';
++    await expectLater(client.bookCallback('ticket', 2, contact, 'other'),
++        throwsA(isA<HelpFailure>()));
++    expect(client.record, isNull);
++  });
++
++  test(
++      'staff fallback keeps ordinary HELP on first-page 404 and rejects revoked access',
++      () async {
++    await HttpOverrides.runWithHttpOverrides(() async {
++      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
++      addTearDown(() => server.close(force: true));
++      final api = SupportHelpApi(Uri.parse('http://127.0.0.1:${server.port}'),
++          'agent', 'token', () => true);
++      addTearDown(api.dispose);
++      int callbackStatus = 404, callbackReads = 0;
++      server.listen((req) async {
++        expect(
++            req.headers.value(HttpHeaders.authorizationHeader), 'Bearer token');
++        req.response.headers.contentType = ContentType.json;
++        if (req.uri.path.endsWith('/callbacks')) {
++          callbackReads++;
++          req.response.statusCode = callbackStatus;
++          req.response.write(jsonEncode({
++            'callbacks': [baseRow]
++          }));
++        } else {
++          final queued = req.uri.queryParameters['state'] == 'queued';
++          req.response.write(jsonEncode({
++            'tickets': queued
++                ? [
++                    {'id': 'base', 'state': 'queued', 'version': 1}
++                  ]
++                : []
++          }));
++        }
++        await req.response.close();
++      });
++      expect((await api.queue()).single['id'], 'base');
++      expect(callbackReads, 0);
++      expect((await api.queue(callbacks: true)).single['id'], 'base');
++      expect(api.callbackQueueAvailable, isFalse);
++      callbackStatus = 200;
++      expect((await api.queue(callbacks: true)).length, 2);
++      expect(api.callbackQueueAvailable, isTrue);
++      callbackStatus = 403;
++      await expectLater(
++          api.queue(callbacks: true), throwsA(isA<HelpStaffError>()));
++    }, _Network());
++  });
++
++  test(
++      'reminders follow server due state, claim ownership, retry time and account scope',
++      () {
++    final alarms = CallbackReminders();
++    final other = {...baseRow, 'state': 'claimed', 'handler': 'elsewhere'};
++    final mine = {
++      ...baseRow,
++      'state': 'claimed',
++      'handler': 'agent',
++      'callback': {...baseRow['callback'], 'claimed_by_me': true}
++    };
++    expect(callbackPhone(baseRow, 'agent'), '•••• 2345');
++    expect(callbackPhone(other, 'agent'), '•••• 2345');
++    expect(callbackPhone(mine, 'agent'), contact['phone']);
++    expect(alarms.update([other], 'agent'), 0);
++    expect(alarms.update([baseRow], 'agent'), 1);
++    expect(alarms.update([mine], 'agent'), 0);
++    final retry = {
++      ...mine,
++      'callback': {...mine['callback'], 'due_at': 608, 'due': false}
++    };
++    expect(alarms.update([retry], 'agent'), 0);
++    retry['callback']['due'] = true;
++    expect(alarms.update([retry], 'agent'), 1);
++    alarms.clear();
++    expect(alarms.update([retry], 'elsewhere'), 0);
++  });
++
++  testWidgets(
++      'second miss offers editable booking in store time and retries with the same key',
++      (t) async {
++    final calls = <String>[];
++    HelpJson? submitted;
++    await t.pumpWidget(MaterialApp(
++        home: Scaffold(
++            body: SingleChildScrollView(
++                child: HelpWaiting(
++                    view: const {
++          'state': 'callback_requested',
++          'callback': {'state': 'reschedule_required'}
++        },
++                    cards: const [],
++                    now: 1,
++                    online: true,
++                    busy: false,
++                    label: (s) => s,
++                    act: (_, __) => fail('legacy action'),
++                    callbackEntry: MerchantCallback(
++                        label: (s) => s,
++                        busy: false,
++                        reschedule: true,
++                        prepare: () async => {
++                              ...contact,
++                              'version': 3,
++                              'manual_zone_required': false,
++                              'after_close': true,
++                              'zone': 'America/New_York'
++                            },
++                        book: (version, fields, key) async {
++                          expect(version, 3);
++                          calls.add(key);
++                          submitted = fields;
++                          if (calls.length == 1)
++                            throw const SocketException('offline');
++                        }))))));
++    expect(find.textContaining('Two calls were missed'), findsOneWidget);
++    await t.tap(find.text('Reschedule callback'));
++    await t.pumpAndSettle();
++    expect(find.text(contact['phone']!), findsOneWidget);
++    await t.enterText(find.byType(TextField).at(0), 'Edited contact');
++    await t.ensureVisible(find.byType(DropdownButtonFormField<String>));
++    await t.tap(find.byType(DropdownButtonFormField<String>));
++    await t.pumpAndSettle();
++    for (final label in [
++      'In 30 minutes',
++      'After the store closes',
++      'Choose a store time'
++    ]) {
++      expect(find.text(label).last, findsOneWidget);
++    }
++    await t.tap(find.text('Choose a store time').last);
++    await t.pumpAndSettle();
++    await t.enterText(find.byType(TextField).last, '2026-11-15T14:00');
++    await t.pumpAndSettle();
++    await t.ensureVisible(find.text('Confirm callback'));
++    await t.tap(find.text('Confirm callback'));
++    await t.pumpAndSettle();
++    expect(find.textContaining('Check your connection'), findsOneWidget);
++    await t.ensureVisible(find.text('Confirm callback'));
++    await t.tap(find.text('Confirm callback'));
++    await t.pumpAndSettle();
++    expect(calls.length, 2);
++    expect(calls.first, calls.last);
++    expect(submitted, {
++      ...contact,
++      'name': 'Edited contact',
++      'slot': 'custom',
++      'local_time': '2026-11-15T14:00'
++    });
++  });
++}
+diff --git a/src/lang/cn.rs b/src/lang/cn.rs
+index f099418..c291847 100644
+--- a/src/lang/cn.rs
++++ b/src/lang/cn.rs
+@@ -1,6 +1,27 @@
+ lazy_static::lazy_static! {
+ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
+     [
++        ("Contact name", "联系人姓名"),
++        ("Callback phone number", "回电号码"),
++        ("Preferred language", "首选语言"),
++        ("Reason for callback", "回电原因"),
++        ("Store time zone (IANA)", "门店时区（IANA）"),
++        ("Store time zone: %s", "门店时区：%s"),
++        ("Callback time", "回电时间"),
++        ("As soon as possible", "尽快"),
++        ("In 30 minutes", "30 分钟后"),
++        ("After the store closes", "打烊后"),
++        ("Choose a store time", "自选门店时间"),
++        ("Store date and time (YYYY-MM-DDTHH:mm)", "门店日期和时间（YYYY-MM-DDTHH:mm）"),
++        ("Confirm callback", "确认预约回电"),
++        ("Reschedule callback", "重新预约回电"),
++        ("Two calls were missed. Please schedule a new callback.", "两次回电未接通，请重新预约。"),
++        ("Check the callback details and store time.", "请核对回电资料和门店时间。"),
++        ("The request changed. Review the latest callback options.", "求助单已更新，请重新核对可预约时段。"),
++        ("Callback booking is unavailable for this request.", "该求助单暂时无法预约回电。"),
++        ("Cannot reach callback service. Check your connection and retry.", "暂时无法连接回电服务，请检查网络并重试。"),
++        ("Scheduled callback (store time): %s", "已预约回电（门店时间）：%s"),
++        ("The first call was missed. Support will try again.", "第一次回电未接通，客服会再拨一次。"),
+         ("Quick check", "快速检查"),
+         ("Checking registered devices…", "正在检查已登记的设备…"),
+         ("Check timed out", "超时"),
+diff --git a/src/lang/es.rs b/src/lang/es.rs
+index 42341dd..08db709 100644
+--- a/src/lang/es.rs
++++ b/src/lang/es.rs
+@@ -1,6 +1,27 @@
+ lazy_static::lazy_static! {
+ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
+     [
++        ("Contact name", "Nombre de contacto"),
++        ("Callback phone number", "Número de teléfono de contacto"),
++        ("Preferred language", "Idioma preferido"),
++        ("Reason for callback", "Motivo de la llamada"),
++        ("Store time zone (IANA)", "Zona horaria de la tienda (IANA)"),
++        ("Store time zone: %s", "Zona horaria de la tienda: %s"),
++        ("Callback time", "Horario de llamada"),
++        ("As soon as possible", "Lo antes posible"),
++        ("In 30 minutes", "En 30 minutos"),
++        ("After the store closes", "Después del cierre de la tienda"),
++        ("Choose a store time", "Elegir una hora de la tienda"),
++        ("Store date and time (YYYY-MM-DDTHH:mm)", "Fecha y hora de la tienda (AAAA-MM-DDTHH:mm)"),
++        ("Confirm callback", "Confirmar la llamada"),
++        ("Reschedule callback", "Reprogramar la llamada"),
++        ("Two calls were missed. Please schedule a new callback.", "No se contestaron dos llamadas. Programe una nueva llamada."),
++        ("Check the callback details and store time.", "Revise los datos de la llamada y la hora de la tienda."),
++        ("The request changed. Review the latest callback options.", "La solicitud ha cambiado. Revise los horarios disponibles."),
++        ("Callback booking is unavailable for this request.", "No se puede programar una llamada para esta solicitud."),
++        ("Cannot reach callback service. Check your connection and retry.", "No se puede conectar con el servicio de llamadas. Compruebe la conexión y vuelva a intentarlo."),
++        ("Scheduled callback (store time): %s", "Llamada programada (hora de la tienda): %s"),
++        ("The first call was missed. Support will try again.", "La primera llamada no tuvo respuesta. El servicio técnico volverá a llamar."),
+         ("Quick check", "Comprobación rápida"),
+         ("Checking registered devices…", "Comprobando los dispositivos registrados…"),
+         ("Reachable", "Accesible"),
