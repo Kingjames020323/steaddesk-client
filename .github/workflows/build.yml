@@ -6,6 +6,14 @@ name: Build SteadDesk
     tags: ['v1.5.0-sd.*']
   workflow_dispatch:
     inputs:
+      steaddesk_fleet_admin:
+        description: Include the publisher panel in the Windows support preview
+        type: boolean
+        default: false
+      steaddesk_ops_integration:
+        description: Test shared groups, health, help and case writeback with registered devices
+        type: boolean
+        default: false
       steaddesk_fleet_update:
         description: Include the merchant update client in this preview test build
         type: boolean
@@ -25,16 +33,18 @@ name: Build SteadDesk
 permissions:
   contents: read
 env:
+  VERIFY_OPS_PROFILE: ${{ inputs.steaddesk_ops_integration && 'true' || 'false' }}
+  STEADDESK_FLEET_ADMIN: ${{ github.event_name == 'workflow_dispatch' && github.ref_type == 'branch' && inputs.steaddesk_fleet_admin && 'true' || 'false' }}
   STEADDESK_FLEET_UPDATE: ${{ github.event_name == 'workflow_dispatch' && github.ref_type == 'branch' && inputs.steaddesk_fleet_update && 'true' || 'false' }}
   STEADDESK_FLEET_OPS_ORIGIN: ${{ inputs.fleet_ops_origin || vars.STEADDESK_FLEET_OPS_ORIGIN }}
   STEADDESK_FLEET_ARTIFACT_ORIGIN: ${{ inputs.fleet_artifact_origin || vars.STEADDESK_FLEET_ARTIFACT_ORIGIN }}
   STEADDESK_FLEET_TEST_PUBLIC_KEY: ${{ vars.STEADDESK_FLEET_TEST_PUBLIC_KEY }}
   STEADDESK_FLEET_TEST_KEY_ID: ${{ vars.STEADDESK_FLEET_TEST_KEY_ID }}
   STEADDESK_FLEET_SILENT_PROFILE: ${{ vars.STEADDESK_FLEET_SILENT_PROFILE }}
-  STEADDESK_HELP: ${{ vars.STEADDESK_HELP }}
+  STEADDESK_HELP: ${{ github.event_name == 'workflow_dispatch' && github.ref_type == 'branch' && inputs.steaddesk_ops_integration && 'true' || vars.STEADDESK_HELP }}
   STEADDESK_QUALITY: ${{ vars.STEADDESK_QUALITY }}
-  STEADDESK_OPS_HEALTH: ${{ vars.STEADDESK_OPS_HEALTH }}
-  STEADDESK_OPS_GROUPS: ${{ vars.STEADDESK_OPS_GROUPS }}
+  STEADDESK_OPS_HEALTH: ${{ github.event_name == 'workflow_dispatch' && github.ref_type == 'branch' && inputs.steaddesk_ops_integration && 'true' || vars.STEADDESK_OPS_HEALTH }}
+  STEADDESK_OPS_GROUPS: ${{ github.event_name == 'workflow_dispatch' && github.ref_type == 'branch' && inputs.steaddesk_ops_integration && 'true' || vars.STEADDESK_OPS_GROUPS }}
   STEADDESK_RECONNECT: ${{ vars.STEADDESK_RECONNECT }}
   STEADDESK_METRICS: ${{ vars.STEADDESK_METRICS }}
   STEADDESK_AGENT_CERT_SHA256: ${{ vars.STEADDESK_AGENT_CERT_SHA256 }}
@@ -504,6 +514,9 @@ jobs:
           echo "Expected an unsigned APK" >&2
           exit 1
         fi
+        if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch && "$GITHUB_REF_TYPE" == branch && "$VERIFY_OPS_PROFILE" == true ]]; then
+          python3 .distribution/scripts/ops-build-receipt.py flutter/lib/steaddesk/merchant_build.dart merchant dist
+        fi
         cd dist && sha256sum *.apk > SHA256SUMS
     - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
       with:
@@ -573,7 +586,7 @@ jobs:
     name: Windows x64 ${{ matrix.edition }}
     env:
       STEADDESK_EDITION: ${{ matrix.edition }}
-      STEADDESK_CASES: ${{ inputs.steaddesk_cases && 'true' || 'false' }}
+      STEADDESK_CASES: ${{ (inputs.steaddesk_cases || (github.ref_type == 'branch' && inputs.steaddesk_ops_integration)) && 'true' || 'false' }}
     needs:
     - bridge
     runs-on: "${{ matrix.job.os }}"
@@ -726,6 +739,9 @@ jobs:
         mkdir -p dist
         version=$(cat .distribution/RELEASE_VERSION)
         mv target/release/rustdesk-portable-packer.exe "dist/${product// /}-$version-x64.exe"
+        if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch && "$GITHUB_REF_TYPE" == branch && "$VERIFY_OPS_PROFILE" == true ]]; then
+          python3 .distribution/scripts/ops-build-receipt.py flutter/lib/steaddesk/merchant_build.dart "$STEADDESK_EDITION" dist
+        fi
         cd dist && sha256sum *.exe > SHA256SUMS
     - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
       with:
