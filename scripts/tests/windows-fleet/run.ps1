@@ -90,14 +90,13 @@ function Restart-TestService {
     try { $controller.WaitForStatus('Running',[timespan]::FromSeconds(15)) } finally { $controller.Dispose() }
 }
 try {
-    if (-not (Get-Command cl.exe -ErrorAction SilentlyContinue)) {
+    if (-not (Get-Command cl.exe -ErrorAction SilentlyContinue) -or -not (Get-Command rc.exe -ErrorAction SilentlyContinue)) {
         $vswhere=Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
-        $vs = (& $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath).Trim()
-        if (-not $vs) { throw 'Visual C++ tools are required.' }
-        $dev = Join-Path $vs 'Common7/Tools/VsDevCmd.bat'
-        $values = & cmd.exe /d /s /c ('""' + $dev + '" -no_logo -arch=amd64 -host_arch=amd64 >nul && set"')
-        if ($LASTEXITCODE -ne 0) { throw 'VsDevCmd failed.' }
-        foreach ($line in $values) { if ($line -match '^([^=]+)=(.*)$') { Set-Item -LiteralPath ('Env:'+$matches[1]) -Value $matches[2] } }
+        $vs = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+        if ($LASTEXITCODE -ne 0 -or -not $vs) { throw 'Visual C++ tools are required.' }
+        $devShell = Join-Path $vs 'Common7/Tools/Launch-VsDevShell.ps1'
+        & $devShell -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
+        Get-Command cl.exe,rc.exe -CommandType Application -ErrorAction Stop | Out-Null
     }
     Run 'cl.exe' @('/nologo','/std:c++17','/EHsc','/W4','/DSD_FLEET_TEST_BUILD=1',('/I'+$platform),('/Fo'+$lab+'\'),(Join-Path $platform 'fleet_installer.cpp'),(Join-Path $fixture 'platform_probe.cpp'),('/Fe'+$probe),'/link','bcrypt.lib','wintrust.lib','crypt32.lib','advapi32.lib','version.lib','shell32.lib','ole32.lib','uuid.lib') | Out-Null
     $directoryLines = @(Run $probe @('directory'))
