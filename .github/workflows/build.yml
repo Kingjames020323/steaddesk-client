@@ -741,6 +741,9 @@ jobs:
         pushd ./libs/portable
         pip3 install -r requirements.txt
         if [[ "$STEADDESK_EDITION" == merchant ]]; then
+          python3 "$GITHUB_WORKSPACE/.distribution/scripts/tests/check-packed-service.py" "$PWD/generate.py"
+        fi
+        if [[ "$STEADDESK_EDITION" == merchant ]]; then
           python3 ../../.distribution/scripts/tests/check-packed-service.py generate.py
         fi
         python3 ./generate.py -f ../../rustdesk/ -o . -e "../../rustdesk/$product.exe"
