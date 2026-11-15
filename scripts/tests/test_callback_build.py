@@ -26,7 +26,8 @@ class CallbackBuildTest(unittest.TestCase):
                         result = subprocess.run(
                             ['bash', ROOT / 'scripts/configure-edition.sh', tree, edition],
                             env={**os.environ, 'STEADDESK_CALLBACK': flag,
-                                 'STEADDESK_HELP': 'false', 'STEADDESK_FLEET_UPDATE': 'false'},
+                                 'STEADDESK_HELP': 'false', 'STEADDESK_KB': 'false',
+                                 'STEADDESK_FLEET_UPDATE': 'false'},
                             capture_output=True, text=True)
                         if flag == 'invalid':
                             self.assertNotEqual(result.returncode, 0)
