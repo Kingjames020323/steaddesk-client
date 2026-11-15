@@ -1,0 +1,10 @@
+<resources>
+  <string name="fleet_channel">Actualizaciones de SteadDesk</string>
+  <string name="fleet_ready">Actualización de SteadDesk lista</string>
+  <string name="fleet_notification">Toque para revisar la actualización firmada durante el horario de cierre de la tienda.</string>
+  <string name="fleet_title">¿Actualizar SteadDesk?</string>
+  <string name="fleet_consent">¿Instalar ahora la actualización comercial verificada? Se comprobarán otra vez el horario de la tienda, las sesiones remotas y los controles de seguridad antes de instalar.</string>
+  <string name="fleet_accept">Actualizar</string>
+  <string name="fleet_decline">Más tarde</string>
+  <string name="fleet_system_confirm">Android requiere su confirmación. Toque para abrir el instalador del sistema.</string>
+</resources>

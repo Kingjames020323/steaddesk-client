@@ -1,0 +1,10 @@
+<resources>
+  <string name="fleet_channel">SteadDesk 更新</string>
+  <string name="fleet_ready">SteadDesk 更新已准备好</string>
+  <string name="fleet_notification">请在门店打烊更新时段内点按查看已签名的更新。</string>
+  <string name="fleet_title">更新 SteadDesk？</string>
+  <string name="fleet_consent">现在安装已验证的商户版更新吗？安装前会再次检查门店时段、远程会话和安全开关。</string>
+  <string name="fleet_accept">更新</string>
+  <string name="fleet_decline">稍后</string>
+  <string name="fleet_system_confirm">Android 需要您确认。点按打开系统安装器。</string>
+</resources>

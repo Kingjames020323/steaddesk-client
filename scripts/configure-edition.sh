@@ -116,3 +116,4 @@ else:
         raise ValueError("Unexpected Android main manifest")
     manifest.write_text(base.replace(end, (assets / "provider.xml").read_text(encoding="utf-8") + end), encoding="utf-8")
 PY
+python3 "$(dirname "$0")/configure-fleet.py" "$tree" "$2"
