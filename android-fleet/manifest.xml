@@ -1,0 +1,9 @@
+        <receiver android:name=".FleetReceiver" android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+                <action android:name="com.steaddesk.remote.FLEET_WAKE" />
+            </intent-filter>
+        </receiver>
+        <service android:name=".FleetJobService" android:permission="android.permission.BIND_JOB_SERVICE" android:exported="true" />
+        <activity android:name=".FleetOfferActivity" android:exported="false" />

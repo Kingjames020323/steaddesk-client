@@ -1,0 +1,10 @@
+<resources>
+  <string name="fleet_channel">SteadDesk updates</string>
+  <string name="fleet_ready">SteadDesk update ready</string>
+  <string name="fleet_notification">Tap to review the signed update during the store update window.</string>
+  <string name="fleet_title">Update SteadDesk?</string>
+  <string name="fleet_consent">Install the verified merchant update now? Store hours, remote sessions and safety controls will be checked again before installation.</string>
+  <string name="fleet_accept">Update</string>
+  <string name="fleet_decline">Later</string>
+  <string name="fleet_system_confirm">Android requires your confirmation. Tap to open the system installer.</string>
+</resources>

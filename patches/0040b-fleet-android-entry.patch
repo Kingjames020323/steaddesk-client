@@ -1,0 +1,55 @@
+diff --git a/flutter/android/app/build.gradle b/flutter/android/app/build.gradle
+--- a/flutter/android/app/build.gradle
++++ b/flutter/android/app/build.gradle
+@@ -70,6 +70,8 @@
+     compileSdkVersion 36
+     buildFeatures { buildConfig = true }
+     sourceSets {
++        main.java.srcDir 'src/steaddeskFleet/java'
++        main.res.srcDir 'src/steaddeskFleet/res'
+         main.java.srcDirs += 'src/main/kotlin'
+         // The same build-time selector governs the native policy and provider packaging.
+         if (merchantEdition) {
+@@ -115,6 +117,9 @@
+ }
+ 
+ dependencies {
++    if (file('src/steaddeskFleet/java').isDirectory()) {
++        implementation 'com.android.tools.build:apksig:8.1.4'
++    }
+     coreLibraryDesugaring 'com.android.tools:desugar_jdk_libs:2.1.4'
+     implementation 'com.google.protobuf:protobuf-javalite:3.20.1'
+     implementation "androidx.media:media:1.6.0"
+diff --git a/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MainActivity.kt b/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MainActivity.kt
+--- a/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MainActivity.kt
++++ b/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MainActivity.kt
+@@ -93,6 +93,7 @@
+ 
+     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
+         super.configureFlutterEngine(flutterEngine)
++        FleetEntry.start(this)
+         if (MainService.isReady) {
+             bindMainService()
+         }
+diff --git a/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MainService.kt b/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MainService.kt
+--- a/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MainService.kt
++++ b/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MainService.kt
+@@ -271,6 +271,7 @@
+         }
+         runningInstance = this
+         FFI.init(this)
++        FleetEntry.start(this)
+         HandlerThread("Service", Process.THREAD_PRIORITY_BACKGROUND).apply {
+             start()
+             serviceLooper = looper
+diff --git a/flutter/android/app/src/steaddeskMerchant/java/com/carriez/flutter_hbb/MerchantRecovery.java b/flutter/android/app/src/steaddeskMerchant/java/com/carriez/flutter_hbb/MerchantRecovery.java
+--- a/flutter/android/app/src/steaddeskMerchant/java/com/carriez/flutter_hbb/MerchantRecovery.java
++++ b/flutter/android/app/src/steaddeskMerchant/java/com/carriez/flutter_hbb/MerchantRecovery.java
+@@ -52,6 +52,7 @@
+     }
+ 
+     static synchronized boolean restore(Context context) {
++        FleetEntry.start(context);
+         return status(context) != 0 || BootReceiver.resumeService(context);
+     }
+ 
