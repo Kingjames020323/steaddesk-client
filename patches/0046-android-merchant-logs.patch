@@ -1,0 +1,639 @@
+diff --git a/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/BootReceiver.kt b/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/BootReceiver.kt
+index f42bb30..cee5b06 100644
+--- a/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/BootReceiver.kt
++++ b/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/BootReceiver.kt
+@@ -21,7 +21,14 @@ class BootReceiver : BroadcastReceiver() {
+ 
+         val fromUpdate = intent.action == Intent.ACTION_MY_PACKAGE_REPLACED
+         if (fromUpdate || Intent.ACTION_BOOT_COMPLETED == intent.action || DEBUG_BOOT_COMPLETED == intent.action) {
+-            if (resumeService(context) && !fromUpdate && BuildConfig.SHOW_BOOT_TOAST) {
++            val resumed = try {
++                resumeService(context)
++            } catch (failure: RuntimeException) {
++                MerchantRecovery.recordBoot(context, "failed")
++                throw failure
++            }
++            MerchantRecovery.recordBoot(context, if (resumed) "acknowledged" else "skipped")
++            if (resumed && !fromUpdate && BuildConfig.SHOW_BOOT_TOAST) {
+                 Toast.makeText(context, MerchantLanguage.text(context, R.string.steaddesk_service_started), Toast.LENGTH_LONG).show()
+             }
+         }
+diff --git a/flutter/android/app/src/steaddeskMerchant/java/com/carriez/flutter_hbb/AgentWakeService.java b/flutter/android/app/src/steaddeskMerchant/java/com/carriez/flutter_hbb/AgentWakeService.java
+index 32e6a4a..97dae11 100644
+--- a/flutter/android/app/src/steaddeskMerchant/java/com/carriez/flutter_hbb/AgentWakeService.java
++++ b/flutter/android/app/src/steaddeskMerchant/java/com/carriez/flutter_hbb/AgentWakeService.java
+@@ -11,18 +11,26 @@ import android.os.RemoteException;
+ public final class AgentWakeService extends Service {
+     private final Binder endpoint = new Binder() {
+         @Override protected boolean onTransact(int code, Parcel data, Parcel reply, int flags) throws RemoteException {
+-            if (code != FIRST_CALL_TRANSACTION && code != FIRST_CALL_TRANSACTION + 1)
++            if (code != FIRST_CALL_TRANSACTION && code != FIRST_CALL_TRANSACTION + 1 && code != FIRST_CALL_TRANSACTION + 2)
+                 return super.onTransact(code, data, reply, flags);
+             data.enforceInterface("com.steaddesk.remote.IWakeService");
+             enforceCallingPermission("com.steaddesk.remote.permission.WAKE_SERVICE", MerchantLanguage.text(AgentWakeService.this, R.string.recovery_signature));
+             String[] packages = getPackageManager().getPackagesForUid(Binder.getCallingUid());
+             if (packages == null || packages.length != 1 || !"com.steaddesk.agent".equals(packages[0]))
+                 throw new SecurityException(MerchantLanguage.text(AgentWakeService.this, R.string.recovery_uid));
++            if (code == FIRST_CALL_TRANSACTION + 2 && (data.dataAvail() != 0 || reply == null || (flags & IBinder.FLAG_ONEWAY) != 0))
++                throw new SecurityException("collect_logs takes no arguments and requires a reply");
+             long identity = Binder.clearCallingIdentity();
+             try {
+                 int state = MerchantRecovery.status(AgentWakeService.this);
+                 if (code == FIRST_CALL_TRANSACTION && state == 0 && !MerchantRecovery.restore(AgentWakeService.this))
+                     throw new IllegalStateException(MerchantLanguage.text(AgentWakeService.this, R.string.recovery_unavailable));
++                if (code == FIRST_CALL_TRANSACTION + 2) {
++                    int result = state == 4 ? 4 : state == 2 ? MerchantLogs.collect(AgentWakeService.this) : 0;
++                    reply.writeNoException();
++                    reply.writeInt(result);
++                    return true;
++                }
+                 if (reply != null) {
+                     reply.writeNoException();
+                     if (code == FIRST_CALL_TRANSACTION + 1) reply.writeInt(state);
+diff --git a/flutter/android/app/src/steaddeskMerchant/java/com/carriez/flutter_hbb/MerchantLogRecords.java b/flutter/android/app/src/steaddeskMerchant/java/com/carriez/flutter_hbb/MerchantLogRecords.java
+new file mode 100644
+index 0000000..cba95db
+--- /dev/null
++++ b/flutter/android/app/src/steaddeskMerchant/java/com/carriez/flutter_hbb/MerchantLogRecords.java
+@@ -0,0 +1,151 @@
++package com.carriez.flutter_hbb;
++
++import android.content.Context;
++import android.util.AtomicFile;
++import org.json.JSONArray;
++import org.json.JSONException;
++import org.json.JSONObject;
++import java.io.File;
++import java.io.FileOutputStream;
++import java.io.IOException;
++import java.io.RandomAccessFile;
++import java.nio.charset.StandardCharsets;
++import java.util.ArrayList;
++import java.util.List;
++
++/** Project fixed private journals into finite event codes before constructing any network request. */
++final class MerchantLogRecords {
++    private static final int INPUT_PER_SOURCE = 512 * 1024;
++    // Three 320 KiB sources and the Agent's at most 16,384 short ASCII records fit in 2 MiB.
++    private static final int OUTPUT_PER_SOURCE = 320 * 1024;
++    private static final String HEAL = "merchant_self_heal", UPDATE = "merchant_upgrade", BOOT = "merchant_boot";
++
++    private static File bootFile(Context app) {
++        return new File(app.getNoBackupFilesDir(), "boot-recovery.jsonl");
++    }
++
++    static synchronized void recordBoot(Context app, String event) {
++        if (!MerchantLogs.enabled(app)) return;
++        AtomicFile journal = new AtomicFile(bootFile(app));
++        FileOutputStream out = null;
++        try {
++            byte[] prior = new byte[0];
++            if (journal.getBaseFile().length() <= 8192) {
++                try { prior = journal.readFully(); } catch (java.io.FileNotFoundException firstBoot) { }
++            }
++            String[] lines = new String(prior, StandardCharsets.UTF_8).split("\n");
++            out = journal.startWrite();
++            for (int i = Math.max(0, lines.length - 127); i < lines.length; i++) {
++                String old = project(BOOT, lines[i]);
++                if (old != null) out.write(bootLine(old));
++            }
++            out.write(bootLine(event));
++            journal.finishWrite(out);
++        } catch (IOException | JSONException | RuntimeException failure) {
++            if (out != null) journal.failWrite(out);
++        }
++    }
++
++    private static byte[] bootLine(String event) throws JSONException {
++        return (new JSONObject().put("event", event).toString() + "\n").getBytes(StandardCharsets.UTF_8);
++    }
++
++    static String project(String source, String line) {
++        if (line.length() > 2048 || !line.startsWith("{") || !line.endsWith("}")) return null;
++        try {
++            JSONObject row = new JSONObject(line);
++            if (HEAL.equals(source)) {
++                String result = row.optString("result");
++                switch (result) {
++                    case "healthy": case "in_session": case "reserved": case "acknowledged":
++                    case "failed": case "unavailable": case "skipped": case "denied":
++                    case "rate_limited": case "disabled": case "unknown": return result;
++                    case "budget_unavailable": return "unavailable";
++                    case "recorded": return "info";
++                    default: return null;
++                }
++            }
++            String event = row.optString("event");
++            if (BOOT.equals(source)) {
++                switch (event) {
++                    case "acknowledged": case "skipped": case "failed": case "disabled": case "denied": return event;
++                    default: return null;
++                }
++            }
++            if (!UPDATE.equals(source)) return null;
++            String reason = row.optString("reason");
++            switch (event) {
++                case "manifest": case "artifact": return "verified".equals(reason) ? "healthy" : null;
++                case "committing": return "reserved".equals(reason) ? "reserved" : null;
++                case "assignment": return "none".equals(reason) ? "skipped" : null;
++                case "submitted": return "os_pending".equals(reason) ? "info" : null;
++                case "stopped": return "failed";
++                case "offer": case "installer": case "report": case "health": case "recovery":
++                    switch (reason) {
++                        case "os_success": case "accepted": case "installed": return "acknowledged";
++                        case "server_observation_complete": case "healthy": return "healthy";
++                        case "manual_required": case "pending_user_action": case "frozen": return "warn";
++                        case "failed": case "service_unverified": return "failed";
++                        case "duplicate_or_stale": return "skipped";
++                        case "declined": return "denied";
++                        case "session_absent": case "session_present": case "observing": return "info";
++                        default: return null;
++                    }
++                default: return null;
++            }
++        } catch (JSONException invalid) { return null; }
++    }
++
++    private final List<JSONArray> pages = new ArrayList<>();
++    private int pageBytes = 2;
++
++    private int add(String source, String event) throws JSONException {
++        JSONObject row = new JSONObject().put("source", source).put("event", event);
++        int bytes = row.toString().length() + 1;
++        if (pages.isEmpty() || pageBytes + bytes > 32768) {
++            pages.add(new JSONArray());
++            pageBytes = 2;
++        }
++        pages.get(pages.size() - 1).put(row);
++        pageBytes += bytes;
++        return bytes;
++    }
++
++    private void read(File file, String source) throws JSONException {
++        int written = 0;
++        boolean cut = false;
++        try (RandomAccessFile input = new RandomAccessFile(file, "r")) {
++            long length = input.length(), offset = Math.max(0, length - INPUT_PER_SOURCE);
++            byte[] bytes = new byte[(int)(length - offset)];
++            input.seek(offset);
++            input.readFully(bytes);
++            int start = 0;
++            if (offset != 0) {
++                cut = true;
++                while (start < bytes.length && bytes[start++] != '\n') { }
++            }
++            for (int end = start; end < bytes.length; end++) {
++                if (bytes[end] != '\n') continue;
++                if (end - start <= 2048) {
++                    String event = project(source, new String(bytes, start, end - start, StandardCharsets.UTF_8));
++                    if (event != null) written += add(source, event);
++                } else {
++                    cut = true;
++                }
++                start = end + 1;
++                if (written >= OUTPUT_PER_SOURCE - 128) break;
++            }
++            cut |= start < bytes.length;
++        } catch (IOException | SecurityException inaccessible) { }
++        if (written == 0) add(source, "unavailable");
++        if (cut) add(source, "truncated");
++    }
++
++    static List<JSONArray> collect(Context app) throws JSONException {
++        MerchantLogRecords records = new MerchantLogRecords();
++        records.read(new File(app.getFilesDir(), "self-heal.jsonl"), HEAL);
++        records.read(new File(app.getNoBackupFilesDir(), "fleet-update/events.jsonl"), UPDATE);
++        records.read(bootFile(app), BOOT);
++        return records.pages;
++    }
++}
+diff --git a/flutter/android/app/src/steaddeskMerchant/java/com/carriez/flutter_hbb/MerchantLogs.java b/flutter/android/app/src/steaddeskMerchant/java/com/carriez/flutter_hbb/MerchantLogs.java
+new file mode 100644
+index 0000000..79d42ba
+--- /dev/null
++++ b/flutter/android/app/src/steaddeskMerchant/java/com/carriez/flutter_hbb/MerchantLogs.java
+@@ -0,0 +1,127 @@
++package com.carriez.flutter_hbb;
++
++import android.content.Context;
++import android.content.RestrictionsManager;
++import android.os.Bundle;
++import org.json.JSONArray;
++import org.json.JSONObject;
++import java.io.ByteArrayOutputStream;
++import java.io.IOException;
++import java.io.InputStream;
++import java.io.OutputStream;
++import java.net.Proxy;
++import java.net.URL;
++import java.nio.charset.StandardCharsets;
++import java.util.Iterator;
++import java.util.List;
++import java.util.concurrent.atomic.AtomicBoolean;
++import javax.net.ssl.HttpsURLConnection;
++
++/** One active request. The device never receives an origin, token, filename or job from Binder. */
++final class MerchantLogs {
++    private static final AtomicBoolean busy = new AtomicBoolean();
++    private static native String snapshot();
++    private static native String proof(String scope, int operation, long version, String body);
++    private static final String[] PATH = {"/ops/v1/device/update-identity", "/ops/v1/device/merchant-log-job",
++            "/ops/v1/device/merchant-log-result"};
++
++    static boolean enabled(Context context) {
++        try {
++            RestrictionsManager manager = (RestrictionsManager)context.getSystemService(Context.RESTRICTIONS_SERVICE);
++            Bundle policy = manager == null ? null : manager.getApplicationRestrictions();
++            return policy != null && policy.getBoolean("STEADDESK_MERCHANT_LOGS", false);
++        } catch (RuntimeException unknown) { return false; }
++    }
++
++    static int collect(Context context) {
++        Context app = context.getApplicationContext();
++        if (!enabled(app) || MerchantRecovery.status(app) != 2) return 0;
++        String scope = snapshot();
++        if (scope == null || !busy.compareAndSet(false, true)) return 0;
++        try {
++            new Thread(() -> {
++                try { upload(app, scope); }
++                catch (Exception failure) { /* Ops finalizes the Agent-only result on timeout. */ }
++                finally { busy.set(false); }
++            }, "Merchant diagnostics").start();
++        } catch (RuntimeException failure) {
++            busy.set(false);
++            return 0;
++        }
++        return 1;
++    }
++
++    private static void requireCurrent(Context app, String scope) throws IOException {
++        if (!enabled(app) || MerchantRecovery.status(app) != 2 || !scope.equals(snapshot()))
++            throw new IOException("diagnostic session ended");
++    }
++
++    private static JSONObject request(Context app, String scope, int op, long version, JSONObject body) throws Exception {
++        requireCurrent(app, scope);
++        String raw = body.toString();
++        String signed = proof(scope, op, version, raw);
++        if (signed == null) throw new IOException("device identity unavailable");
++        JSONObject headers = new JSONObject(signed);
++        URL url = new URL(new JSONObject(scope).getString("origin") + PATH[op]);
++        HttpsURLConnection http = (HttpsURLConnection)url.openConnection(Proxy.NO_PROXY);
++        try {
++            http.setInstanceFollowRedirects(false);
++            http.setUseCaches(false);
++            http.setConnectTimeout(5000);
++            http.setReadTimeout(5000);
++            http.setRequestMethod(op == 2 ? "POST" : "GET");
++            for (Iterator<String> names = headers.keys(); names.hasNext();) {
++                String name = names.next();
++                http.setRequestProperty(name, headers.getString(name));
++            }
++            if (op == 2) {
++                byte[] payload = raw.getBytes(StandardCharsets.UTF_8);
++                http.setDoOutput(true);
++                http.setFixedLengthStreamingMode(payload.length);
++                http.setRequestProperty("Content-Type", "application/json");
++                try (OutputStream out = http.getOutputStream()) {
++                    requireCurrent(app, scope);
++                    out.write(payload);
++                }
++            }
++            if (http.getResponseCode() != 200) throw new IOException("request rejected");
++            try (InputStream in = http.getInputStream()) {
++                ByteArrayOutputStream bytes = new ByteArrayOutputStream();
++                byte[] buffer = new byte[1024];
++                int count;
++                while ((count = in.read(buffer)) != -1) {
++                    if (bytes.size() + count > 4096) throw new IOException("invalid response");
++                    bytes.write(buffer, 0, count);
++                }
++                return new JSONObject(bytes.toString("UTF-8"));
++            }
++        } finally { http.disconnect(); }
++    }
++
++    private static void upload(Context app, String scope) throws Exception {
++        long version = request(app, scope, 0, 0, new JSONObject()).getLong("key_version");
++        if (version <= 0) return;
++        JSONObject job = null;
++        for (int i = 0; i < 12; i++) {
++            job = request(app, scope, 1, version, new JSONObject());
++            if (!job.isNull("job_id")) break;
++            // Agent confirmation reaches ops independently of this HTTPS connection.
++            if (i < 11) Thread.sleep(500);
++        }
++        if (job == null || job.isNull("job_id")) return;
++        String id = job.getString("job_id"), credential = job.getString("credential");
++        long expires = job.getLong("expires_at");
++        if (!id.matches("t_[0-9A-HJKMNP-TV-Z]{26}") || !credential.matches("[0-9a-f]{64}") ||
++            System.currentTimeMillis() / 1000 >= expires) return;
++        requireCurrent(app, scope);
++        List<JSONArray> pages = MerchantLogRecords.collect(app);
++        for (int i = 0; i < pages.size(); i++) {
++            if (System.currentTimeMillis() / 1000 >= expires) return;
++            JSONObject page = new JSONObject().put("credential", credential).put("entries", pages.get(i))
++                    .put("index", i).put("job_id", id).put("total", pages.size());
++            JSONObject ack = request(app, scope, 2, version, page);
++            if (!Boolean.TRUE.equals(ack.opt("accepted")) ||
++                    !Boolean.valueOf(i + 1 == pages.size()).equals(ack.opt("complete"))) return;
++        }
++    }
++}
+diff --git a/flutter/android/app/src/steaddeskMerchant/java/com/carriez/flutter_hbb/MerchantRecovery.java b/flutter/android/app/src/steaddeskMerchant/java/com/carriez/flutter_hbb/MerchantRecovery.java
+index 7f54395..21709a2 100644
+--- a/flutter/android/app/src/steaddeskMerchant/java/com/carriez/flutter_hbb/MerchantRecovery.java
++++ b/flutter/android/app/src/steaddeskMerchant/java/com/carriez/flutter_hbb/MerchantRecovery.java
+@@ -64,5 +64,7 @@ public final class MerchantRecovery {
+         return watchdog == null ? "" : Boolean.toString(watchdog.isPeerUserStopped());
+     }
+ 
++    public static void recordBoot(Context context, String event) { MerchantLogRecords.recordBoot(context, event); }
++
+     private MerchantRecovery() {}
+ }
+diff --git a/flutter/android/app/src/steaddeskSupport/java/com/carriez/flutter_hbb/MerchantRecovery.java b/flutter/android/app/src/steaddeskSupport/java/com/carriez/flutter_hbb/MerchantRecovery.java
+index d5c488b..d7d9a1f 100644
+--- a/flutter/android/app/src/steaddeskSupport/java/com/carriez/flutter_hbb/MerchantRecovery.java
++++ b/flutter/android/app/src/steaddeskSupport/java/com/carriez/flutter_hbb/MerchantRecovery.java
+@@ -10,5 +10,7 @@ public final class MerchantRecovery {
+     public static String paused() { return ""; }
+     public static String peerUserStopped() { return ""; }
+ 
++    public static void recordBoot(android.content.Context context, String event) {}
++
+     private MerchantRecovery() {}
+ }
+diff --git a/flutter/lib/steaddesk/toolbar/archive.dart b/flutter/lib/steaddesk/toolbar/archive.dart
+index ac84404..fe65759 100644
+--- a/flutter/lib/steaddesk/toolbar/archive.dart
++++ b/flutter/lib/steaddesk/toolbar/archive.dart
+@@ -3,6 +3,16 @@ part of 'host.dart';
+ bool _validActionId(dynamic id) =>
+     id is String && RegExp(r'^t_[0-9A-HJKMNP-TV-Z]{26}$').hasMatch(id);
+ 
++const _merchantLogStatus = {
++  'included': '已收集商户端和 Agent 日志',
++  'merchant_stopped': '仅有 Agent 日志。商户已强行停止应用。',
++  'remote_paused': '仅有 Agent 日志。商户已暂停远程。',
++  'status_unknown': '仅有 Agent 日志。无法确认商户端状态。',
++  'no_session': '仅有 Agent 日志。商户端没有活动的远程会话。',
++  'unavailable': '仅有 Agent 日志。商户端日志不可用。',
++  'timeout': '仅有 Agent 日志。商户端未在时限内完成上传。',
++};
++
+ String _localTime(dynamic stamp) => stamp is int
+     ? DateTime.fromMillisecondsSinceEpoch(stamp * 1000)
+         .toLocal()
+@@ -46,10 +56,15 @@ Future<void> _previewAttachment(
+     content = Image(image: image, fit: BoxFit.contain);
+   } else if (result['action'] == 'collect_logs') {
+     final rows = List<ToolbarJson>.from(result['data'] as List);
+-    content = ListView.builder(
+-        itemCount: rows.length,
+-        itemBuilder: (_, i) =>
+-            Text("${rows[i]['source']} · ${rows[i]['event']}"));
++    final status = _merchantLogStatus[result['merchant']];
++    content = Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
++      if (status != null) Text(status),
++      Expanded(
++          child: ListView.builder(
++              itemCount: rows.length,
++              itemBuilder: (_, i) =>
++                  Text("${rows[i]['source']} · ${rows[i]['event']}"))),
++    ]);
+   } else {
+     throw const FormatException('无效的附件类型。');
+   }
+diff --git a/flutter/lib/steaddesk/toolbar/host.dart b/flutter/lib/steaddesk/toolbar/host.dart
+index bb56e41..9a192ac 100644
+--- a/flutter/lib/steaddesk/toolbar/host.dart
++++ b/flutter/lib/steaddesk/toolbar/host.dart
+@@ -265,6 +265,8 @@ class _ToolbarState extends State<_Toolbar> {
+               Text(
+                   "${row['case_kind'] == 'pending' ? '待补结案' : '关联工单'} · ${row['case_id']}"),
+               Text(_localTime(row['created_at'])),
++              if (_merchantLogStatus[row['merchant']] case final status?)
++                Text(status),
+               for (final r
+                   in (row['results'] as List? ?? const []).whereType<Map>())
+                 Text(
+diff --git a/src/lib.rs b/src/lib.rs
+index d2fcae6..92d4175 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -5,7 +5,9 @@ mod keyboard;
+ mod steaddesk_help;
+ #[cfg(steaddesk_tb_merchant)]
+ mod steaddesk_toolbar;
+-#[cfg(any(steaddesk_qc_merchant, steaddesk_tb_merchant))]
++#[cfg(steaddesk_merchant)]
++mod steaddesk_merchant_logs;
++#[cfg(any(steaddesk_merchant, steaddesk_qc_merchant, steaddesk_tb_merchant))]
+ mod steaddesk_device_signature;
+ #[cfg(steaddesk_qc_merchant)]
+ mod steaddesk_check_signer;
+diff --git a/src/steaddesk_merchant_logs.rs b/src/steaddesk_merchant_logs.rs
+new file mode 100644
+index 0000000..8a98ba9
+--- /dev/null
++++ b/src/steaddesk_merchant_logs.rs
+@@ -0,0 +1,198 @@
++//! Fixed merchant diagnostics operations, linked only into the Android merchant.
++use hbb_common::config::Config;
++use jni::{
++    objects::{JClass, JString},
++    sys::{jint, jlong, jstring},
++    JNIEnv,
++};
++use serde_derive::Deserialize;
++use serde_json::{json, Value};
++use std::panic::{catch_unwind, AssertUnwindSafe};
++
++const IDENTITY: &str = "/ops/v1/device/update-identity";
++const JOB: &str = "/ops/v1/device/merchant-log-job";
++const RESULT: &str = "/ops/v1/device/merchant-log-result";
++
++#[derive(Deserialize)]
++#[serde(deny_unknown_fields)]
++struct Page {
++    job_id: String,
++    credential: String,
++    entries: Vec<Entry>,
++    index: u32,
++    total: u32,
++}
++
++#[derive(Deserialize)]
++#[serde(deny_unknown_fields)]
++struct Entry {
++    source: String,
++    event: String,
++}
++
++fn operation(op: i32, version: u64, body: &Value) -> Option<(&'static str, &'static str)> {
++    match op {
++        0 if version == 0 && body == &json!({}) => Some(("GET", IDENTITY)),
++        1 if version > 0 && body == &json!({}) => Some(("GET", JOB)),
++        2 if version > 0 => {
++            let p: Page = serde_json::from_value(body.clone()).ok()?;
++            if p.job_id.len() != 28
++                || !p.job_id.starts_with("t_")
++                || !p.job_id.as_bytes()[2..]
++                    .iter()
++                    .all(|b| b"0123456789ABCDEFGHJKMNPQRSTVWXYZ".contains(b))
++                || p.credential.len() != 64
++                || !p
++                    .credential
++                    .bytes()
++                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
++                || p.total == 0
++                || p.total > 128
++                || p.index >= p.total
++                || p.entries.is_empty()
++                || serde_json::to_vec(body.get("entries")?).ok()?.len() > 32768
++            {
++                return None;
++            }
++            for row in p.entries {
++                if !matches!(
++                    row.source.as_str(),
++                    "merchant_self_heal" | "merchant_upgrade" | "merchant_boot"
++                ) || !matches!(
++                    row.event.as_str(),
++                    "healthy"
++                        | "in_session"
++                        | "reserved"
++                        | "acknowledged"
++                        | "failed"
++                        | "unavailable"
++                        | "skipped"
++                        | "denied"
++                        | "rate_limited"
++                        | "disabled"
++                        | "unknown"
++                        | "info"
++                        | "warn"
++                        | "truncated"
++                ) {
++                    return None;
++                }
++            }
++            Some(("POST", RESULT))
++        }
++        _ => None,
++    }
++}
++
++fn scope() -> Option<String> {
++    let id = Config::get_id_or(String::new());
++    if !(9..=10).contains(&id.len()) || !id.bytes().all(|b| b.is_ascii_digit()) {
++        return None;
++    }
++    let origin = reqwest::Url::parse(&Config::get_option("api-server")).ok()?;
++    if origin.scheme() != "https"
++        || origin.host().is_none()
++        || !origin.username().is_empty()
++        || origin.password().is_some()
++        || origin.path() != "/"
++        || origin.query().is_some()
++        || origin.fragment().is_some()
++    {
++        return None;
++    }
++    let conns = crate::server::AUTHED_CONNS.lock().ok()?;
++    let conn = conns
++        .iter()
++        .find(|c| c.conn_type == crate::server::AuthConnType::Remote)?;
++    serde_json::to_string(&json!({"origin":origin.origin().ascii_serialization(),"device":id,"connection":conn.conn_id})).ok()
++}
++
++#[no_mangle]
++pub extern "system" fn Java_com_carriez_flutter_1hbb_MerchantLogs_snapshot(
++    env: JNIEnv,
++    _: JClass,
++) -> jstring {
++    catch_unwind(AssertUnwindSafe(|| {
++        Some(env.new_string(scope()?).ok()?.into_raw())
++    }))
++    .ok()
++    .flatten()
++    .unwrap_or(std::ptr::null_mut())
++}
++
++#[no_mangle]
++pub extern "system" fn Java_com_carriez_flutter_1hbb_MerchantLogs_proof(
++    mut env: JNIEnv,
++    _: JClass,
++    expected: JString,
++    op: jint,
++    version: jlong,
++    raw: JString,
++) -> jstring {
++    catch_unwind(AssertUnwindSafe(|| {
++        if version < 0
++            || env.call_method(&raw, "length", "()I", &[]).ok()?.i().ok()? > 34000
++            || env
++                .call_method(&expected, "length", "()I", &[])
++                .ok()?
++                .i()
++                .ok()?
++                > 2048
++        {
++            return None;
++        }
++        let expected: String = env.get_string(&expected).ok()?.into();
++        if scope()? != expected {
++            return None;
++        }
++        let context: Value = serde_json::from_str(&expected).ok()?;
++        let device = context.get("device")?.as_str()?;
++        let raw: String = env.get_string(&raw).ok()?.into();
++        let body: Value = serde_json::from_str(&raw).ok()?;
++        let (method, path) = operation(op, version as u64, &body)?;
++        let proof =
++            super::steaddesk_device_signature::sign(device, version as u64, |id, ts, nonce| {
++                let mut bytes = b"SteadDesk-fleet-v1\0".to_vec();
++                bytes.extend(
++                    serde_json::to_vec(&(method, path, body, id, version, ts, nonce)).ok()?,
++                );
++                Some(bytes)
++            })?;
++        Some(
++            env.new_string(std::str::from_utf8(&proof).ok()?)
++                .ok()?
++                .into_raw(),
++        )
++    }))
++    .ok()
++    .flatten()
++    .unwrap_or(std::ptr::null_mut())
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    #[test]
++    fn signs_only_two_empty_queries_and_bounded_finite_pages() {
++        let mut p = json!({"job_id":format!("t_{}", "0".repeat(26)), "credential":"a".repeat(64),
++            "index":0,"total":1, "entries":[{"source":"merchant_boot","event":"skipped"}]});
++        assert_eq!(operation(0, 0, &json!({})), Some(("GET", IDENTITY)));
++        assert_eq!(operation(1, 1, &json!({})), Some(("GET", JOB)));
++        assert_eq!(operation(2, 1, &p), Some(("POST", RESULT)));
++        for (key, value) in [
++            ("extra", json!(0)),
++            ("credential", json!("secret")),
++            ("total", json!(129)),
++            ("index", json!(1)),
++            ("entries", json!([])),
++        ] {
++            let mut bad = p.clone();
++            bad[key] = value;
++            assert!(operation(2, 1, &bad).is_none());
++        }
++        p["entries"][0]["password"] = json!("fixture-secret");
++        assert!(operation(2, 1, &p).is_none());
++        assert!(operation(1, 0, &json!({})).is_none());
++        assert!(operation(0, 0, &p).is_none());
++    }
++}
