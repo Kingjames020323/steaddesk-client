@@ -66,3 +66,18 @@ Support builds can enable server-managed shared and personal groups with the bui
 ### Support device health
 
 Set `STEADDESK_OPS_HEALTH=true` for a Windows support build with the health API. It defaults to off, independently of the groups flag. Device cards and the session sidebar show the latest observation and its timestamp. After three minutes without a fresh observation the status changes to Unknown. The home alert list supports claiming and closing an alert with a reason. A device card can request a check of its registered store inventory using the existing signed-in API origin.
+
+### Publisher and integration test builds
+
+On a preview branch, the **Build SteadDesk** manual workflow accepts
+`steaddesk_fleet_admin` to include the update panel in Windows support.
+The switch defaults to false. The panel and emergency stop require a live
+publisher grant for the signed-in account. Releasing the global stop also
+requires safety authority.
+
+For the registered-device integration checklist, select
+`steaddesk_ops_integration`. The support installer enables shared groups,
+health, help and case writeback. The Android merchant package enables help.
+Each package artifact includes `ops-test-profile.json` with the generated
+feature settings, workflow run, source commit, package filename and SHA-256.
+The update client and publisher panel have independent switches.
