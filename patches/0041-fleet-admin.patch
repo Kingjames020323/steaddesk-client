@@ -1,0 +1,1187 @@
+diff --git a/flutter/lib/steaddesk/fleet/fleet_admin_client.dart b/flutter/lib/steaddesk/fleet/fleet_admin_client.dart
+new file mode 100644
+--- /dev/null
++++ b/flutter/lib/steaddesk/fleet/fleet_admin_client.dart
+@@ -0,0 +1,258 @@
++import 'dart:async';
++import 'dart:convert';
++import 'dart:io';
++
++class FleetAdminFailure implements Exception {
++  final int status;
++  const FleetAdminFailure(this.status);
++  @override
++  String toString() => switch (status) {
++        401 => '登录状态已变化，请重新登录。',
++        403 => '当前账号没有此操作权限。',
++        409 => '发布或急停状态已变化，请刷新后重试。',
++        422 => '请填写 1–120 字的原因，不要包含控制字符。',
++        _ => '无法连接升级服务，请稍后重试。',
++      };
++}
++
++class FleetAdminIdentity {
++  final Uri origin;
++  final String account, token;
++  const FleetAdminIdentity(
++      {required this.origin, required this.account, required this.token});
++  bool same(FleetAdminIdentity? other) =>
++      other != null &&
++      account == other.account &&
++      token == other.token &&
++      origin == other.origin;
++}
++
++class FleetBatch {
++  final String id, stage, reason, gateReason;
++  final int ring, batch, failed, healthy, observing, deferred;
++  final bool canActivate, canPause, canResume;
++  FleetBatch.from(Map<String, dynamic> row)
++      : id = row['id'] as String,
++        stage = row['stage'] as String,
++        reason = row['reason'] as String? ?? '',
++        gateReason = row['gate_reason'] as String? ?? 'unknown',
++        ring = row['ring'] as int,
++        batch = row['batch'] as int,
++        failed = row['failed'] as int,
++        healthy = row['healthy'] as int,
++        observing = row['pending'] as int,
++        deferred = row['deferred_devices'] as int,
++        canActivate = row['can_activate'] == true,
++        canPause = row['can_pause'] == true,
++        canResume = row['can_resume'] == true;
++}
++
++class FleetDashboard {
++  final bool publish, stop, resume, enabled;
++  final int generation;
++  final String operator;
++  final Object? changedAt;
++  final List<FleetBatch> batches;
++  final List<Map<String, dynamic>> audit;
++  const FleetDashboard._(
++      {required this.publish,
++      required this.stop,
++      required this.resume,
++      required this.enabled,
++      required this.generation,
++      required this.operator,
++      required this.changedAt,
++      required this.batches,
++      required this.audit});
++  factory FleetDashboard.from(Map<String, dynamic> json) {
++    final caps = json['capabilities'];
++    if (caps is! Map ||
++        caps['publish'] is! bool ||
++        caps['stop'] is! bool ||
++        caps['resume'] is! bool) throw const FleetAdminFailure(0);
++    if (caps['publish'] != true) {
++      return const FleetDashboard._(
++          publish: false,
++          stop: false,
++          resume: false,
++          enabled: false,
++          generation: 0,
++          operator: '—',
++          changedAt: null,
++          batches: [],
++          audit: []);
++    }
++    final safety = json['safety'];
++    if (safety is! Map ||
++        safety['enabled'] is! bool ||
++        safety['generation'] is! int ||
++        (safety['generation'] as int) < 0 ||
++        json['batches'] is! List ||
++        json['audit'] is! List) throw const FleetAdminFailure(0);
++    final changed = safety['changed_at'];
++    if (changed != null &&
++        changed is! int &&
++        !(changed is String && DateTime.tryParse(changed) != null)) {
++      throw const FleetAdminFailure(0);
++    }
++    return FleetDashboard._(
++        publish: true,
++        stop: caps['stop'] as bool,
++        resume: caps['resume'] as bool,
++        enabled: safety['enabled'] as bool,
++        generation: safety['generation'] as int,
++        operator: safety['operator'] as String? ?? '—',
++        changedAt: changed,
++        batches: (json['batches'] as List)
++            .map((row) => FleetBatch.from(Map<String, dynamic>.from(row)))
++            .toList(growable: false),
++        audit: (json['audit'] as List)
++            .take(20)
++            .map((row) => Map<String, dynamic>.from(row))
++            .toList(growable: false));
++  }
++}
++
++abstract interface class FleetAdminApi {
++  Future<FleetDashboard> fetch();
++  Future<FleetDashboard> act(String action,
++      {int? generation, String? release, required String reason});
++  void close();
++}
++
++bool validFleetReason(String reason) =>
++    reason.trim().isNotEmpty &&
++    reason.runes.length <= 120 &&
++    !RegExp(r'[\x00-\x1f\x7f-\x9f]').hasMatch(reason);
++
++/// Credentials are sampled and rechecked across each complete operation, never cached to disk.
++class FleetAdminHttp implements FleetAdminApi {
++  final Future<FleetAdminIdentity?> Function() identity;
++  final FleetAdminIdentity? boundIdentity;
++  final HttpClient _http;
++  bool _closed = false;
++  FleetAdminHttp(
++      {required this.identity, this.boundIdentity, SecurityContext? context})
++      : _http = HttpClient(context: context)
++          ..connectionTimeout = const Duration(seconds: 6)
++          ..findProxy = ((_) => 'DIRECT');
++
++  static Uri endpoint(Uri origin) {
++    if (origin.scheme != 'https' ||
++        origin.host.isEmpty ||
++        origin.userInfo.isNotEmpty ||
++        origin.hasQuery ||
++        origin.hasFragment ||
++        !{'', '/', '/ops/v1', '/ops/v1/'}.contains(origin.path)) {
++      throw const FleetAdminFailure(0);
++    }
++    return origin.replace(path: '/ops/v1/fleet-updates');
++  }
++
++  Future<FleetAdminIdentity> _current() async {
++    final who = await identity();
++    if (_closed || who == null || who.token.isEmpty || who.account.isEmpty) {
++      throw const FleetAdminFailure(401);
++    }
++    if (boundIdentity != null && !boundIdentity!.same(who)) {
++      throw const FleetAdminFailure(401);
++    }
++    endpoint(who.origin);
++    return who;
++  }
++
++  Future<void> _check(FleetAdminIdentity who) async {
++    if (_closed || !who.same(await identity())) {
++      throw const FleetAdminFailure(401);
++    }
++  }
++
++  Future<Map<String, dynamic>> _request(FleetAdminIdentity who, String method,
++      [String? action, Map<String, dynamic>? body]) async {
++    await _check(who);
++    final base = endpoint(who.origin);
++    final url =
++        action == null ? base : base.replace(path: '${base.path}/$action');
++    final request =
++        await _http.openUrl(method, url).timeout(const Duration(seconds: 8));
++    try {
++      await _check(who);
++      request.followRedirects = false;
++      request.headers
++          .set(HttpHeaders.authorizationHeader, 'Bearer ${who.token}');
++      request.headers.set(HttpHeaders.acceptHeader, 'application/json');
++      request.headers.set(HttpHeaders.cacheControlHeader, 'no-store');
++      if (body != null) {
++        request.headers.contentType = ContentType.json;
++        final bytes = utf8.encode(jsonEncode(body));
++        request.contentLength = bytes.length;
++        request.add(bytes);
++      }
++      final response =
++          await request.close().timeout(const Duration(seconds: 10));
++      await _check(who);
++      if (response.statusCode != 200) {
++        await response.listen((_) {}).cancel();
++        throw FleetAdminFailure(response.statusCode);
++      }
++      final bytes = <int>[];
++      await for (final chunk in response.timeout(const Duration(seconds: 8))) {
++        if (bytes.length + chunk.length > 1024 * 1024) {
++          throw const FleetAdminFailure(0);
++        }
++        bytes.addAll(chunk);
++      }
++      await _check(who);
++      return jsonDecode(utf8.decode(bytes)) as Map<String, dynamic>;
++    } catch (_) {
++      request.abort();
++      rethrow;
++    }
++  }
++
++  @override
++  Future<FleetDashboard> fetch() async {
++    final who = await _current();
++    return FleetDashboard.from(await _request(who, 'GET'));
++  }
++
++  @override
++  Future<FleetDashboard> act(String action,
++      {int? generation, String? release, required String reason}) async {
++    if (!{'stop', 'resume', 'pause-release', 'resume-release', 'activate'}
++        .contains(action)) {
++      throw const FleetAdminFailure(403);
++    }
++    if (!validFleetReason(reason)) throw const FleetAdminFailure(422);
++    final who = await _current();
++    final fresh = FleetDashboard.from(await _request(who, 'GET'));
++    if (!fresh.publish) throw const FleetAdminFailure(403);
++    final body = <String, dynamic>{'reason': reason.trim()};
++    if (action == 'stop' || action == 'resume') {
++      if (!(action == 'stop' ? fresh.stop : fresh.resume)) {
++        throw const FleetAdminFailure(403);
++      }
++      if (generation != fresh.generation) throw const FleetAdminFailure(409);
++      body['generation'] = generation;
++    } else {
++      final rows = fresh.batches.where((row) => row.id == release);
++      if (rows.length != 1) throw const FleetAdminFailure(403);
++      final row = rows.single;
++      final allowed = switch (action) {
++        'activate' => row.canActivate,
++        'pause-release' => row.canPause,
++        _ => row.canResume,
++      };
++      if (!allowed) throw const FleetAdminFailure(409);
++      body['release'] = release;
++    }
++    await _request(who, 'POST', action, body);
++    return FleetDashboard.from(await _request(who, 'GET'));
++  }
++
++  @override
++  void close() {
++    _closed = true;
++    _http.close(force: true);
++  }
++}
+diff --git a/flutter/lib/steaddesk/fleet/fleet_admin_widgets.dart b/flutter/lib/steaddesk/fleet/fleet_admin_widgets.dart
+new file mode 100644
+--- /dev/null
++++ b/flutter/lib/steaddesk/fleet/fleet_admin_widgets.dart
+@@ -0,0 +1,384 @@
++import 'dart:async';
++import 'package:flutter/material.dart';
++import 'fleet_admin_client.dart';
++
++class FleetAdminController extends ChangeNotifier {
++  final FleetAdminApi api;
++  final bool Function() isCurrent;
++  FleetAdminController(this.api, {required this.isCurrent});
++  FleetDashboard? dashboard;
++  bool busy = false, _closed = false, _refreshing = false;
++  int _revision = 0;
++  String? error;
++  Timer? _poll;
++  bool get active => !_closed && isCurrent();
++  void start() {
++    refresh();
++    _poll = Timer.periodic(const Duration(seconds: 20), (_) => refresh());
++  }
++
++  Future<void> refresh() async {
++    if (!active || busy || _refreshing) return;
++    _refreshing = true;
++    final revision = _revision;
++    try {
++      final value = await api.fetch();
++      if (!active || revision != _revision) return;
++      dashboard = value;
++      error = null;
++    } catch (failure) {
++      if (!active || revision != _revision) return;
++      dashboard = null;
++      error = failure is FleetAdminFailure
++          ? failure.toString()
++          : const FleetAdminFailure(0).toString();
++    } finally {
++      _refreshing = false;
++    }
++    if (active && revision == _revision) notifyListeners();
++  }
++
++  Future<void> act(String action,
++      {int? generation, String? release, required String reason}) async {
++    if (!active || busy) throw const FleetAdminFailure(401);
++    _revision++;
++    busy = true;
++    error = null;
++    notifyListeners();
++    try {
++      final next = await api.act(action,
++          generation: generation, release: release, reason: reason);
++      if (!active) throw const FleetAdminFailure(401);
++      dashboard = next;
++    } catch (failure) {
++      if (active) {
++        dashboard = null;
++        error = failure is FleetAdminFailure
++            ? failure.toString()
++            : const FleetAdminFailure(0).toString();
++      }
++      rethrow;
++    } finally {
++      busy = false;
++      if (active) notifyListeners();
++    }
++  }
++
++  void retire() {
++    if (_closed) return;
++    _closed = true;
++    _revision++;
++    dashboard = null;
++    _poll?.cancel();
++    api.close();
++    notifyListeners();
++  }
++
++  @override
++  void dispose() {
++    retire();
++    super.dispose();
++  }
++}
++
++String fleetTime(Object? value) {
++  final at = value is int && value > 0
++      ? DateTime.fromMillisecondsSinceEpoch(value * 1000, isUtc: true)
++      : value is String
++          ? DateTime.tryParse(value)?.toUtc()
++          : null;
++  return at == null
++      ? '未记录'
++      : '${at.toIso8601String().replaceFirst('.000Z', '')} UTC';
++}
++
++String fleetGate(String reason) => switch (reason) {
++      'small_sample' || 'sample_too_small' => '健康样本不足，不能自动推进',
++      'observing' || 'observation_pending' => '观察期尚未结束',
++      'integrity' || 'integrity_frozen' => '完整性冻结，需负责人核查',
++      'global_stop' => '全局急停中',
++      'failure_rate' || 'ring0_failure' => '失败门禁未通过',
++      'eligible' || 'ready' => '服务端允许推进',
++      _ => '服务端门禁：$reason',
++    };
++
++Future<bool> _confirm(BuildContext context, String title, String text) async =>
++    await showDialog<bool>(
++        context: context,
++        builder: (ctx) =>
++            AlertDialog(title: Text(title), content: Text(text), actions: [
++              TextButton(
++                  onPressed: () => Navigator.pop(ctx, false),
++                  child: const Text('取消')),
++              FilledButton(
++                  onPressed: () => Navigator.pop(ctx, true),
++                  child: const Text('确认'))
++            ])) ??
++    false;
++
++Future<String?> _reason(BuildContext context, String title) =>
++    showDialog<String>(context: context, builder: (_) => _FleetReason(title));
++
++class _FleetReason extends StatefulWidget {
++  final String title;
++  const _FleetReason(this.title);
++  @override
++  State<_FleetReason> createState() => _FleetReasonState();
++}
++
++class _FleetReasonState extends State<_FleetReason> {
++  final input = TextEditingController();
++  @override
++  void dispose() {
++    input.dispose();
++    super.dispose();
++  }
++
++  @override
++  Widget build(BuildContext context) => AlertDialog(
++          title: Text(widget.title),
++          content: SizedBox(
++              width: 420,
++              child: TextField(
++                  key: const ValueKey('fleet-reason'),
++                  controller: input,
++                  maxLength: 120,
++                  maxLines: 3,
++                  onChanged: (_) => setState(() {}),
++                  decoration: const InputDecoration(
++                      labelText: '操作原因', helperText: '请勿填写密码、令牌或商户隐私'))),
++          actions: [
++            TextButton(
++                onPressed: () => Navigator.pop(context),
++                child: const Text('取消')),
++            FilledButton(
++                onPressed: validFleetReason(input.text)
++                    ? () => Navigator.pop(context, input.text.trim())
++                    : null,
++                child: const Text('确认'))
++          ]);
++}
++
++Future<void> fleetAction(
++    BuildContext context, FleetAdminController controller, String action,
++    {String? release}) async {
++  final snapshot = controller.dashboard;
++  if (!controller.active || controller.busy || snapshot == null) return;
++  String? reason;
++  if (action == 'stop') {
++    if (!snapshot.stop ||
++        !await _confirm(
++            context, '停止所有升级？', '将立即关闭全局升级许可，并通知设备关闭自愈。已提交的安装继续跟踪。')) return;
++    reason = 'console_emergency_stop';
++  } else if (action == 'resume') {
++    if (!snapshot.resume ||
++        !await _confirm(context, '准备解除全局急停？', '请先核查故障、在途事务及发布状态。')) return;
++    if (!context.mounted) return;
++    reason = await _reason(context, '填写解除原因');
++    if (reason == null || !context.mounted) return;
++    if (!await _confirm(
++        context, '再次确认解除急停', '原因：$reason\n只恢复升级许可，自愈不会自动重新开启。')) {
++      return;
++    }
++  } else {
++    reason = await _reason(
++        context,
++        switch (action) {
++          'pause-release' => '暂停发布',
++          'resume-release' => '恢复发布',
++          _ => '推进下一环 / 批次'
++        });
++    if (reason == null) return;
++  }
++  if (!context.mounted || !controller.active) return;
++  try {
++    await controller.act(action,
++        generation: snapshot.generation, release: release, reason: reason);
++  } catch (_) {
++    if (context.mounted) {
++      ScaffoldMessenger.maybeOf(context)?.showSnackBar(SnackBar(
++          content: Text(
++              controller.error ?? const FleetAdminFailure(401).toString())));
++    }
++  }
++}
++
++class FleetAdminHeader extends StatelessWidget {
++  final FleetAdminController controller;
++  const FleetAdminHeader({super.key, required this.controller});
++  @override
++  Widget build(BuildContext context) => AnimatedBuilder(
++      animation: controller,
++      builder: (_, __) {
++        final d = controller.dashboard;
++        if (!controller.active || d == null || !d.publish) {
++          return const SizedBox.shrink();
++        }
++        return Container(
++            width: double.infinity,
++            key: const ValueKey('fleet-header'),
++            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
++            decoration: const BoxDecoration(
++                color: Color(0xfffff5f3),
++                border: Border(bottom: BorderSide(color: Color(0xfff0c9c3)))),
++            child: Wrap(
++                spacing: 16,
++                runSpacing: 8,
++                crossAxisAlignment: WrapCrossAlignment.center,
++                children: [
++                  if (d.enabled && d.stop)
++                    FilledButton.icon(
++                        key: const ValueKey('fleet-stop'),
++                        style: FilledButton.styleFrom(
++                            backgroundColor: const Color(0xffb42318),
++                            foregroundColor: Colors.white),
++                        onPressed: controller.busy
++                            ? null
++                            : () => fleetAction(context, controller, 'stop'),
++                        icon: const Icon(Icons.stop_circle_outlined),
++                        label: const Text('全局急停')),
++                  if (!d.enabled)
++                    const Text('全局升级已停止',
++                        style: TextStyle(
++                            color: Color(0xffb42318),
++                            fontWeight: FontWeight.bold)),
++                  if (!d.enabled && d.resume)
++                    OutlinedButton(
++                        key: const ValueKey('fleet-resume'),
++                        onPressed: controller.busy
++                            ? null
++                            : () => fleetAction(context, controller, 'resume'),
++                        child: const Text('解除急停')),
++                  Text(
++                      'generation ${d.generation} · ${d.operator} · ${fleetTime(d.changedAt)}',
++                      style: const TextStyle(fontSize: 12)),
++                  TextButton.icon(
++                      key: const ValueKey('fleet-open'),
++                      onPressed: () => showDialog<void>(
++                          context: context,
++                          builder: (ctx) => Dialog(
++                              child: SizedBox(
++                                  width: 1000,
++                                  height: 700,
++                                  child: FleetAdminPanel(
++                                      controller: controller)))),
++                      icon: const Icon(Icons.system_update_alt),
++                      label: const Text('批量升级')),
++                ]));
++      });
++}
++
++class FleetAdminPanel extends StatelessWidget {
++  final FleetAdminController controller;
++  const FleetAdminPanel({super.key, required this.controller});
++  @override
++  Widget build(BuildContext context) => AnimatedBuilder(
++      animation: controller,
++      builder: (_, __) {
++        final d = controller.dashboard;
++        if (!controller.active || d == null || !d.publish) {
++          return Center(child: Text(controller.error ?? '当前账号没有发布权限。'));
++        }
++        return Column(
++            crossAxisAlignment: CrossAxisAlignment.stretch,
++            children: [
++              Padding(
++                  padding: const EdgeInsets.fromLTRB(24, 16, 12, 8),
++                  child: Row(children: [
++                    const Expanded(
++                        child: Text('批量升级',
++                            style: TextStyle(
++                                fontSize: 22, fontWeight: FontWeight.bold))),
++                    IconButton(
++                        tooltip: '刷新',
++                        onPressed: controller.busy ? null : controller.refresh,
++                        icon: const Icon(Icons.refresh)),
++                    IconButton(
++                        tooltip: '关闭',
++                        onPressed: () => Navigator.maybePop(context),
++                        icon: const Icon(Icons.close))
++                  ])),
++              Padding(
++                  padding: const EdgeInsets.symmetric(horizontal: 24),
++                  child: Text(
++                      '全局${d.enabled ? '运行' : '已停止'} · generation ${d.generation} · ${d.operator} · ${fleetTime(d.changedAt)}')),
++              if (controller.busy) const LinearProgressIndicator(),
++              Expanded(
++                  child: ListView(padding: const EdgeInsets.all(24), children: [
++                if (d.batches.isEmpty)
++                  const Padding(
++                      padding: EdgeInsets.symmetric(vertical: 24),
++                      child: Text('暂无发布')),
++                for (final row in d.batches)
++                  Card(
++                      margin: const EdgeInsets.only(bottom: 12),
++                      child: Padding(
++                          padding: const EdgeInsets.all(16),
++                          child: Column(
++                              crossAxisAlignment: CrossAxisAlignment.start,
++                              children: [
++                                Text(
++                                    '${row.id} · 环 ${row.ring} / 批次 ${row.batch}',
++                                    style: const TextStyle(
++                                        fontSize: 16,
++                                        fontWeight: FontWeight.w600)),
++                                const SizedBox(height: 8),
++                                Text(
++                                    '状态 ${row.stage}${row.reason.isEmpty ? '' : ' · ${row.reason}'}'),
++                                const SizedBox(height: 8),
++                                Wrap(spacing: 24, runSpacing: 8, children: [
++                                  Text('失败 ${row.failed}'),
++                                  Text('健康 ${row.healthy}'),
++                                  Text('观察 / 等待 ${row.observing}'),
++                                  Text('延期 ${row.deferred}')
++                                ]),
++                                const SizedBox(height: 8),
++                                Text(fleetGate(row.gateReason),
++                                    style: TextStyle(
++                                        color: row.canActivate
++                                            ? const Color(0xff067647)
++                                            : const Color(0xff854a0e))),
++                                Wrap(spacing: 8, children: [
++                                  OutlinedButton(
++                                      onPressed:
++                                          !controller.busy && row.canPause
++                                              ? () => fleetAction(context,
++                                                  controller, 'pause-release',
++                                                  release: row.id)
++                                              : null,
++                                      child: const Text('暂停发布')),
++                                  OutlinedButton(
++                                      onPressed:
++                                          !controller.busy && row.canResume
++                                              ? () => fleetAction(context,
++                                                  controller, 'resume-release',
++                                                  release: row.id)
++                                              : null,
++                                      child: const Text('恢复发布')),
++                                  FilledButton(
++                                      key: ValueKey('fleet-activate-${row.id}'),
++                                      onPressed: !controller.busy &&
++                                              row.canActivate
++                                          ? () => fleetAction(
++                                              context, controller, 'activate',
++                                              release: row.id)
++                                          : null,
++                                      child: const Text('推进下一环 / 批次')),
++                                ]),
++                              ]))),
++                const SizedBox(height: 16),
++                const Text('最近 20 条管理审计',
++                    style:
++                        TextStyle(fontSize: 18, fontWeight: FontWeight.w600)),
++                for (final row in d.audit)
++                  ListTile(
++                      contentPadding: EdgeInsets.zero,
++                      dense: true,
++                      title: Text(
++                          '${row['action']} · ${row['target']} · ${row['actor']}'),
++                      subtitle: Text(
++                          '${fleetTime(row['at'])} · ${row['reason'] ?? '—'} · ${row['result'] ?? '—'}')),
++              ])),
++            ]);
++      });
++}
+diff --git a/flutter/lib/steaddesk/fleet/fleet_admin_host.dart b/flutter/lib/steaddesk/fleet/fleet_admin_host.dart
+new file mode 100644
+--- /dev/null
++++ b/flutter/lib/steaddesk/fleet/fleet_admin_host.dart
+@@ -0,0 +1,98 @@
++import 'dart:async';
++import 'package:flutter/material.dart';
++import '../../common.dart' show gFFI;
++import '../../models/platform_model.dart' show bind;
++import 'fleet_admin_client.dart';
++import 'fleet_admin_widgets.dart';
++
++Future<FleetAdminIdentity?> _identity() async {
++  final account = gFFI.userModel.userName.value;
++  final token = bind.mainGetLocalOption(key: 'access_token');
++  if (account.isEmpty || token.isEmpty) return null;
++  final origin = Uri.tryParse(await bind.mainGetApiServer());
++  if (origin == null ||
++      account != gFFI.userModel.userName.value ||
++      token != bind.mainGetLocalOption(key: 'access_token')) return null;
++  return FleetAdminIdentity(origin: origin, account: account, token: token);
++}
++
++class FleetAdminHost extends StatefulWidget {
++  const FleetAdminHost({super.key});
++  @override
++  State<FleetAdminHost> createState() => _FleetAdminHostState();
++}
++
++class _FleetAdminHostState extends State<FleetAdminHost> {
++  FleetAdminController? controller;
++  FleetAdminIdentity? who;
++  Timer? timer;
++  StreamSubscription<String>? login;
++  bool resolving = false;
++  int generation = 0;
++  @override
++  void initState() {
++    super.initState();
++    timer = Timer.periodic(const Duration(seconds: 1), (_) => sync());
++    login = gFFI.userModel.userName.listen((_) {
++      retire();
++      sync();
++    });
++    scheduleMicrotask(sync);
++  }
++
++  void retire() {
++    generation++;
++    final old = controller;
++    controller = null;
++    who = null;
++    if (old != null) {
++      old.retire();
++      scheduleMicrotask(old.dispose);
++    }
++    if (mounted) setState(() {});
++  }
++
++  Future<void> sync() async {
++    if (resolving || !mounted) return;
++    resolving = true;
++    final guard = generation;
++    try {
++      final next = await _identity();
++      if (!mounted || guard != generation) return;
++      if ((who == null && next == null) || (who != null && who!.same(next))) {
++        return;
++      }
++      retire();
++      if (next == null) return;
++      final epoch = generation;
++      who = next;
++      controller = FleetAdminController(
++          FleetAdminHttp(identity: _identity, boundIdentity: next),
++          isCurrent: () =>
++              mounted &&
++              generation == epoch &&
++              gFFI.userModel.userName.value == next.account &&
++              bind.mainGetLocalOption(key: 'access_token') == next.token);
++      setState(() {});
++      controller!.start();
++    } catch (_) {
++      if (mounted) retire();
++    } finally {
++      resolving = false;
++    }
++  }
++
++  @override
++  void dispose() {
++    timer?.cancel();
++    login?.cancel();
++    controller?.retire();
++    controller?.dispose();
++    super.dispose();
++  }
++
++  @override
++  Widget build(BuildContext context) => controller == null
++      ? const SizedBox.shrink()
++      : FleetAdminHeader(controller: controller!);
++}
+diff --git a/flutter/lib/steaddesk/fleet/fleet_admin_off.dart b/flutter/lib/steaddesk/fleet/fleet_admin_off.dart
+new file mode 100644
+--- /dev/null
++++ b/flutter/lib/steaddesk/fleet/fleet_admin_off.dart
+@@ -0,0 +1,7 @@
++import 'package:flutter/widgets.dart';
++
++class FleetAdminHost extends StatelessWidget {
++  const FleetAdminHost({super.key});
++  @override
++  Widget build(BuildContext context) => const SizedBox.shrink();
++}
+diff --git a/flutter/test/steaddesk/fleet_admin_test.dart b/flutter/test/steaddesk/fleet_admin_test.dart
+new file mode 100644
+--- /dev/null
++++ b/flutter/test/steaddesk/fleet_admin_test.dart
+@@ -0,0 +1,391 @@
++import 'dart:async';
++import 'dart:io';
++import 'dart:ui' as ui;
++import 'package:flutter/material.dart';
++import 'package:flutter/rendering.dart';
++import 'package:flutter/services.dart';
++import 'package:flutter_test/flutter_test.dart';
++import 'package:flutter_hbb/steaddesk/fleet/fleet_admin_client.dart';
++import 'package:flutter_hbb/steaddesk/fleet/fleet_admin_widgets.dart';
++
++Map<String, dynamic> fixture(
++        {bool publisher = true,
++        bool enabled = true,
++        bool resume = true,
++        bool activate = false}) =>
++    {
++      'capabilities': {
++        'publish': publisher,
++        'stop': publisher,
++        'resume': resume
++      },
++      'safety': {
++        'enabled': enabled,
++        'generation': 8,
++        'operator': 'test_operator',
++        'changed_at': '2026-11-14T23:10:00Z'
++      },
++      'batches': [
++        {
++          'id': 'test-release',
++          'ring': 1,
++          'batch': 0,
++          'stage': 'paused',
++          'reason': 'review_requested',
++          'failed': 1,
++          'healthy': 12,
++          'pending': 3,
++          'deferred_devices': 4,
++          'can_activate': activate,
++          'gate_reason': activate ? 'eligible' : 'small_sample',
++          'can_pause': false,
++          'can_resume': true
++        }
++      ],
++      'audit': [
++        {
++          'id': 'test-audit',
++          'action': 'fleet.safety.stop',
++          'target': 'global',
++          'actor': 'test_operator',
++          'at': '2026-11-14T23:10:00Z',
++          'reason': 'monthly_drill',
++          'result': 'ok'
++        }
++      ],
++    };
++
++class FakeFleet implements FleetAdminApi {
++  Map<String, dynamic> value = fixture();
++  final writes = <Map<String, Object?>>[];
++  int? error;
++  Completer<FleetDashboard>? pending;
++  @override
++  Future<FleetDashboard> fetch() async {
++    if (error != null) throw FleetAdminFailure(error!);
++    if (pending != null) return await pending!.future;
++    return FleetDashboard.from(value);
++  }
++
++  @override
++  Future<FleetDashboard> act(String action,
++      {int? generation, String? release, required String reason}) async {
++    if (error != null) throw FleetAdminFailure(error!);
++    writes.add({
++      'action': action,
++      'generation': generation,
++      'release': release,
++      'reason': reason
++    });
++    if (action == 'stop') (value['safety'] as Map)['enabled'] = false;
++    if (action == 'resume') (value['safety'] as Map)['enabled'] = true;
++    return FleetDashboard.from(value);
++  }
++
++  @override
++  void close() {}
++}
++
++Future<void> mount(WidgetTester tester, FleetAdminController controller,
++    {bool panel = false}) async {
++  tester.view.physicalSize = const Size(1200, 900);
++  tester.view.devicePixelRatio = 1;
++  addTearDown(tester.view.resetPhysicalSize);
++  addTearDown(tester.view.resetDevicePixelRatio);
++  await tester.pumpWidget(MaterialApp(
++      theme: ThemeData(
++          fontFamily: 'FleetTest',
++          useMaterial3: true,
++          colorScheme:
++              ColorScheme.fromSeed(seedColor: const Color(0xff0a6fa8))),
++      home: Scaffold(
++          body: RepaintBoundary(
++              key: const ValueKey('fleet-render'),
++              child: Material(
++                  color: Colors.white,
++                  child: Column(children: [
++                    FleetAdminHeader(controller: controller),
++                    if (panel)
++                      Expanded(child: FleetAdminPanel(controller: controller))
++                  ]))))));
++  await tester.pumpAndSettle();
++}
++
++void main() {
++  test('nonpublisher response omits all sensitive aggregate fields', () {
++    final d = FleetDashboard.from({
++      'capabilities': {'publish': false, 'stop': false, 'resume': false}
++    });
++    expect(d.publish, false);
++    expect(d.batches, isEmpty);
++    expect(d.audit, isEmpty);
++  });
++  test('malformed publisher safety never becomes legitimate stopped state', () {
++    final data = fixture();
++    (data['safety'] as Map)['enabled'] = 1;
++    expect(() => FleetDashboard.from(data), throwsA(isA<FleetAdminFailure>()));
++  });
++  test('reason bounds preserve Unicode but reject controls', () {
++    expect(validFleetReason('例行演练'), true);
++    expect(validFleetReason(' '), false);
++    expect(validFleetReason('a\nb'), false);
++    expect(validFleetReason('x' * 121), false);
++    expect(validFleetReason('🔧' * 120), true);
++  });
++  test('only TLS approved fixed origin is accepted', () {
++    for (final s in [
++      'http://localhost',
++      'https://user:secret@example.invalid',
++      'https://example.invalid/other',
++      'https://example.invalid/?q=1'
++    ]) {
++      expect(() => FleetAdminHttp.endpoint(Uri.parse(s)),
++          throwsA(isA<FleetAdminFailure>()));
++    }
++    expect(
++        FleetAdminHttp.endpoint(Uri.parse('https://example.invalid/ops/v1'))
++            .path,
++        '/ops/v1/fleet-updates');
++  });
++  test('bound token and origin changes reject before sending any request',
++      () async {
++    final original = FleetAdminIdentity(
++        origin: Uri.parse('https://old.example.invalid'),
++        account: 'staff',
++        token: 'test-a');
++    for (final changed in [
++      FleetAdminIdentity(
++          origin: original.origin, account: original.account, token: 'test-b'),
++      FleetAdminIdentity(
++          origin: Uri.parse('https://new.example.invalid'),
++          account: original.account,
++          token: original.token),
++      FleetAdminIdentity(
++          origin: original.origin, account: 'other', token: original.token)
++    ]) {
++      final api = FleetAdminHttp(
++          identity: () async => changed, boundIdentity: original);
++      await expectLater(
++          api.act('stop', generation: 8, reason: 'drill'),
++          throwsA(
++              isA<FleetAdminFailure>().having((e) => e.status, 'status', 401)));
++      api.close();
++    }
++  });
++  test('retired identity discards late snapshot', () async {
++    final api = FakeFleet()..pending = Completer<FleetDashboard>();
++    bool current = true;
++    final c = FleetAdminController(api, isCurrent: () => current);
++    final pending = c.refresh();
++    current = false;
++    api.pending!.complete(FleetDashboard.from(fixture()));
++    await pending;
++    expect(c.dashboard, isNull);
++    await expectLater(c.act('stop', generation: 8, reason: 'drill'),
++        throwsA(isA<FleetAdminFailure>()));
++    expect(api.writes, isEmpty);
++    c.dispose();
++  });
++  test(
++      'old poll cannot overwrite newer stopped generation and polls are single flight',
++      () async {
++    final api = FakeFleet();
++    final c = FleetAdminController(api, isCurrent: () => true);
++    await c.refresh();
++    api.pending = Completer<FleetDashboard>();
++    final old = c.refresh();
++    await c.refresh();
++    final previous = FleetDashboard.from(fixture());
++    await c.act('stop', generation: 8, reason: 'drill');
++    expect(c.dashboard!.enabled, false);
++    api.pending!.complete(previous);
++    await old;
++    expect(c.dashboard!.enabled, false);
++    c.dispose();
++  });
++  testWidgets('unauthorized capability hides header and all actions',
++      (tester) async {
++    final api = FakeFleet()..value = fixture(publisher: false);
++    final c = FleetAdminController(api, isCurrent: () => true);
++    await c.refresh();
++    await mount(tester, c);
++    expect(find.byKey(const ValueKey('fleet-header')), findsNothing);
++    expect(find.text('批量升级'), findsNothing);
++    await tester.pumpWidget(const SizedBox());
++    c.dispose();
++  });
++  testWidgets('publisher global stop uses exactly one confirmation',
++      (tester) async {
++    final api = FakeFleet();
++    final c = FleetAdminController(api, isCurrent: () => true);
++    await c.refresh();
++    await mount(tester, c);
++    await tester.tap(find.byKey(const ValueKey('fleet-stop')));
++    await tester.pumpAndSettle();
++    expect(api.writes, isEmpty);
++    expect(find.text('停止所有升级？'), findsOneWidget);
++    await tester.tap(find.text('确认'));
++    await tester.pumpAndSettle();
++    expect(api.writes.single['action'], 'stop');
++    expect(find.byKey(const ValueKey('fleet-stop')), findsNothing);
++    await tester.pumpWidget(const SizedBox());
++    c.dispose();
++  });
++  testWidgets(
++      'global resume requires first confirmation reason and final confirmation',
++      (tester) async {
++    final api = FakeFleet()..value = fixture(enabled: false);
++    final c = FleetAdminController(api, isCurrent: () => true);
++    await c.refresh();
++    await mount(tester, c);
++    await tester.tap(find.byKey(const ValueKey('fleet-resume')));
++    await tester.pumpAndSettle();
++    await tester.tap(find.text('确认'));
++    await tester.pumpAndSettle();
++    expect(find.byKey(const ValueKey('fleet-reason')), findsOneWidget);
++    expect(api.writes, isEmpty);
++    await tester.enterText(
++        find.byKey(const ValueKey('fleet-reason')), '演练核查完成');
++    await tester.pump();
++    await tester.tap(find.text('确认'));
++    await tester.pumpAndSettle();
++    expect(find.text('再次确认解除急停'), findsOneWidget);
++    expect(api.writes, isEmpty);
++    await tester.tap(find.text('确认'));
++    await tester.pumpAndSettle();
++    expect(api.writes.single['reason'], '演练核查完成');
++    expect(api.writes.single['action'], 'resume');
++    await tester.pumpWidget(const SizedBox());
++    c.dispose();
++  });
++  testWidgets('publisher lacking safety role cannot see global resume',
++      (tester) async {
++    final api = FakeFleet()..value = fixture(enabled: false, resume: false);
++    final c = FleetAdminController(api, isCurrent: () => true);
++    await c.refresh();
++    await mount(tester, c);
++    expect(find.byKey(const ValueKey('fleet-resume')), findsNothing);
++    expect(find.byKey(const ValueKey('fleet-open')), findsOneWidget);
++    await tester.pumpWidget(const SizedBox());
++    c.dispose();
++  });
++  testWidgets(
++      'authoritative small-sample gate disables advance while counts audit remain visible',
++      (tester) async {
++    final api = FakeFleet();
++    final c = FleetAdminController(api, isCurrent: () => true);
++    await c.refresh();
++    await mount(tester, c, panel: true);
++    final button = tester.widget<FilledButton>(
++        find.byKey(const ValueKey('fleet-activate-test-release')));
++    expect(button.onPressed, isNull);
++    expect(find.text('健康样本不足，不能自动推进'), findsOneWidget);
++    expect(find.text('失败 1'), findsOneWidget);
++    expect(find.text('健康 12'), findsOneWidget);
++    expect(find.text('观察 / 等待 3'), findsOneWidget);
++    expect(find.text('延期 4'), findsOneWidget);
++    expect(find.textContaining('fleet.safety.stop'), findsOneWidget);
++    await tester.pumpWidget(const SizedBox());
++    c.dispose();
++  });
++  testWidgets('account change while confirmation open prevents write',
++      (tester) async {
++    bool current = true;
++    final api = FakeFleet();
++    final c = FleetAdminController(api, isCurrent: () => current);
++    await c.refresh();
++    await mount(tester, c);
++    await tester.tap(find.byKey(const ValueKey('fleet-stop')));
++    await tester.pumpAndSettle();
++    current = false;
++    await tester.tap(find.text('确认'));
++    await tester.pumpAndSettle();
++    expect(api.writes, isEmpty);
++    await tester.pumpWidget(const SizedBox());
++    c.dispose();
++  });
++  testWidgets('403 immediately clears capabilities and rendered aggregate data',
++      (tester) async {
++    final api = FakeFleet();
++    final c = FleetAdminController(api, isCurrent: () => true);
++    await c.refresh();
++    await mount(tester, c, panel: true);
++    api.error = 403;
++    await c.refresh();
++    await tester.pump();
++    expect(find.byKey(const ValueKey('fleet-header')), findsNothing);
++    expect(find.text('失败 1'), findsNothing);
++    expect(find.text('当前账号没有此操作权限。'), findsOneWidget);
++    await tester.pumpWidget(const SizedBox());
++    c.dispose();
++  });
++  testWidgets('release pause resume and eligible advance require reason',
++      (tester) async {
++    final api = FakeFleet()..value = fixture(activate: true);
++    (api.value['batches'] as List).single['can_pause'] = true;
++    final c = FleetAdminController(api, isCurrent: () => true);
++    await c.refresh();
++    await mount(tester, c, panel: true);
++    for (final item in [
++      ('暂停发布', 'pause-release'),
++      ('恢复发布', 'resume-release'),
++      ('推进下一环 / 批次', 'activate')
++    ]) {
++      await tester.tap(find.text(item.$1));
++      await tester.pumpAndSettle();
++      expect(
++          api.writes.length,
++          item.$2 == 'pause-release'
++              ? 0
++              : item.$2 == 'resume-release'
++                  ? 1
++                  : 2);
++      await tester.enterText(
++          find.byKey(const ValueKey('fleet-reason')), '核查完成');
++      await tester.pump();
++      await tester.tap(find.text('确认'));
++      await tester.pumpAndSettle();
++      expect(api.writes.last['action'], item.$2);
++      expect(api.writes.last['release'], 'test-release');
++    }
++    await tester.pumpWidget(const SizedBox());
++    c.dispose();
++  });
++  testWidgets('render admin panel without overflow', (tester) async {
++    final font = Platform.environment['FLEET_ADMIN_FONT'];
++    if (font != null) {
++      await tester.runAsync(() async {
++        final loader = FontLoader('FleetTest')
++          ..addFont(
++              File(font).readAsBytes().then((b) => ByteData.sublistView(b)));
++        await loader.load();
++      });
++    }
++    final icons = Platform.environment['FLEET_ADMIN_ICONS'];
++    if (icons != null) {
++      await tester.runAsync(() async {
++        final loader = FontLoader('MaterialIcons')
++          ..addFont(
++              File(icons).readAsBytes().then((b) => ByteData.sublistView(b)));
++        await loader.load();
++      });
++    }
++    final api = FakeFleet();
++    final c = FleetAdminController(api, isCurrent: () => true);
++    await c.refresh();
++    await mount(tester, c, panel: true);
++    expect(tester.takeException(), isNull);
++    final path = Platform.environment['FLEET_ADMIN_RENDER'];
++    if (path != null) {
++      final boundary = tester.renderObject<RenderRepaintBoundary>(
++          find.byKey(const ValueKey('fleet-render')));
++      await tester.runAsync(() async {
++        final image = await boundary.toImage();
++        final bytes = await image.toByteData(format: ui.ImageByteFormat.png);
++        await File(path).writeAsBytes(bytes!.buffer.asUint8List());
++      });
++    }
++    await tester.pumpWidget(const SizedBox());
++    c.dispose();
++  });
++}
+diff --git a/flutter/lib/steaddesk/support_home.dart b/flutter/lib/steaddesk/support_home.dart
+--- a/flutter/lib/steaddesk/support_home.dart
++++ b/flutter/lib/steaddesk/support_home.dart
+@@ -19,10 +19,11 @@
+ import '../models/peer_tab_model.dart';
+ import '../models/ab_model.dart';
+ import 'ops_health_host.dart';
++import 'fleet_admin_api.dart';
+ import 'support_help_header_api.dart';
+ import 'case_inbox_api.dart' show PendingCasesBar;
+ import 'merchant_build.dart'
+-    show casesEnabled, helpEnabled, opsGroupsEnabled, opsHealthEnabled, merchantEdition;
++    show casesEnabled, helpEnabled, opsGroupsEnabled, opsHealthEnabled, merchantEdition, fleetAdminEnabled;
+ import 'ops_groups.dart';
+ import 'ops_group_tile.dart';
+ import 'support_device.dart';
+@@ -451,6 +452,7 @@
+                           child: Column(
+                               crossAxisAlignment: CrossAxisAlignment.stretch,
+                               children: [
++                            if(fleetAdminEnabled) const FleetAdminHost(),
+                             _HomeHeader(
+                                 restore: visible == _Rail.hidden
+                                     ? () => _setMode(_Rail.expanded)
