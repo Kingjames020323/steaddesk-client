@@ -1,0 +1,1542 @@
+diff --git a/Cargo.toml b/Cargo.toml
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -21,6 +21,7 @@
+ path = "src/service.rs"
+ 
+ [features]
++steaddesk-fleet-windows = ["dep:chrono-tz"]
+ inline = []
+ use_samplerate = ["samplerate", "libsamplerate-sys"]
+ use_rubato = ["rubato"]
+@@ -111,8 +112,10 @@
+ qrcode-generator = "4.1"
+ 
+ [target.'cfg(target_os = "windows")'.dependencies]
++chrono-tz = { version = "=0.10.4", optional = true }
+ winapi = { version = "0.3", features = [
+     "winuser",
++    "winbase",
+     "wincrypt",
+     "shellscalingapi",
+     "pdh",
+diff --git a/Cargo.lock b/Cargo.lock
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -1179,6 +1179,16 @@
+  "num-traits 0.2.19",
+  "wasm-bindgen",
+  "windows-link 0.1.1",
++]
++
++[[package]]
++name = "chrono-tz"
++version = "0.10.4"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "a6139a8597ed92cf816dfb33f5dd6cf0bb93a6adc938f11039f371bc5bcd26c3"
++dependencies = [
++ "chrono",
++ "phf 0.12.1",
+ ]
+ 
+ [[package]]
+@@ -5988,6 +5998,15 @@
+ ]
+ 
+ [[package]]
++name = "phf"
++version = "0.12.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "913273894cec178f401a31ec4b656318d95473527be05c0752cc41cdc32be8b7"
++dependencies = [
++ "phf_shared 0.12.1",
++]
++
++[[package]]
+ name = "phf_codegen"
+ version = "0.7.24"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+@@ -6041,6 +6060,15 @@
+ version = "0.11.3"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "67eabc2ef2a60eb7faa00097bd1ffdb5bd28e62bf39990626a582201b7a754e5"
++dependencies = [
++ "siphasher 1.0.1",
++]
++
++[[package]]
++name = "phf_shared"
++version = "0.12.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "06005508882fb681fd97892ecff4b7fd0fee13ef1aa569f8695dae7ab9099981"
+ dependencies = [
+  "siphasher 1.0.1",
+ ]
+@@ -7100,6 +7128,7 @@
+  "cc",
+  "cfg-if 1.0.0",
+  "chrono",
++ "chrono-tz",
+  "cidr-utils",
+  "clipboard",
+  "clipboard-master",
+diff --git a/src/lib.rs b/src/lib.rs
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -3,6 +3,8 @@
+ mod keyboard;
+ #[cfg(steaddesk_help_merchant)]
+ mod steaddesk_help;
++#[cfg(all(windows, steaddesk_fleet_windows))]
++mod steaddesk_fleet_windows;
+ #[cfg(all(target_os = "android", steaddesk_fleet_merchant))]
+ mod steaddesk_fleet_native;
+ /// cbindgen:ignore
+diff --git a/src/server.rs b/src/server.rs
+--- a/src/server.rs
++++ b/src/server.rs
+@@ -711,6 +711,8 @@
+         crate::platform::try_kill_broker();
+         #[cfg(feature = "hwcodec")]
+         scrap::hwcodec::start_check_process();
++        #[cfg(all(windows, steaddesk_fleet_windows))]
++        crate::steaddesk_fleet_windows::start();
+         crate::RendezvousMediator::start_all().await;
+     } else {
+         match crate::ipc::connect(1000, "").await {
+diff --git a/src/steaddesk_fleet_windows.rs b/src/steaddesk_fleet_windows.rs
+new file mode 100644
+--- /dev/null
++++ b/src/steaddesk_fleet_windows.rs
+@@ -0,0 +1,962 @@
++//! Fixed merchant update protocol. The controller is portable for focused tests;
++//! only the existing installed Windows service-owned server links its native host.
++use chrono::{DateTime, Duration as ChronoDuration, LocalResult, Offset, TimeZone, Utc};
++use chrono_tz::Tz;
++use hbb_common::{
++    base64::{engine::general_purpose::STANDARD, Engine},
++    config::Config as IdentityConfig,
++    sodiumoxide::{self, crypto::sign, randombytes::randombytes_into, utils::memzero},
++};
++use serde::{Deserialize, Serialize};
++use serde_json::{json, Value};
++use std::{
++    fmt,
++    time::{SystemTime, UNIX_EPOCH},
++};
++
++#[derive(Debug, Clone, Copy)]
++pub struct Error(pub &'static str);
++impl fmt::Display for Error {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        f.write_str(self.0)
++    }
++}
++impl std::error::Error for Error {}
++pub type Result<T> = std::result::Result<T, Error>;
++fn check(value: bool, reason: &'static str) -> Result<()> {
++    if value {
++        Ok(())
++    } else {
++        Err(Error(reason))
++    }
++}
++
++pub struct BuildConfig {
++    pub key_id: &'static str,
++    pub public_key: &'static str,
++    pub valid_from: u64,
++    pub valid_until: u64,
++    pub current_build: u64,
++    pub silent_profile: &'static str,
++}
++#[derive(Clone, Copy, Debug)]
++pub enum Operation {
++    Identity,
++    Assignment,
++    Safety,
++    Attempts,
++    Reports,
++}
++impl Operation {
++    pub fn path(self) -> &'static str {
++        match self {
++            Self::Identity => "/ops/v1/device/update-identity",
++            Self::Assignment => "/ops/v1/device/update-assignment",
++            Self::Safety => "/ops/v1/device/update-safety",
++            Self::Attempts => "/ops/v1/device/update-attempts",
++            Self::Reports => "/ops/v1/device/update-reports",
++        }
++    }
++    pub fn get(self) -> bool {
++        matches!(self, Self::Identity | Self::Assignment)
++    }
++}
++
++pub fn strict_json(bytes: &[u8]) -> Result<Value> {
++    struct Unique(Value);
++    impl<'de> Deserialize<'de> for Unique {
++        fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
++            struct Visitor;
++            impl<'de> serde::de::Visitor<'de> for Visitor {
++                type Value = Unique;
++                fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
++                    f.write_str("strict integer JSON")
++                }
++                fn visit_bool<E: serde::de::Error>(
++                    self,
++                    v: bool,
++                ) -> std::result::Result<Unique, E> {
++                    Ok(Unique(json!(v)))
++                }
++                fn visit_i64<E: serde::de::Error>(self, v: i64) -> std::result::Result<Unique, E> {
++                    Ok(Unique(json!(v)))
++                }
++                fn visit_u64<E: serde::de::Error>(self, v: u64) -> std::result::Result<Unique, E> {
++                    Ok(Unique(json!(v)))
++                }
++                fn visit_str<E: serde::de::Error>(self, v: &str) -> std::result::Result<Unique, E> {
++                    Ok(Unique(json!(v)))
++                }
++                fn visit_string<E: serde::de::Error>(
++                    self,
++                    v: String,
++                ) -> std::result::Result<Unique, E> {
++                    Ok(Unique(json!(v)))
++                }
++                fn visit_unit<E: serde::de::Error>(self) -> std::result::Result<Unique, E> {
++                    Ok(Unique(Value::Null))
++                }
++                fn visit_none<E: serde::de::Error>(self) -> std::result::Result<Unique, E> {
++                    Ok(Unique(Value::Null))
++                }
++                fn visit_seq<A: serde::de::SeqAccess<'de>>(
++                    self,
++                    mut a: A,
++                ) -> std::result::Result<Unique, A::Error> {
++                    let mut out = Vec::new();
++                    while let Some(Unique(v)) = a.next_element()? {
++                        out.push(v);
++                    }
++                    Ok(Unique(Value::Array(out)))
++                }
++                fn visit_map<A: serde::de::MapAccess<'de>>(
++                    self,
++                    mut a: A,
++                ) -> std::result::Result<Unique, A::Error> {
++                    let mut out = serde_json::Map::new();
++                    while let Some((k, Unique(v))) = a.next_entry::<String, Unique>()? {
++                        if out.insert(k, v).is_some() {
++                            return Err(serde::de::Error::custom("duplicate key"));
++                        }
++                    }
++                    Ok(Unique(Value::Object(out)))
++                }
++            }
++            d.deserialize_any(Visitor)
++        }
++    }
++    serde_json::from_slice::<Unique>(bytes)
++        .map(|v| v.0)
++        .map_err(|_| Error("invalid_json"))
++}
++fn number(v: &Value, key: &str) -> Result<u64> {
++    v.get(key)
++        .and_then(Value::as_u64)
++        .ok_or(Error("invalid_fields"))
++}
++fn text<'a>(v: &'a Value, key: &str) -> Result<&'a str> {
++    v.get(key)
++        .and_then(Value::as_str)
++        .ok_or(Error("invalid_fields"))
++}
++pub fn hex(bytes: &[u8]) -> String {
++    bytes.iter().map(|b| format!("{b:02x}")).collect()
++}
++pub fn hash_hex(value: &str) -> Result<[u8; 32]> {
++    check(
++        value.len() == 64
++            && value
++                .bytes()
++                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
++        "artifact_hash",
++    )?;
++    let mut out = [0u8; 32];
++    for i in 0..32 {
++        out[i] =
++            u8::from_str_radix(&value[i * 2..i * 2 + 2], 16).map_err(|_| Error("artifact_hash"))?;
++    }
++    Ok(out)
++}
++fn random_nonce() -> Result<String> {
++    sodiumoxide::init().map_err(|_| Error("no_safety"))?;
++    let mut b = [0; 16];
++    randombytes_into(&mut b);
++    Ok(hex(&b))
++}
++fn token(v: &str) -> bool {
++    !v.is_empty()
++        && v.len() <= 80
++        && v.bytes()
++            .all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b))
++}
++
++#[derive(Clone, Debug, Deserialize, Serialize)]
++#[serde(deny_unknown_fields)]
++pub struct Manifest {
++    pub schema: u64,
++    pub release_id: String,
++    pub sequence: u64,
++    pub key_id: String,
++    pub issued_at: u64,
++    pub expires_at: u64,
++    pub ring: u64,
++    pub batch: u64,
++    pub bucket_end: u64,
++    pub platform: String,
++    pub package: String,
++    pub channel: String,
++    pub architecture: String,
++    #[serde(rename = "versionCode")]
++    pub version: u64,
++    pub display_version: String,
++    pub min_os: u64,
++    pub size_bytes: u64,
++    pub artifact_path: String,
++    pub sha256: String,
++    pub signer_cert_sha256: String,
++    pub previous_release_id: Option<String>,
++    pub health_policy_id: String,
++}
++pub fn verified_manifest(assignment: &Value, cfg: &BuildConfig, now: u64) -> Result<Manifest> {
++    check(
++        text(assignment, "key_id")? == cfg.key_id
++            && cfg.key_id.starts_with("test-")
++            && now >= cfg.valid_from
++            && now < cfg.valid_until,
++        "manifest_signature",
++    )?;
++    let raw = STANDARD
++        .decode(text(assignment, "manifest")?)
++        .map_err(|_| Error("manifest_signature"))?;
++    let sig = STANDARD
++        .decode(text(assignment, "signature")?)
++        .map_err(|_| Error("manifest_signature"))?;
++    check(!raw.is_empty() && raw.len() <= 32768, "manifest_signature")?;
++    let pk = STANDARD
++        .decode(cfg.public_key)
++        .map_err(|_| Error("manifest_signature"))?;
++    let pk = sign::PublicKey::from_slice(&pk).ok_or(Error("manifest_signature"))?;
++    let sig = sign::Signature::from_bytes(&sig).map_err(|_| Error("manifest_signature"))?;
++    sodiumoxide::init().map_err(|_| Error("manifest_signature"))?;
++    check(sign::verify_detached(&sig, &raw, &pk), "manifest_signature")?;
++    let value = strict_json(&raw).map_err(|_| Error("manifest_signature"))?;
++    check(
++        value.as_object().map(|o| o.len()) == Some(22)
++            && value.get("previous_release_id").is_some(),
++        "manifest_signature",
++    )?;
++    let m: Manifest = serde_json::from_value(value).map_err(|_| Error("manifest_signature"))?;
++    check(
++        m.schema == 1
++            && m.sequence > 0
++            && m.version > 0
++            && m.version <= 65535
++            && m.key_id == cfg.key_id
++            && token(&m.release_id)
++            && token(&m.display_version),
++        "manifest_signature",
++    )?;
++    check(
++        m.issued_at >= cfg.valid_from
++            && m.issued_at <= now
++            && now < m.expires_at
++            && m.expires_at <= cfg.valid_until,
++        "manifest_signature",
++    )?;
++    check(
++        m.platform == "windows"
++            && m.package == "SteadDesk"
++            && m.channel == "merchant"
++            && m.architecture == "x64"
++            && m.health_policy_id == "c4-v1",
++        "platform_mismatch",
++    )?;
++    check(
++        m.previous_release_id
++            .as_deref()
++            .map_or(true, |v| token(v) && v != m.release_id)
++            && m.min_os > 0,
++        "manifest_signature",
++    )?;
++    check(
++        m.ring <= 2
++            && m.bucket_end > 0
++            && m.bucket_end <= 100
++            && (if m.ring == 2 {
++                m.batch > 0
++            } else {
++                m.batch == 0 && m.bucket_end == 100
++            }),
++        "manifest_signature",
++    )?;
++    check(
++        number(assignment, "ring")? == m.ring && m.size_bytes > 0 && m.size_bytes <= 536870912,
++        "manifest_signature",
++    )?;
++    hash_hex(&m.sha256)?;
++    hash_hex(&m.signer_cert_sha256)?;
++    check(
++        m.artifact_path.len() <= 512 && m.artifact_path.ends_with(".exe"),
++        "platform_mismatch",
++    )?;
++    for part in m.artifact_path.split('/') {
++        let stem = part.split('.').next().unwrap_or("").to_ascii_uppercase();
++        check(
++            !part.is_empty()
++                && part.len() <= 128
++                && !part.ends_with('.')
++                && part
++                    .bytes()
++                    .all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b))
++                && part.bytes().next().map_or(false, |b| {
++                    b.is_ascii_alphanumeric() || b == b'_' || b == b'-'
++                })
++                && !matches!(
++                    stem.as_str(),
++                    "CON"
++                        | "PRN"
++                        | "AUX"
++                        | "NUL"
++                        | "COM1"
++                        | "COM2"
++                        | "COM3"
++                        | "COM4"
++                        | "COM5"
++                        | "COM6"
++                        | "COM7"
++                        | "COM8"
++                        | "COM9"
++                        | "LPT1"
++                        | "LPT2"
++                        | "LPT3"
++                        | "LPT4"
++                        | "LPT5"
++                        | "LPT6"
++                        | "LPT7"
++                        | "LPT8"
++                        | "LPT9"
++                ),
++            "manifest_signature",
++        )?;
++    }
++    Ok(m)
++}
++
++pub fn business_day(w: &Value, now: u64) -> Result<String> {
++    let zone: Tz = text(w, "zone")?
++        .parse()
++        .map_err(|_| Error("window_unknown"))?;
++    let (start, end) = (number(w, "start_min")?, number(w, "end_min")?);
++    check(start < 1440 && end < 1440 && start != end, "window_unknown")?;
++    let instant =
++        DateTime::<Utc>::from_timestamp(i64::try_from(now).map_err(|_| Error("clock_unknown"))?, 0)
++            .ok_or(Error("clock_unknown"))?;
++    let local = instant.with_timezone(&zone);
++    let mut day = local.date_naive();
++    use chrono::Timelike;
++    if end < start && u64::from(local.hour() * 60 + local.minute()) < end {
++        day -= ChronoDuration::days(1);
++    }
++    let base = day.and_hms_opt(0, 0, 0).ok_or(Error("window_unknown"))?;
++    let a = base + ChronoDuration::minutes(start as i64);
++    let b =
++        base + ChronoDuration::days(i64::from(end < start)) + ChronoDuration::minutes(end as i64);
++    let (LocalResult::Single(left), LocalResult::Single(right)) =
++        (zone.from_local_datetime(&a), zone.from_local_datetime(&b))
++    else {
++        return Err(Error("outside_window"));
++    };
++    let offset = left.offset().fix();
++    let mut cursor = a;
++    while cursor <= b {
++        match zone.from_local_datetime(&cursor) {
++            LocalResult::Single(t) if t.offset().fix() == offset => {}
++            _ => return Err(Error("outside_window")),
++        }
++        cursor += ChronoDuration::minutes(1);
++    }
++    check(
++        instant >= left.with_timezone(&Utc) && instant < right.with_timezone(&Utc),
++        "outside_window",
++    )?;
++    let result = day.to_string();
++    check(text(w, "business_day")? == result, "window_unknown")?;
++    Ok(result)
++}
++
++#[derive(Default, Clone, Debug, Serialize, Deserialize)]
++#[serde(default, deny_unknown_fields)]
++pub struct State {
++    pub key_version: u64,
++    pub generation: u64,
++    pub highest_sequence: u64,
++    pub last_day: String,
++    pub last_started: u64,
++    pub report_seq: u64,
++    pub transaction: Option<Transaction>,
++    pub reports: Vec<Value>,
++    pub managed_payload: Option<String>,
++}
++#[derive(Clone, Debug, Serialize, Deserialize)]
++#[serde(deny_unknown_fields)]
++pub struct Transaction {
++    pub assignment: String,
++    pub attempt: Option<String>,
++    pub manifest: Manifest,
++    pub os_session: String,
++    pub stage: String,
++    pub installer_code: Option<u32>,
++    pub payload_sha256: String,
++    pub prior_pid: u32,
++    pub prior_created: u64,
++    pub prior_boot_id: u64,
++    pub prior_build: u64,
++    pub prior_sha256: String,
++}
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub struct Installed {
++    pub build: u64,
++    pub os: u64,
++    pub pid: u32,
++    pub created: u64,
++    pub binary_sha256: [u8; 32],
++}
++pub trait Host {
++    type Installer;
++    fn now(&mut self) -> Result<u64>;
++    fn boot_id(&mut self) -> Result<u64>;
++    fn local_gates(&mut self) -> Result<()>;
++    fn installed(&mut self) -> Result<Installed>;
++    fn request(&mut self, op: Operation, body: &Value, key_version: u64) -> Result<Value>;
++    fn prepare(&mut self, manifest: &Manifest) -> Result<(Self::Installer, [u8; 32])>;
++    fn launch(&mut self, installer: &mut Self::Installer) -> Result<u32>;
++    fn readback(&mut self, transaction: &Transaction) -> Result<bool>;
++    fn persist(&mut self, state: &State) -> Result<()>;
++    fn log(&mut self, event: &str, reason: &str) -> Result<()>;
++}
++fn request<H: Host>(h: &mut H, s: &mut State, op: Operation, body: Value) -> Result<Value> {
++    if s.key_version == 0 {
++        let reply = h.request(Operation::Identity, &json!({}), 0)?;
++        s.key_version = number(&reply, "key_version")?;
++        check(s.key_version > 0, "no_safety")?;
++        h.persist(s)?;
++    }
++    match h.request(op, &body, s.key_version) {
++        Err(Error("identity_refresh")) => {
++            s.key_version = 0;
++            h.persist(s)?;
++            Err(Error("no_safety"))
++        }
++        result => result,
++    }
++}
++fn flush<H: Host>(h: &mut H, s: &mut State) -> Result<()> {
++    while let Some(first) = s.reports.first().cloned() {
++        request(h, s, Operation::Reports, first)?;
++        s.reports.remove(0);
++        h.persist(s)?;
++    }
++    Ok(())
++}
++fn report<H: Host>(
++    h: &mut H,
++    s: &mut State,
++    subject: &str,
++    status: &str,
++    reason: Option<&str>,
++    t: Option<&Transaction>,
++) -> Result<()> {
++    check(s.reports.len() < 256, "no_safety")?;
++    s.report_seq = s.report_seq.checked_add(1).ok_or(Error("no_safety"))?;
++    let at = h.now()?;
++    let mut value = json!({"id":subject,"seq":s.report_seq,"state":status,"observed_at":at});
++    if let Some(reason) = reason {
++        value["reason"] = json!(reason);
++    }
++    if let Some(t) = t {
++        value["os_session"] = json!(t.os_session);
++        if let Some(code) = t.installer_code {
++            if code == 0 || status == "pending_reboot" || status == "failed" {
++                value["installer_code"] = json!(code);
++            }
++        }
++        if status == "observing" && t.stage == "observing" {
++            value["heartbeat_at"] = json!(at);
++            value["build"] = json!(t.manifest.version);
++            value["artifact_sha256"] = json!(t.manifest.sha256);
++            value["service_verified"] = json!(true);
++            value["identity_verified"] = json!(true);
++        }
++    }
++    s.reports.push(value);
++    h.persist(s)?;
++    h.log("report", status)?;
++    flush(h, s)
++}
++fn local_checks<H: Host>(
++    h: &mut H,
++    s: &State,
++    w: &Value,
++    m: &Manifest,
++    cfg: &BuildConfig,
++) -> Result<(u64, String, Installed)> {
++    let at = h.now()?;
++    let day = business_day(w, at)?;
++    h.local_gates()?;
++    let current = h.installed()?;
++    check(
++        s.managed_payload
++            .as_deref()
++            .map_or(true, |known| known == hex(&current.binary_sha256)),
++        "brand_mismatch",
++    )?;
++    check(
++        current.build == cfg.current_build && m.version > current.build,
++        "same_version",
++    )?;
++    check(current.os >= m.min_os, "platform_mismatch")?;
++    check(
++        day != s.last_day
++            && (s.last_started == 0 || at >= s.last_started && at - s.last_started >= 86400),
++        "outside_window",
++    )?;
++    Ok((at, day, current))
++}
++
++pub fn tick<H: Host>(h: &mut H, s: &mut State, cfg: &BuildConfig) -> Result<()> {
++    if s.transaction.is_some() {
++        return recover(h, s);
++    }
++    // The existing service-owned server and its companion must be known live
++    // before this worker polls or stages anything; a late peer start can retry.
++    h.local_gates()?;
++    flush(h, s)?;
++    let a = request(h, s, Operation::Assignment, json!({}))?;
++    if a.get("assignment").map_or(true, Value::is_null) {
++        return h.log("assignment", "none");
++    }
++    let aid = text(&a, "assignment")?.to_owned();
++    check(token(&aid), "no_safety")?;
++    let work = (|| {
++        let at = h.now()?;
++        check(at < number(&a, "expires_at")?, "no_safety")?;
++        let m = verified_manifest(&a, cfg, at)?;
++        check(m.sequence > s.highest_sequence, "low_sequence")?;
++        check(
++            !cfg.silent_profile.is_empty() && text(&a, "silent_profile")? == cfg.silent_profile,
++            "no_safety",
++        )?;
++        let w = a.get("window").ok_or(Error("window_unknown"))?;
++        local_checks(h, s, w, &m, cfg)?;
++        h.log("manifest", "verified")?;
++        let (mut installer, payload) = h.prepare(&m)?;
++        h.log("artifact", "verified")?;
++        let (at, day, prior) = local_checks(h, s, w, &m, cfg)?;
++        let nonce = random_nonce()?;
++        let safety = request(
++            h,
++            s,
++            Operation::Safety,
++            json!({"nonce":nonce,"purpose":"install","assignment":aid,"min_generation":s.generation}),
++        )?;
++        let (generation, issued, expires) = (
++            number(&safety, "generation")?,
++            number(&safety, "issued_at")?,
++            number(&safety, "expires_at")?,
++        );
++        check(generation >= s.generation, "no_safety")?;
++        s.generation = generation;
++        h.persist(s)?;
++        let fresh = h.now()?;
++        check(
++            safety.get("enabled") == Some(&Value::Bool(true))
++                && text(&safety, "nonce")? == nonce
++                && text(&safety, "purpose")? == "install"
++                && issued <= fresh
++                && fresh < expires
++                && expires.checked_sub(issued).map_or(false, |n| n <= 15),
++            "no_safety",
++        )?;
++        let (_, final_day, current) = local_checks(h, s, w, &m, cfg)?;
++        check(final_day == day, "outside_window")?;
++        check(current == prior, "brand_mismatch")?;
++        let facts = json!({"installed":current.build,"platform":"windows","package":"SteadDesk","architecture":"x64","os":current.os,"artifact_sha256":m.sha256,"signer_cert_sha256":m.signer_cert_sha256,"size_bytes":m.size_bytes,"signature_verified":true,"local_window":true,"remote_session":false,"merchant_paused":false,"force_stopped":false,"highest_sequence":s.highest_sequence,"interactive":false,"accepted":false,"profile":cfg.silent_profile});
++        let t = Transaction {
++            assignment: aid.clone(),
++            attempt: None,
++            manifest: m,
++            os_session: format!("win_{}", random_nonce()?),
++            stage: "committing".into(),
++            installer_code: None,
++            payload_sha256: hex(&payload),
++            prior_pid: prior.pid,
++            prior_created: prior.created,
++            prior_boot_id: h.boot_id()?,
++            prior_build: prior.build,
++            prior_sha256: hex(&prior.binary_sha256),
++        };
++        s.last_day = day;
++        s.last_started = at;
++        s.transaction = Some(t);
++        h.persist(s)?;
++        h.log("committing", "reserved")?;
++        let granted = request(
++            h,
++            s,
++            Operation::Attempts,
++            json!({"assignment":aid,"permit":text(&safety,"permit")?,"nonce":nonce,"generation":generation,"facts":facts}),
++        )?;
++        check(
++            granted.get("install_authorized") == Some(&Value::Bool(true))
++                && number(&granted, "generation")? == generation,
++            "no_safety",
++        )?;
++        let mut t = s.transaction.clone().ok_or(Error("no_safety"))?;
++        t.attempt = Some(text(&granted, "attempt")?.to_owned());
++        t.stage = "authorized".into();
++        s.transaction = Some(t.clone());
++        h.persist(s)?;
++        let final_time = h.now()?;
++        check(
++            final_time < expires && final_time < number(&a, "expires_at")?,
++            "no_safety",
++        )?;
++        h.local_gates()?;
++        business_day(w, final_time)?;
++        check(h.installed()? == current, "brand_mismatch")?;
++        t.stage = "submitted".into();
++        s.transaction = Some(t.clone());
++        h.persist(s)?;
++        // A slow durable write cannot turn an expired permit into a live one.
++        h.local_gates()?;
++        check(h.installed()? == current, "brand_mismatch")?;
++        let boundary = h.now()?;
++        check(
++            boundary < expires && boundary < number(&a, "expires_at")?,
++            "no_safety",
++        )?;
++        check(business_day(w, boundary)? == s.last_day, "outside_window")?;
++        // Persisted before the OS call. A lost result is never permission to call it twice.
++        let code = h.launch(&mut installer)?;
++        t.installer_code = Some(code);
++        let status = match code {
++            0 => "submitted",
++            3010 => "pending_reboot",
++            _ => "failed",
++        };
++        t.stage = status.into();
++        s.transaction = Some(t.clone());
++        h.persist(s)?;
++        h.log(
++            "installer",
++            if code == 0 {
++                "launch_accepted"
++            } else if code == 3010 {
++                "pending_reboot"
++            } else {
++                "failed"
++            },
++        )?;
++        if code == 3010 || code != 0 {
++            return report(
++                h,
++                s,
++                t.attempt.as_deref().ok_or(Error("no_safety"))?,
++                status,
++                if code == 3010 {
++                    None
++                } else {
++                    Some("install_failed")
++                },
++                Some(&t),
++            );
++        }
++        report(
++            h,
++            s,
++            t.attempt.as_deref().ok_or(Error("no_safety"))?,
++            "observing",
++            None,
++            Some(&t),
++        )?;
++        recover(h, s)
++    })();
++    if let Err(error) = work {
++        h.log("stopped", error.0)?;
++        if s.transaction.is_none() {
++            let status = if matches!(
++                error.0,
++                "artifact_hash"
++                    | "artifact_size"
++                    | "artifact_signature"
++                    | "signer_mismatch"
++                    | "manifest_signature"
++                    | "platform_mismatch"
++                    | "package_mismatch"
++            ) {
++                "rejected"
++            } else {
++                "deferred"
++            };
++            let reason = if matches!(
++                error.0,
++                "artifact_hash"
++                    | "artifact_size"
++                    | "artifact_signature"
++                    | "signer_mismatch"
++                    | "manifest_signature"
++                    | "platform_mismatch"
++                    | "package_mismatch"
++                    | "merchant_pause"
++                    | "j23"
++                    | "outside_window"
++                    | "session_unknown"
++                    | "same_version"
++                    | "low_sequence"
++                    | "clock_unknown"
++                    | "window_unknown"
++            ) {
++                error.0
++            } else {
++                "no_safety"
++            };
++            report(h, s, &aid, status, Some(reason), None)?;
++        }
++        return Err(error);
++    }
++    Ok(())
++}
++
++pub fn recover<H: Host>(h: &mut H, s: &mut State) -> Result<()> {
++    let mut t = s.transaction.clone().ok_or(Error("no_safety"))?;
++    // Native service/process identity is inspected before asking the server; never relaunch.
++    let healthy = h.readback(&t)?;
++    let lookup = request(h, s, Operation::Assignment, json!({}))?;
++    let previous = lookup
++        .get("reconcile_only")
++        .filter(|v| v.get("assignment").and_then(Value::as_str) == Some(t.assignment.as_str()));
++    if let Some(p) = previous {
++        if t.attempt.is_none() {
++            t.attempt = Some(text(p, "attempt")?.to_owned());
++            s.report_seq = s.report_seq.max(number(p, "seq")?);
++            s.transaction = Some(t.clone());
++            h.persist(s)?;
++        }
++        match p.get("state").and_then(Value::as_str) {
++            Some("healthy") if healthy => {
++                let aid = t.attempt.as_deref().ok_or(Error("no_safety"))?;
++                s.reports
++                    .retain(|r| r.get("id").and_then(Value::as_str) != Some(aid));
++                s.highest_sequence = s.highest_sequence.max(t.manifest.sequence);
++                s.managed_payload = Some(t.payload_sha256.clone());
++                s.transaction = None;
++                h.persist(s)?;
++                return h.log("health", "server_observation_complete");
++            }
++            Some("failed") => {
++                t.stage = "failed".into();
++                s.transaction = Some(t);
++                h.persist(s)?;
++                return h.log("health", "frozen");
++            }
++            _ => {}
++        }
++    }
++    flush(h, s)?;
++    let Some(aid) = t.attempt.as_deref() else {
++        return h.log("recovery", "manual_required");
++    };
++    if t.stage == "failed" {
++        return h.log("recovery", "frozen");
++    }
++    if !healthy {
++        return h.log("recovery", "service_unverified");
++    }
++    if t.installer_code.is_none() {
++        return h.log("recovery", "installer_result_unknown");
++    }
++    if t.installer_code == Some(3010) && h.boot_id()? == t.prior_boot_id {
++        return h.log("recovery", "pending_reboot");
++    }
++    if let Err(error) = h.local_gates() {
++        if error.0 == "merchant_pause" {
++            return report(h, s, aid, "paused", Some("merchant_pause"), Some(&t));
++        }
++        return h.log("recovery", error.0);
++    }
++    // 3010 remains pending until native readback proves a replacement service process
++    // with the exact signed payload digest. Exit 0 alone is never health evidence.
++    t.stage = "observing".into();
++    s.highest_sequence = s.highest_sequence.max(t.manifest.sequence);
++    s.transaction = Some(t.clone());
++    h.persist(s)?;
++    report(h, s, aid, "observing", None, Some(&t))
++}
++
++fn proof_bytes(
++    op: Operation,
++    body: &Value,
++    device: &str,
++    version: u64,
++    stamp: u64,
++    nonce: &str,
++) -> Result<Vec<u8>> {
++    check(
++        body.is_object()
++            && (!op.get() || body == &json!({}))
++            && ((matches!(op, Operation::Identity) && version == 0)
++                || (!matches!(op, Operation::Identity) && version > 0)),
++        "no_safety",
++    )?;
++    let mut bytes = b"SteadDesk-fleet-v1\0".to_vec();
++    bytes.extend(
++        serde_json::to_vec(&json!([
++            if op.get() { "GET" } else { "POST" },
++            op.path(),
++            body,
++            device,
++            version,
++            stamp,
++            nonce
++        ]))
++        .map_err(|_| Error("no_safety"))?,
++    );
++    Ok(bytes)
++}
++fn device_headers(op: Operation, body: &Value, version: u64) -> Result<Value> {
++    sodiumoxide::init().map_err(|_| Error("no_safety"))?;
++    let id = IdentityConfig::get_id_or(String::new());
++    check(
++        (9..=10).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_digit()),
++        "no_safety",
++    )?;
++    let (mut secret, public) = IdentityConfig::get_existing_key_pair().ok_or(Error("no_safety"))?;
++    let key = sign::SecretKey::from_slice(&secret);
++    memzero(&mut secret);
++    let key = key.ok_or(Error("no_safety"))?;
++    let public = sign::PublicKey::from_slice(&public).ok_or(Error("no_safety"))?;
++    let stamp = SystemTime::now()
++        .duration_since(UNIX_EPOCH)
++        .map_err(|_| Error("clock_unknown"))?
++        .as_secs();
++    let nonce = random_nonce()?;
++    let bytes = proof_bytes(op, body, &id, version, stamp, &nonce)?;
++    let sig = sign::sign_detached(&bytes, &key);
++    check(sign::verify_detached(&sig, &bytes, &public), "no_safety")?;
++    Ok(
++        json!({"X-Fleet-Device":id,"X-Fleet-Key-Version":version.to_string(),"X-Fleet-Time":stamp.to_string(),"X-Fleet-Nonce":nonce,"X-Fleet-Signature":STANDARD.encode(sig.to_bytes())}),
++    )
++}
++
++#[cfg(all(windows, not(steaddesk_fleet_portable_test)))]
++#[path = "steaddesk_fleet_windows_host.rs"]
++mod windows_host;
++#[cfg(all(windows, not(steaddesk_fleet_portable_test)))]
++pub use windows_host::start;
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    #[test]
++    fn strict_input_rejects_duplicates_fractional_and_unsupported_domains() {
++        for bytes in [
++            br#"{"x":1,"x":2}"#.as_slice(),
++            br#"{"x":1.0}"#,
++            br#"{"x":NaN}"#,
++            br#"{"x":1}trailing"#,
++        ] {
++            assert!(strict_json(bytes).is_err());
++        }
++        assert!(strict_json("{\"x\":\"打印机\"}".as_bytes()).is_ok());
++        assert!(proof_bytes(
++            Operation::Assignment,
++            &json!({}),
++            "790001001",
++            0,
++            1,
++            "nonce"
++        )
++        .is_err());
++        assert!(proof_bytes(Operation::Identity, &json!({}), "790001001", 1, 1, "nonce").is_err());
++        let proof = proof_bytes(
++            Operation::Reports,
++            &json!({"reason":"打印机","seq":1}),
++            "790001001",
++            7,
++            1794729600,
++            "000102030405060708090a0b0c0d0e0f",
++        )
++        .unwrap();
++        assert_eq!(String::from_utf8(proof).unwrap(),"SteadDesk-fleet-v1\0[\"POST\",\"/ops/v1/device/update-reports\",{\"reason\":\"打印机\",\"seq\":1},\"790001001\",7,1794729600,\"000102030405060708090a0b0c0d0e0f\"]");
++    }
++    #[test]
++    fn window_refuses_dst_and_checks_cross_midnight_business_day() {
++        let stamp = Utc
++            .with_ymd_and_hms(2026, 11, 14, 1, 0, 0)
++            .unwrap()
++            .timestamp() as u64;
++        assert_eq!(
++            business_day(
++                &json!({"zone":"UTC","start_min":1380,"end_min":120,"business_day":"2026-11-13"}),
++                stamp
++            )
++            .unwrap(),
++            "2026-11-13"
++        );
++        for (month, day, hour) in [(3, 8, 10), (11, 1, 9)] {
++            let at = Utc
++                .with_ymd_and_hms(2026, month, day, hour, 0, 0)
++                .unwrap()
++                .timestamp() as u64;
++            assert!(business_day(&json!({"zone":"America/Los_Angeles","start_min":0,"end_min":240,"business_day":format!("2026-{month:02}-{day:02}")}),at).is_err());
++        }
++        assert!(business_day(&json!({"zone":"Unknown/Nowhere","start_min":0,"end_min":60,"business_day":"2026-11-14"}),stamp).is_err());
++    }
++    #[test]
++    fn detached_release_verification_precedes_uri_and_uses_build_root_only() {
++        sodiumoxide::init().unwrap();
++        let (pk, sk) = sign::gen_keypair();
++        let public = STANDARD.encode(pk.0);
++        let public = Box::leak(public.into_boxed_str());
++        let cfg = BuildConfig {
++            key_id: "test-preview",
++            public_key: public,
++            valid_from: 1700000000,
++            valid_until: 1900000000,
++            current_build: 69,
++            silent_profile: "approved",
++        };
++        let m = json!({"schema":1,"release_id":"r0","sequence":1,"key_id":"test-preview","issued_at":1794729500,"expires_at":1794739600,"ring":0,"batch":0,"bucket_end":100,"platform":"windows","package":"SteadDesk","channel":"merchant","architecture":"x64","versionCode":70,"display_version":"1.5.0-sd.70","min_os":10,"size_bytes":100,"artifact_path":"test/update.exe","sha256":"1".repeat(64),"signer_cert_sha256":"2".repeat(64),"previous_release_id":null,"health_policy_id":"c4-v1"});
++        let raw = serde_json::to_vec(&m).unwrap();
++        let sig = sign::sign_detached(&raw, &sk);
++        let mut assignment = json!({"ring":0,"key_id":"test-preview","manifest":STANDARD.encode(&raw),"signature":STANDARD.encode(sig.to_bytes())});
++        assert_eq!(
++            verified_manifest(&assignment, &cfg, 1794729600)
++                .unwrap()
++                .version,
++            70
++        );
++        let mut changed = raw.clone();
++        changed[1] ^= 1;
++        assignment["manifest"] = json!(STANDARD.encode(changed));
++        assert!(verified_manifest(&assignment, &cfg, 1794729600).is_err());
++        assignment["manifest"] = json!(STANDARD.encode(&raw));
++        assignment["key_id"] = json!("network-root");
++        assert!(verified_manifest(&assignment, &cfg, 1794729600).is_err());
++        assignment["key_id"] = json!("test-preview");
++        assert!(verified_manifest(&assignment, &cfg, 1900000000).is_err());
++    }
++    #[test]
++    fn existing_help_identity_signs_without_exposing_keys_and_nonce_is_fresh() {
++        let path =
++            std::env::temp_dir().join(format!("windows-fleet-identity-{}", std::process::id()));
++        std::fs::create_dir_all(&path).unwrap();
++        let name = path.join("fixture");
++        *hbb_common::config::APP_NAME.write().unwrap() = name.to_str().unwrap().to_owned();
++        assert_eq!(IdentityConfig::file(), name.with_extension("toml"));
++        IdentityConfig::set_id("790001001");
++        let public = IdentityConfig::get_key_pair().1;
++        let a = device_headers(Operation::Identity, &json!({}), 0).unwrap();
++        let b = device_headers(Operation::Identity, &json!({}), 0).unwrap();
++        assert_ne!(a["X-Fleet-Nonce"], b["X-Fleet-Nonce"]);
++        assert_eq!(a.as_object().unwrap().len(), 5);
++        let bytes = proof_bytes(
++            Operation::Identity,
++            &json!({}),
++            "790001001",
++            0,
++            text(&a, "X-Fleet-Time").unwrap().parse().unwrap(),
++            text(&a, "X-Fleet-Nonce").unwrap(),
++        )
++        .unwrap();
++        let sig = STANDARD
++            .decode(text(&a, "X-Fleet-Signature").unwrap())
++            .unwrap();
++        assert!(sign::verify_detached(
++            &sign::Signature::from_bytes(&sig).unwrap(),
++            &bytes,
++            &sign::PublicKey::from_slice(&public).unwrap()
++        ));
++        std::fs::remove_dir_all(path).unwrap();
++    }
++}
+diff --git a/src/steaddesk_fleet_windows_host.rs b/src/steaddesk_fleet_windows_host.rs
+new file mode 100644
+--- /dev/null
++++ b/src/steaddesk_fleet_windows_host.rs
+@@ -0,0 +1,464 @@
++//! Concrete Windows host: fixed HTTPS origins, existing identity and protected native handles.
++use super::*;
++use hbb_common::sha2::{Digest, Sha256};
++use reqwest::{blocking::Client, redirect::Policy, Url};
++use std::{
++    fs::{File, OpenOptions},
++    io::{Read, Write},
++    os::windows::fs::OpenOptionsExt,
++    path::{Path, PathBuf},
++    ptr,
++    sync::Once,
++    time::{Duration, Instant},
++};
++use winapi::um::winbase::{MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH};
++
++mod build {
++    include!("steaddesk_fleet_windows_config.rs");
++}
++#[repr(C)]
++struct Expected {
++    leaf: *const u16,
++    size: u64,
++    version: u64,
++    artifact: [u8; 32],
++    signer: [u8; 32],
++    payload: [u8; 32],
++    architecture: u32,
++}
++#[repr(C)]
++#[derive(Default)]
++struct Launch {
++    code: u32,
++    pid: u32,
++    created: u64,
++}
++#[repr(C)]
++#[derive(Default)]
++struct Service {
++    version: u64,
++    pid: u32,
++    running: u32,
++    created: u64,
++    sha: [u8; 32],
++}
++extern "C" {
++    fn sd_fleet_private_directory(out: *mut u16, capacity: usize) -> u32;
++    fn sd_fleet_prepare(expected: *const Expected, lease: *mut *mut std::ffi::c_void) -> u32;
++    fn sd_fleet_launch(lease: *mut std::ffi::c_void, out: *mut Launch) -> u32;
++    fn sd_fleet_release(lease: *mut std::ffi::c_void);
++    fn sd_fleet_payload_digest(lease: *const std::ffi::c_void, out: *mut u8) -> u32;
++    fn sd_fleet_local_gates() -> u32;
++    fn sd_fleet_current_service(out: *mut Service) -> u32;
++    fn sd_fleet_readback(
++        expected: *const Expected,
++        pid: u32,
++        created: u64,
++        out: *mut Service,
++    ) -> u32;
++    fn sd_fleet_os_version(out: *mut u32) -> u32;
++    fn sd_fleet_boot_id(out: *mut u64) -> u32;
++}
++fn native(status: u32) -> Result<()> {
++    check(status == 0, "no_safety")
++}
++struct Prepared {
++    lease: *mut std::ffi::c_void,
++    retain: bool,
++}
++impl Drop for Prepared {
++    fn drop(&mut self) {
++        if !self.retain {
++            unsafe { sd_fleet_release(self.lease) }
++        }
++    }
++}
++fn expected(m: &Manifest, payload: [u8; 32], leaf: &[u16]) -> Result<Expected> {
++    Ok(Expected {
++        leaf: leaf.as_ptr(),
++        size: m.size_bytes,
++        version: m.version,
++        artifact: hash_hex(&m.sha256)?,
++        signer: hash_hex(&m.signer_cert_sha256)?,
++        payload,
++        architecture: 1,
++    })
++}
++fn wide(path: &Path) -> Vec<u16> {
++    use std::os::windows::ffi::OsStrExt;
++    path.as_os_str().encode_wide().chain(Some(0)).collect()
++}
++fn origin(value: &str) -> Result<Url> {
++    let url = Url::parse(value).map_err(|_| Error("no_safety"))?;
++    check(
++        url.scheme() == "https"
++            && url.host_str().is_some()
++            && url.username().is_empty()
++            && url.password().is_none()
++            && url.path() == "/"
++            && url.query().is_none()
++            && url.fragment().is_none(),
++        "no_safety",
++    )?;
++    Ok(url)
++}
++struct WindowsHost {
++    directory: PathBuf,
++    client: Client,
++    clock: Option<(u64, Instant)>,
++    _lock: File,
++}
++impl WindowsHost {
++    fn open() -> Result<Self> {
++        origin(build::OPS_ORIGIN)?;
++        origin(build::ARTIFACT_ORIGIN)?;
++        let mut out = vec![0u16; 32768];
++        unsafe {
++            native(sd_fleet_private_directory(out.as_mut_ptr(), out.len()))?;
++        }
++        let length = out.iter().position(|x| *x == 0).ok_or(Error("no_safety"))?;
++        let directory =
++            PathBuf::from(String::from_utf16(&out[..length]).map_err(|_| Error("no_safety"))?);
++        let lock = OpenOptions::new()
++            .read(true)
++            .write(true)
++            .create(true)
++            .share_mode(0)
++            .open(directory.join("controller.lock"))
++            .map_err(|_| Error("no_safety"))?;
++        let client = Client::builder()
++            .no_proxy()
++            .redirect(Policy::none())
++            .connect_timeout(Duration::from_secs(3))
++            .timeout(Duration::from_secs(15))
++            .min_tls_version(reqwest::tls::Version::TLS_1_2)
++            .build()
++            .map_err(|_| Error("no_safety"))?;
++        Ok(Self {
++            directory,
++            client,
++            clock: None,
++            _lock: lock,
++        })
++    }
++    fn load(&self) -> Result<State> {
++        let path = self.directory.join("state.json");
++        if !path.exists() {
++            return Ok(State::default());
++        }
++        let meta = std::fs::symlink_metadata(&path).map_err(|_| Error("no_safety"))?;
++        check(
++            meta.is_file() && !meta.file_type().is_symlink() && meta.len() <= 1048576,
++            "no_safety",
++        )?;
++        let bytes = std::fs::read(&path).map_err(|_| Error("no_safety"))?;
++        serde_json::from_value(strict_json(&bytes)?).map_err(|_| Error("no_safety"))
++    }
++}
++impl Host for WindowsHost {
++    type Installer = Prepared;
++    fn now(&mut self) -> Result<u64> {
++        if self
++            .clock
++            .as_ref()
++            .map_or(true, |(_, at)| at.elapsed() > Duration::from_secs(60))
++        {
++            let began = Instant::now();
++            let response = self
++                .client
++                .get(build::OPS_ORIGIN)
++                .header("Cache-Control", "no-cache")
++                .send()
++                .map_err(|_| Error("clock_unknown"))?;
++            check(
++                began.elapsed() < Duration::from_secs(5)
++                    && response.headers().get_all("Date").iter().count() == 1,
++                "clock_unknown",
++            )?;
++            let date = response
++                .headers()
++                .get("Date")
++                .and_then(|s| s.to_str().ok())
++                .ok_or(Error("clock_unknown"))?;
++            let time = DateTime::parse_from_rfc2822(date)
++                .map_err(|_| Error("clock_unknown"))?
++                .timestamp();
++            let time = u64::try_from(time).map_err(|_| Error("clock_unknown"))?;
++            self.clock = Some((time, Instant::now()));
++        }
++        let (anchor, elapsed) = self.clock.as_ref().ok_or(Error("clock_unknown"))?;
++        let network = anchor
++            .checked_add(elapsed.elapsed().as_secs())
++            .ok_or(Error("clock_unknown"))?;
++        let local = SystemTime::now()
++            .duration_since(UNIX_EPOCH)
++            .map_err(|_| Error("clock_unknown"))?
++            .as_secs();
++        check(local.abs_diff(network) <= 30, "clock_unknown")?;
++        Ok(network)
++    }
++    fn boot_id(&mut self) -> Result<u64> {
++        let mut value = 0;
++        unsafe {
++            native(sd_fleet_boot_id(&mut value))?;
++        }
++        check(value != 0, "no_safety")?;
++        Ok(value)
++    }
++    fn local_gates(&mut self) -> Result<()> {
++        check(
++            IdentityConfig::get_option("stop-service") != "Y",
++            "merchant_pause",
++        )?;
++        check(
++            crate::server::AUTHED_CONNS
++                .lock()
++                .map_err(|_| Error("session_unknown"))?
++                .is_empty(),
++            "session_unknown",
++        )?;
++        unsafe { native(sd_fleet_local_gates()) }
++    }
++    fn installed(&mut self) -> Result<Installed> {
++        let mut current = Service::default();
++        let mut os = 0;
++        unsafe {
++            native(sd_fleet_current_service(&mut current))?;
++            native(sd_fleet_os_version(&mut os))?;
++        }
++        check(
++            current.running == 1 && current.pid != 0 && current.created != 0,
++            "no_safety",
++        )?;
++        Ok(Installed {
++            build: current.version,
++            os: u64::from(os),
++            pid: current.pid,
++            created: current.created,
++            binary_sha256: current.sha,
++        })
++    }
++    fn request(&mut self, op: Operation, body: &Value, key_version: u64) -> Result<Value> {
++        self.now()?;
++        let url = origin(build::OPS_ORIGIN)?
++            .join(op.path())
++            .map_err(|_| Error("no_safety"))?;
++        let headers = device_headers(op, body, key_version)?;
++        let mut request = self
++            .client
++            .request(
++                if op.get() {
++                    reqwest::Method::GET
++                } else {
++                    reqwest::Method::POST
++                },
++                url,
++            )
++            .header("Cache-Control", "no-cache");
++        for (key, value) in headers.as_object().ok_or(Error("no_safety"))? {
++            request = request.header(key, text(&headers, key)?);
++            let _ = value;
++        }
++        if !op.get() {
++            request = request
++                .header("Content-Type", "application/json")
++                .body(serde_json::to_vec(body).map_err(|_| Error("no_safety"))?);
++        }
++        let response = request.send().map_err(|_| Error("no_safety"))?;
++        if response.status() == reqwest::StatusCode::FORBIDDEN {
++            return Err(Error("identity_refresh"));
++        }
++        check(response.status() == reqwest::StatusCode::OK, "no_safety")?;
++        let mut bytes = Vec::new();
++        response
++            .take(131073)
++            .read_to_end(&mut bytes)
++            .map_err(|_| Error("no_safety"))?;
++        check(bytes.len() <= 131072, "no_safety")?;
++        strict_json(&bytes).map_err(|_| Error("no_safety"))
++    }
++    fn prepare(&mut self, m: &Manifest) -> Result<(Prepared, [u8; 32])> {
++        let url = origin(build::ARTIFACT_ORIGIN)?
++            .join(&m.artifact_path)
++            .map_err(|_| Error("artifact_hash"))?;
++        let response = self
++            .client
++            .get(url)
++            .header("Cache-Control", "no-cache")
++            .timeout(Duration::from_secs(180))
++            .send()
++            .map_err(|_| Error("artifact_hash"))?;
++        check(
++            response.status() == reqwest::StatusCode::OK,
++            "artifact_hash",
++        )?;
++        let path = self.directory.join("candidate.exe");
++        if path.exists() {
++            let info = std::fs::symlink_metadata(&path).map_err(|_| Error("no_safety"))?;
++            check(
++                info.is_file() && !info.file_type().is_symlink(),
++                "no_safety",
++            )?;
++            std::fs::remove_file(&path).map_err(|_| Error("no_safety"))?;
++        }
++        let mut file = OpenOptions::new()
++            .write(true)
++            .create_new(true)
++            .share_mode(0)
++            .open(&path)
++            .map_err(|_| Error("no_safety"))?;
++        let mut source = response.take(m.size_bytes + 1);
++        let mut size = 0u64;
++        let mut hash = Sha256::new();
++        let mut bytes = [0u8; 65536];
++        loop {
++            let count = source
++                .read(&mut bytes)
++                .map_err(|_| Error("artifact_hash"))?;
++            if count == 0 {
++                break;
++            }
++            size += count as u64;
++            check(size <= m.size_bytes, "artifact_size")?;
++            hash.update(&bytes[..count]);
++            file.write_all(&bytes[..count])
++                .map_err(|_| Error("no_safety"))?;
++        }
++        file.sync_all().map_err(|_| Error("no_safety"))?;
++        drop(file);
++        check(size == m.size_bytes, "artifact_size")?;
++        check(hex(&hash.finalize()) == m.sha256, "artifact_hash")?;
++        let leaf: Vec<u16> = "candidate.exe\0".encode_utf16().collect();
++        let expected = expected(m, [0; 32], &leaf)?;
++        let mut lease = ptr::null_mut();
++        let prepared_status = unsafe { sd_fleet_prepare(&expected, &mut lease) };
++        match prepared_status {
++            4 | 13 => return Err(Error("artifact_signature")),
++            5 => return Err(Error("artifact_hash")),
++            6 => return Err(Error("package_mismatch")),
++            7 | 11 => return Err(Error("platform_mismatch")),
++            other => native(other)?,
++        }
++        check(!lease.is_null(), "no_safety")?;
++        let prepared = Prepared {
++            lease,
++            retain: false,
++        };
++        let mut payload = [0; 32];
++        unsafe {
++            native(sd_fleet_payload_digest(
++                prepared.lease,
++                payload.as_mut_ptr(),
++            ))?;
++        }
++        Ok((prepared, payload))
++    }
++    fn launch(&mut self, prepared: &mut Prepared) -> Result<u32> {
++        let mut result = Launch::default();
++        unsafe {
++            let status = sd_fleet_launch(prepared.lease, &mut result);
++            if status == 10 {
++                prepared.retain = true;
++            }
++            native(status)?;
++        }
++        self.log("installer_process", &format!("pid_{}", result.pid))?;
++        Ok(result.code)
++    }
++    fn readback(&mut self, t: &Transaction) -> Result<bool> {
++        let leaf: Vec<u16> = "candidate.exe\0".encode_utf16().collect();
++        let expected = expected(&t.manifest, hash_hex(&t.payload_sha256)?, &leaf)?;
++        let mut result = Service::default();
++        Ok(unsafe { sd_fleet_readback(&expected, t.prior_pid, t.prior_created, &mut result) } == 0)
++    }
++    fn persist(&mut self, state: &State) -> Result<()> {
++        let bytes = serde_json::to_vec(state).map_err(|_| Error("no_safety"))?;
++        check(bytes.len() <= 1048576, "no_safety")?;
++        let temporary = self
++            .directory
++            .join(format!("state-{}.tmp", random_nonce()?));
++        let mut file = OpenOptions::new()
++            .write(true)
++            .create_new(true)
++            .share_mode(0)
++            .open(&temporary)
++            .map_err(|_| Error("no_safety"))?;
++        file.write_all(&bytes).map_err(|_| Error("no_safety"))?;
++        file.sync_all().map_err(|_| Error("no_safety"))?;
++        drop(file);
++        let from = wide(&temporary);
++        let to = wide(&self.directory.join("state.json"));
++        check(
++            unsafe {
++                MoveFileExW(
++                    from.as_ptr(),
++                    to.as_ptr(),
++                    MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
++                )
++            } != 0,
++            "no_safety",
++        )
++    }
++    fn log(&mut self, event: &str, reason: &str) -> Result<()> {
++        let line=serde_json::to_vec(&json!({"time":SystemTime::now().duration_since(UNIX_EPOCH).map_err(|_|Error("clock_unknown"))?.as_secs(),"event":event,"reason":reason})).map_err(|_|Error("no_safety"))?;
++        let mut file = OpenOptions::new()
++            .create(true)
++            .append(true)
++            .share_mode(0)
++            .open(self.directory.join("events.jsonl"))
++            .map_err(|_| Error("no_safety"))?;
++        file.write_all(&line)
++            .and_then(|_| file.write_all(b"\n"))
++            .and_then(|_| file.sync_all())
++            .map_err(|_| Error("no_safety"))
++    }
++}
++pub fn start() {
++    if !crate::is_server() || !crate::platform::windows::is_installed() {
++        return;
++    }
++    static ONCE: Once = Once::new();
++    ONCE.call_once(|| {
++        let result = std::thread::Builder::new()
++            .name("merchant-update".into())
++            .spawn(|| {
++                let mut host = match WindowsHost::open() {
++                    Ok(host) => host,
++                    Err(_) => {
++                        hbb_common::log::warn!("Fleet update host unavailable");
++                        return;
++                    }
++                };
++                loop {
++                    let mut state = match host.load() {
++                        Ok(state) => state,
++                        Err(_) => {
++                            let _ = host.log("stopped", "state_unknown");
++                            return;
++                        }
++                    };
++                    let cfg = BuildConfig {
++                        key_id: build::KEY_ID,
++                        public_key: build::PUBLIC_KEY,
++                        valid_from: build::KEY_VALID_FROM,
++                        valid_until: build::KEY_VALID_UNTIL,
++                        current_build: build::CURRENT_BUILD,
++                        silent_profile: build::SILENT_PROFILE,
++                    };
++                    if let Err(error) = tick(&mut host, &mut state, &cfg) {
++                        let _ = host.log("stopped", error.0);
++                    }
++                    std::thread::park_timeout(Duration::from_secs(
++                        if state.transaction.is_some() {
++                            60
++                        } else {
++                            21600
++                        },
++                    ));
++                }
++            });
++        if result.is_err() {
++            hbb_common::log::warn!("Fleet update worker unavailable");
++        }
++    });
++}

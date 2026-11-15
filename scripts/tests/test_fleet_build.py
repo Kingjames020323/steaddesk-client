@@ -16,6 +16,7 @@ class FleetBuildTest(unittest.TestCase):
         self.tmp=tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.tree=Path(self.tmp.name)
+        (self.tree/"RELEASE_VERSION").write_text("1.5.0-sd.12")
         (self.tree/"src").mkdir()
         self.app=self.tree/"flutter/android/app/src"
         manifest=self.app/"steaddeskStaging/AndroidManifest.xml"
@@ -46,3 +47,15 @@ class FleetBuildTest(unittest.TestCase):
             with self.subTest(env=env),self.assertRaises(ValueError):self.configure(**(base|env))
     def test_missing_https_origin_does_not_build(self):
         with self.assertRaises(ValueError):self.configure(STEADDESK_FLEET_UPDATE="true")
+
+    def test_windows_config_uses_its_own_profile_and_current_build(self):
+        enabled = {"STEADDESK_FLEET_UPDATE": "true", "STEADDESK_FLEET_OPS_ORIGIN": "https://127.0.0.1"}
+        self.configure(**enabled, STEADDESK_FLEET_WINDOWS_PROFILE="a" * 64, STEADDESK_FLEET_SILENT_PROFILE="b" * 64)
+        config = self.tree / "src/steaddesk_fleet_windows_config.rs"
+        self.assertIn("pub const CURRENT_BUILD: u64 = 12;", config.read_text())
+        self.assertIn("a" * 64, config.read_text())
+        self.assertNotIn("b" * 64, config.read_text())
+        self.configure(merchant=False, **enabled)
+        self.assertFalse(config.exists())
+        with self.assertRaises(ValueError):
+            self.configure(**enabled, STEADDESK_FLEET_WINDOWS_PROFILE="not-a-profile")

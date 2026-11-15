@@ -1,0 +1,43 @@
+#include <windows.h>
+#ifndef FIXTURE_BUILD
+#define FIXTURE_BUILD 70
+#endif
+#ifndef FIXTURE_VERSION_TEXT
+#define FIXTURE_VERSION_TEXT "1.5.0.70"
+#endif
+#ifndef FIXTURE_DESCRIPTION
+#define FIXTURE_DESCRIPTION "SteadDesk Windows Fleet Installer Fixture"
+#endif
+#ifndef FIXTURE_PRODUCT_NAME
+#define FIXTURE_PRODUCT_NAME "SteadDesk"
+#endif
+1 VERSIONINFO
+ FILEVERSION 1,5,0,FIXTURE_BUILD
+ PRODUCTVERSION 1,5,0,FIXTURE_BUILD
+ FILEFLAGSMASK 0x3fL
+ FILEFLAGS 0
+ FILEOS VOS_NT_WINDOWS32
+ FILETYPE VFT_APP
+ FILESUBTYPE 0
+BEGIN
+ BLOCK "StringFileInfo"
+ BEGIN
+  BLOCK "040904b0"
+  BEGIN
+   VALUE "CompanyName", "SteadDesk Disposable Test\0"
+   VALUE "FileDescription", FIXTURE_DESCRIPTION "\0"
+   VALUE "FileVersion", FIXTURE_VERSION_TEXT "\0"
+   VALUE "InternalName", "SteadDeskFixture\0"
+   VALUE "OriginalFilename", "SteadDeskFixture.exe\0"
+   VALUE "ProductName", FIXTURE_PRODUCT_NAME "\0"
+#ifdef SD_UPD4_PAYLOAD_SHA
+   VALUE "SteadDeskPayloadSHA256", SD_UPD4_PAYLOAD_SHA "\0"
+#endif
+   VALUE "ProductVersion", FIXTURE_VERSION_TEXT "\0"
+  END
+ END
+ BLOCK "VarFileInfo"
+ BEGIN
+  VALUE "Translation", 0x0409, 1200
+ END
+END

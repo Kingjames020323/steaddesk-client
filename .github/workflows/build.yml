@@ -40,6 +40,7 @@ env:
   STEADDESK_FLEET_ARTIFACT_ORIGIN: ${{ inputs.fleet_artifact_origin || vars.STEADDESK_FLEET_ARTIFACT_ORIGIN }}
   STEADDESK_FLEET_TEST_PUBLIC_KEY: ${{ vars.STEADDESK_FLEET_TEST_PUBLIC_KEY }}
   STEADDESK_FLEET_TEST_KEY_ID: ${{ vars.STEADDESK_FLEET_TEST_KEY_ID }}
+  STEADDESK_FLEET_WINDOWS_PROFILE: ${{ vars.STEADDESK_FLEET_WINDOWS_PROFILE }}
   STEADDESK_FLEET_SILENT_PROFILE: ${{ vars.STEADDESK_FLEET_SILENT_PROFILE }}
   STEADDESK_HELP: ${{ github.event_name == 'workflow_dispatch' && github.ref_type == 'branch' && inputs.steaddesk_ops_integration && 'true' || vars.STEADDESK_HELP }}
   STEADDESK_QUALITY: ${{ vars.STEADDESK_QUALITY }}
@@ -623,6 +624,11 @@ jobs:
     - name: Apply distribution patches and assets
       shell: bash
       run: bash .distribution/scripts/apply-patches.sh "$GITHUB_WORKSPACE"
+    - name: Test signed Windows fleet packages with a disposable installer
+      if: matrix.edition == 'merchant' && matrix.job.arch == 'x86_64'
+      shell: pwsh
+      run: |
+        pwsh -NoLogo -NoProfile -File .distribution/scripts/tests/windows-fleet/run.ps1 -RepoRoot .distribution
     - name: Restore bridge files
       uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
       with:
@@ -692,6 +698,10 @@ jobs:
         fi
         head -n 100 "${VCPKG_ROOT}/buildtrees/ffmpeg/build-${{ matrix.job.vcpkg-triplet }}-rel-out.log" || true
       shell: bash
+    - name: Exercise the merchant update controller in opt-in builds
+      if: matrix.edition == 'merchant' && env.STEADDESK_FLEET_UPDATE == 'true'
+      shell: bash
+      run: python3 .distribution/scripts/tests/windows-fleet/run-controller.py --repo-root .distribution --source-root .
     - name: Test support case closing with its feature enabled
       if: matrix.edition == 'support'
       shell: bash
@@ -734,6 +744,12 @@ jobs:
         mv rustdesk/rustdesk.exe "rustdesk/$product.exe"
         pushd ./libs/portable
         pip3 install -r requirements.txt
+        if [[ "$STEADDESK_EDITION" == merchant ]]; then
+          python3 "$GITHUB_WORKSPACE/.distribution/scripts/tests/check-packed-service.py" "$PWD/generate.py"
+        fi
+        if [[ "$STEADDESK_EDITION" == merchant ]]; then
+          python3 ../../.distribution/scripts/tests/check-packed-service.py generate.py
+        fi
         python3 ./generate.py -f ../../rustdesk/ -o . -e "../../rustdesk/$product.exe"
         popd
         mkdir -p dist

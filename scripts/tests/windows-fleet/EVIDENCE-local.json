@@ -1,0 +1,45 @@
+{
+  "authenticode_valid_vectors": 5,
+  "controller_tests": {
+    "core_sha256": "edeac63296853072e9593f3692a6e46e3e55c7b5e29de450c44353887bf93690",
+    "failed": 0,
+    "final_barrier_cases": [
+      "permit expires during submitted-state fsync: zero launches",
+      "same-build service PID/creation/hash changes during submitted-state fsync: zero launches",
+      "active/unknown recovery session is not merchant_pause"
+    ],
+    "passed": 17,
+    "public_patch_source_matches": true,
+    "scope": "actual portable controller and real cryptography with explicit mocked OS/HTTP Host"
+  },
+  "cross_compile": {
+    "actual_candidate_platform_and_probe": "MinGW AMD64 compile/link PASS with -Wall -Wextra -Werror",
+    "platform_sha256": "6fddf477fda13053e1e3ac0efef31dcfca43eb5ab1def905e4a8803399f4aee6",
+    "powershell": "PowerShell 7.7 parser PASS; non-Windows runtime guard rejects before mutation"
+  },
+  "fixture_source_sha256": {
+    "fixture.rc": "d48426f6e545c742d24d62fbe5457a01a68af2a0d9cbdfc83da2d3361d1eedb7",
+    "installer_fixture.c": "f6f533a9ebc34455f6c2f795d4f6c2497a4ca4a2f677eb2f839f6f8c3761505f"
+  },
+  "payload_resource_vectors": {
+    "malformed": "not-a-sha256",
+    "matching": "7dbdbd8644c1553fb7783a2fe951607b983df8e41bbf2cb8fec83b5c3c79d5f6",
+    "missing": null,
+    "wrong": "0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "scope": "real AMD64 PE and actual Authenticode cryptography on macOS; NO Windows API or executable/service execution",
+  "secret_cleanup": "TemporaryDirectory removes keys/certificates and every generated PE",
+  "sha256": {
+    "inner.exe": "7dbdbd8644c1553fb7783a2fe951607b983df8e41bbf2cb8fec83b5c3c79d5f6",
+    "malformed.exe": "b8ef4ff0f6903e78ada34e227d01da5e3b36e620c62a7ac0dddb2347bb3b3891",
+    "missing.exe": "428d3f22753c6f568eb46866ee4b6c8117906c01bc6853aa38397db989bdfb18",
+    "outer.exe": "5b134943cc640c215ada1500eebefc656f0ef6cf1d95de11d4cf8d4f0167a300",
+    "tampered.exe": "4b60c827071047faf011ac044bd0fa6b1e0e6cc622a032c3cdede54f2664d14d",
+    "wrong.exe": "eedd460afa8d94b14582f24757ab79107a2569d47d95b48da9a053ff9f2c4547"
+  },
+  "signer_cert_sha256": "540e900d014056916ab0d398604a018b8d8117bf1b0676628c00bb680e075234",
+  "tampered_signature_rejected": true,
+  "tool": "osslsigncode 2.15, using:",
+  "windows_platform_execution": "NOT_RUN locally; fresh hosted Windows x64 job required",
+  "windows_runtime": "NOT_RUN"
+}
