@@ -1,5 +1,5 @@
 diff --git a/build.rs b/build.rs
-index eebc20f..47a4b4d 100644
+index eebc20f..36334cb 100644
 --- a/build.rs
 +++ b/build.rs
 @@ -119,9 +119,30 @@ fn main() {
@@ -25,7 +25,7 @@ index eebc20f..47a4b4d 100644
 +                .define("_WIN32_WINNT", "0x0602")
 +                .file(format!("{dir}/fleet_installer.cpp"))
 +                .compile("steaddesk_fleet_installer");
-+            for lib in ["wintrust", "crypt32", "bcrypt", "advapi32", "version", "shell32", "ole32"] {
++            for lib in ["wintrust", "crypt32", "bcrypt", "advapi32", "version", "shell32", "ole32", "uuid"] {
 +                println!("cargo:rustc-link-lib={lib}");
 +            }
 +            println!("cargo:rerun-if-changed={dir}/fleet_installer.cpp");
