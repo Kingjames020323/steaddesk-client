@@ -108,7 +108,7 @@ diff --git a/src/steaddesk_fleet_windows.rs b/src/steaddesk_fleet_windows.rs
 new file mode 100644
 --- /dev/null
 +++ b/src/steaddesk_fleet_windows.rs
-@@ -0,0 +1,962 @@
+@@ -0,0 +1,996 @@
 +//! Fixed merchant update protocol. The controller is portable for focused tests;
 +//! only the existing installed Windows service-owned server links its native host.
 +use chrono::{DateTime, Duration as ChronoDuration, LocalResult, Offset, TimeZone, Utc};
@@ -827,12 +827,15 @@ new file mode 100644
 +        .get("reconcile_only")
 +        .filter(|v| v.get("assignment").and_then(Value::as_str) == Some(t.assignment.as_str()));
 +    if let Some(p) = previous {
-+        if t.attempt.is_none() {
-+            t.attempt = Some(text(p, "attempt")?.to_owned());
-+            s.report_seq = s.report_seq.max(number(p, "seq")?);
-+            s.transaction = Some(t.clone());
-+            h.persist(s)?;
-+        }
++        let attempt = text(p, "attempt")?;
++        check(
++            t.attempt.as_deref().map_or(true, |known| known == attempt),
++            "no_safety",
++        )?;
++        t.attempt = Some(attempt.to_owned());
++        s.report_seq = s.report_seq.max(number(p, "seq")?);
++        s.transaction = Some(t.clone());
++        h.persist(s)?;
 +        match p.get("state").and_then(Value::as_str) {
 +            Some("healthy") if healthy => {
 +                let aid = t.attempt.as_deref().ok_or(Error("no_safety"))?;
@@ -853,10 +856,41 @@ new file mode 100644
 +            _ => {}
 +        }
 +    }
++    let outcome = match (
++        t.installer_code,
++        previous
++            .and_then(|p| p.get("state"))
++            .and_then(Value::as_str),
++    ) {
++        (Some(0), Some("committing")) => Some(("observing", None)),
++        (Some(3010), Some("committing")) => Some(("pending_reboot", None)),
++        (Some(code), Some("committing" | "pending_reboot" | "observing"))
++            if code != 0 && code != 3010 =>
++        {
++            Some(("failed", Some("install_failed")))
++        }
++        _ => None,
++    };
++    let queued = outcome.map_or(false, |(status, _)| {
++        s.reports.iter().any(|r| {
++            r.get("id").and_then(Value::as_str) == t.attempt.as_deref()
++                && r.get("state").and_then(Value::as_str) == Some(status)
++        })
++    });
 +    flush(h, s)?;
 +    let Some(aid) = t.attempt.as_deref() else {
 +        return h.log("recovery", "manual_required");
 +    };
++    // A known OS result may have been persisted just before the clock/network
++    // failed, without reaching the outbox. Replay that result before health;
++    // an already queued receipt keeps its original sequence and is only flushed.
++    if let Some((status, reason)) = outcome.filter(|_| !queued) {
++        let mut receipt = t.clone();
++        if status == "observing" {
++            receipt.stage = "submitted".into();
++        }
++        report(h, s, aid, status, reason, Some(&receipt))?;
++    }
 +    if t.stage == "failed" {
 +        return h.log("recovery", "frozen");
 +    }

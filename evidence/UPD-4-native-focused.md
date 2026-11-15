@@ -87,3 +87,37 @@ Regression surface is limited to two cfg-gated module/lifecycle hooks and an
 optional Windows-only dependency/feature. Existing service creation, IPC,
 connection/session handling, configuration identity, Android updates, user
 startup and support-edition paths are not rewritten.
+
+## Follow-up: replay a persisted installer result before health
+
+A focused crash/clock regression exposed a gap after the OS result was durably
+saved but before the receipt entered the outbox. Baseline failed the new 3010,
+1603 and unverified-service 0 cases. The recovery path now binds the authenticated
+reconciliation record to the same assignment and attempt, advances the local
+receipt sequence conservatively, and replays only the missing known outcome.
+
+- Persisted 0 with the server still committing sends observing/installer_code=0
+  without heartbeat, service or identity assertions. Unverified service polls do
+  not repeat this OS receipt. A proven replacement may later send fresh health.
+- Persisted 3010 first sends pending_reboot/installer_code=3010. Only the existing
+  changed-boot and exact-payload readback gates may then send health.
+- A persisted nonzero failure sends failed/install_failed before freezing. Once
+  the server is terminal it does not synthesize further failure receipts.
+- An existing queued outcome is flushed with its original body and sequence,
+  rather than replaced by a new receipt. Transport failure before acceptance and
+  lost ACK after acceptance preserve the original pending receipt; server-side
+  deduplication precedes the transition check. Recovery never prepares, grants or
+  launches another installer, and unknown results still require reconciliation.
+
+Final focused result: 21/21 Rust/controller tests passed. The pre-fix controller
+failed all three new empty-outbox gap regressions; the added FIFO case also
+covers before-acceptance transport failure and after-acceptance ACK loss. The
+concrete Windows host/controller cross-check passed again after the fix.
+Independent local HTTPS ops accepted the exact captured Rust receipt bodies,
+including exact retries with fresh proof signatures, for 3010 pending→observing,
+1603 failed and 0 observing without premature health. Each fixture retained one
+attempt and its complete audit chain verified. These are local replay/compile
+checks, not native Windows execution or another CI result.
+
+The checked public-patch, scratch and prepared-source controller SHA-256 agree:
+`a8b32ea4f5151629f7f26ce5320642d96166eb3f828c0c7557b576f367e1a322`.

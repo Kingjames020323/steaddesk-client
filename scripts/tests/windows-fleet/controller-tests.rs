@@ -24,13 +24,23 @@ struct Mock {
     expire_on_submitted: bool,
     replace_on_submitted: bool,
     replacement: bool,
+    break_clock_after_result: bool,
+    clock_unavailable: bool,
+    server_state: &'static str,
+    server_seq: u64,
+    report_fail_before_accept: bool,
+    report_ack_loss: bool,
     snapshots: Vec<State>,
     events: Vec<(String, String)>,
 }
 impl Host for Mock {
     type Installer = ();
     fn now(&mut self) -> Result<u64> {
-        Ok(self.at)
+        if self.clock_unavailable {
+            Err(Error("clock_unknown"))
+        } else {
+            Ok(self.at)
+        }
     }
     fn boot_id(&mut self) -> Result<u64> {
         Ok(self.boot)
@@ -54,7 +64,7 @@ impl Host for Mock {
             Operation::Assignment => {
                 if self.granted {
                     Ok(
-                        json!({"assignment":null,"reconcile_only":{"assignment":"fixture_assignment","attempt":"fixture_attempt","seq":self.reports.len(),"state":"observing"}}),
+                        json!({"assignment":null,"reconcile_only":{"assignment":"fixture_assignment","attempt":"fixture_attempt","seq":self.server_seq,"state":self.server_state}}),
                     )
                 } else {
                     Ok(self.assignment.clone())
@@ -74,7 +84,51 @@ impl Host for Mock {
                 }
             }
             Operation::Reports => {
+                if self.report_fail_before_accept {
+                    self.report_fail_before_accept = false;
+                    return Err(Error("no_safety"));
+                }
+                if body["id"] == "fixture_attempt" {
+                    let seq = body["seq"]
+                        .as_u64()
+                        .ok_or(Error("backend_invalid_sequence"))?;
+                    if seq <= self.server_seq {
+                        if self.reports.iter().any(|previous| previous == body) {
+                            return Ok(json!({"state":body["state"],"duplicate":true}));
+                        }
+                        return Err(Error("backend_sequence_conflict"));
+                    }
+                    let status = body["state"]
+                        .as_str()
+                        .ok_or(Error("backend_invalid_state"))?;
+                    match (self.server_state, status) {
+                        ("committing", "pending_reboot") if body["installer_code"] == 3010 => {
+                            self.server_state = "pending_reboot"
+                        }
+                        ("committing", "observing") if body["installer_code"] == 0 => {
+                            self.server_state = "observing"
+                        }
+                        ("pending_reboot", "observing") | ("observing", "observing") => {
+                            self.server_state = "observing"
+                        }
+                        (_, "failed")
+                            if body["reason"] == "install_failed"
+                                && body["installer_code"]
+                                    .as_u64()
+                                    .map_or(false, |n| n != 0 && n != 3010) =>
+                        {
+                            self.server_state = "failed"
+                        }
+                        (_, "paused") if body["reason"] == "merchant_pause" => {}
+                        _ => return Err(Error("backend_invalid_transition")),
+                    }
+                    self.server_seq = seq;
+                }
                 self.reports.push(body.clone());
+                if self.report_ack_loss {
+                    self.report_ack_loss = false;
+                    return Err(Error("no_safety"));
+                }
                 Ok(json!({"state":body["state"],"duplicate":false}))
             }
         }
@@ -99,6 +153,14 @@ impl Host for Mock {
     }
     fn persist(&mut self, s: &State) -> Result<()> {
         self.snapshots.push(s.clone());
+        if self.break_clock_after_result
+            && s.transaction
+                .as_ref()
+                .map_or(false, |t| t.installer_code.is_some())
+        {
+            self.break_clock_after_result = false;
+            self.clock_unavailable = true;
+        }
         if s.transaction.as_ref().map_or(false, |t| {
             t.stage == "submitted" && t.installer_code.is_none()
         }) {
@@ -158,6 +220,12 @@ fn setup(version: u64) -> (Mock, State, BuildConfig) {
             expire_on_submitted: false,
             replace_on_submitted: false,
             replacement: false,
+            break_clock_after_result: false,
+            clock_unavailable: false,
+            server_state: "committing",
+            server_seq: 0,
+            report_fail_before_accept: false,
+            report_ack_loss: false,
             snapshots: vec![],
             events: vec![],
         },
@@ -365,4 +433,185 @@ fn active_or_unknown_recovery_session_is_not_mislabeled_merchant_pause() {
     assert_eq!(h.launches, 1);
     assert!(h.reports.iter().all(|r| r["state"] != "paused"));
     no_health(&h);
+}
+
+fn result_persisted_before_report_gap(code: u32) -> (Mock, State, BuildConfig) {
+    let (mut h, mut state, cfg) = setup(70);
+    h.code = code;
+    h.break_clock_after_result = true;
+    assert_eq!(
+        tick(&mut h, &mut state, &cfg).unwrap_err().0,
+        "clock_unknown"
+    );
+    assert_eq!(h.launches, 1);
+    assert!(h.reports.is_empty());
+    assert_eq!(h.server_state, "committing");
+    assert_eq!(h.server_seq, 0);
+    let durable = h.snapshots.last().unwrap().clone();
+    assert_eq!(
+        durable.transaction.as_ref().unwrap().installer_code,
+        Some(code)
+    );
+    assert!(durable.reports.is_empty());
+    assert_eq!(durable.report_seq, 0);
+    h.clock_unavailable = false;
+    (h, durable, cfg)
+}
+#[test]
+fn persisted_3010_replays_pending_receipt_before_postboot_health() {
+    let (mut h, mut state, cfg) = result_persisted_before_report_gap(3010);
+    h.boot = 101;
+    h.healthy = true;
+    tick(&mut h, &mut state, &cfg).unwrap();
+    assert_eq!(h.launches, 1);
+    assert_eq!(h.reports[0]["state"], "pending_reboot");
+    assert_eq!(h.reports[0]["installer_code"], 3010);
+    assert!(h.reports[0].get("heartbeat_at").is_none());
+    assert!(h
+        .reports
+        .iter()
+        .skip(1)
+        .any(|r| r["state"] == "observing" && r["service_verified"] == true));
+    assert_eq!(h.server_state, "observing");
+    let pending = h
+        .reports
+        .iter()
+        .filter(|r| r["state"] == "pending_reboot")
+        .count();
+    tick(&mut h, &mut state, &cfg).unwrap();
+    assert_eq!(h.launches, 1);
+    assert_eq!(
+        h.reports
+            .iter()
+            .filter(|r| r["state"] == "pending_reboot")
+            .count(),
+        pending
+    );
+    assert_eq!(h.preparations, 1);
+    assert_eq!(
+        h.requests
+            .iter()
+            .filter(|op| matches!(op, Operation::Attempts))
+            .count(),
+        1
+    );
+}
+#[test]
+fn persisted_installer_failure_replays_before_freezing() {
+    let (mut h, mut state, cfg) = result_persisted_before_report_gap(1603);
+    h.healthy = true;
+    tick(&mut h, &mut state, &cfg).unwrap();
+    assert_eq!(h.launches, 1);
+    assert_eq!(h.reports.len(), 1);
+    assert_eq!(h.reports[0]["state"], "failed");
+    assert_eq!(h.reports[0]["reason"], "install_failed");
+    assert_eq!(h.reports[0]["installer_code"], 1603);
+    assert_eq!(h.server_state, "failed");
+    tick(&mut h, &mut state, &cfg).unwrap();
+    assert_eq!(h.launches, 1);
+    assert_eq!(h.reports.len(), 1);
+    no_health(&h);
+    assert_eq!(h.preparations, 1);
+    assert_eq!(
+        h.requests
+            .iter()
+            .filter(|op| matches!(op, Operation::Attempts))
+            .count(),
+        1
+    );
+}
+#[test]
+fn persisted_zero_replays_accepted_observing_without_relaunch() {
+    let (mut h, mut state, cfg) = result_persisted_before_report_gap(0);
+    h.healthy = false;
+    tick(&mut h, &mut state, &cfg).unwrap();
+    assert_eq!(h.launches, 1);
+    assert_eq!(h.reports.len(), 1);
+    assert_eq!(h.reports[0]["state"], "observing");
+    assert_eq!(h.reports[0]["installer_code"], 0);
+    assert_eq!(h.server_state, "observing");
+    no_health(&h);
+    tick(&mut h, &mut state, &cfg).unwrap();
+    assert_eq!(h.launches, 1);
+    assert_eq!(h.reports.len(), 1);
+    no_health(&h);
+    h.healthy = true;
+    tick(&mut h, &mut state, &cfg).unwrap();
+    assert_eq!(h.launches, 1);
+    assert_eq!(h.reports.len(), 2);
+    assert!(h.reports[1]["service_verified"] == true);
+    assert!(h.reports[1].get("heartbeat_at").is_some());
+    assert_eq!(
+        h.reports
+            .iter()
+            .filter(|r| r.get("heartbeat_at").is_none())
+            .count(),
+        1
+    );
+    tick(&mut h, &mut state, &cfg).unwrap();
+    assert_eq!(h.launches, 1);
+    assert_eq!(h.preparations, 1);
+    assert_eq!(
+        h.requests
+            .iter()
+            .filter(|op| matches!(op, Operation::Attempts))
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn queued_pending_receipt_preserves_original_body_and_sequence_on_recovery() {
+    for ack_lost_after_accept in [false, true] {
+        let (mut h, mut state, cfg) = setup(70);
+        h.code = 3010;
+        h.report_fail_before_accept = !ack_lost_after_accept;
+        h.report_ack_loss = ack_lost_after_accept;
+        assert_eq!(tick(&mut h, &mut state, &cfg).unwrap_err().0, "no_safety");
+        state = h.snapshots.last().unwrap().clone();
+        assert_eq!(state.reports.len(), 1);
+        let original = state.reports[0].clone();
+        assert_eq!(original["state"], "pending_reboot");
+        assert_eq!(original["installer_code"], 3010);
+        assert_eq!(
+            h.server_state,
+            if ack_lost_after_accept {
+                "pending_reboot"
+            } else {
+                "committing"
+            }
+        );
+        h.at += 20;
+        h.boot = 101;
+        h.healthy = true;
+        tick(&mut h, &mut state, &cfg).unwrap();
+        assert!(state.reports.is_empty());
+        assert_eq!(h.reports[0], original);
+        assert_eq!(
+            h.reports
+                .iter()
+                .filter(|r| r["state"] == "pending_reboot")
+                .count(),
+            1
+        );
+        assert!(h.reports.iter().any(|r| r["service_verified"] == true));
+        assert_eq!(h.launches, 1);
+        assert_eq!(h.preparations, 1);
+        assert_eq!(
+            h.requests
+                .iter()
+                .filter(|op| matches!(op, Operation::Attempts))
+                .count(),
+            1
+        );
+        tick(&mut h, &mut state, &cfg).unwrap();
+        assert_eq!(h.launches, 1);
+        assert_eq!(
+            h.reports
+                .iter()
+                .filter(|r| r["state"] == "pending_reboot")
+                .count(),
+            1
+        );
+    }
 }
