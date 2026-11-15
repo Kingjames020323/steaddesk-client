@@ -1,12 +1,12 @@
 diff --git a/flutter/lib/desktop/pages/remote_page.dart b/flutter/lib/desktop/pages/remote_page.dart
-index da95bc9..64008a3 100644
+index da95bc9..72ce942 100644
 --- a/flutter/lib/desktop/pages/remote_page.dart
 +++ b/flutter/lib/desktop/pages/remote_page.dart
 @@ -16,6 +16,7 @@ import '../../common/widgets/dialog.dart';
  import '../../common/widgets/toolbar.dart';
  import '../../models/model.dart';
  import '../../steaddesk/metrics_api.dart';
-+import '../../steaddesk/toolbar_api.dart';
++import 'package:flutter_hbb/steaddesk/toolbar_api.dart';
  import '../../steaddesk/dialogs.dart' show steadUsesChinese;
  import '../../steaddesk/reconnect_overlay.dart';
  import '../../models/input_model.dart';
@@ -103,26 +103,26 @@ index da95bc9..64008a3 100644
          return Container();
        }
 diff --git a/flutter/lib/desktop/widgets/remote_toolbar.dart b/flutter/lib/desktop/widgets/remote_toolbar.dart
-index 75ee45b..08e4f44 100644
+index 75ee45b..f92f850 100644
 --- a/flutter/lib/desktop/widgets/remote_toolbar.dart
 +++ b/flutter/lib/desktop/widgets/remote_toolbar.dart
 @@ -32,6 +32,7 @@ import '../../steaddesk/history_host_api.dart';
  import '../../steaddesk/quality_badge.dart';
  import '../../steaddesk/merchant_build.dart' show casesEnabled, opsHealthEnabled;
  import '../../steaddesk/ops_health_host.dart';
-+import '../../steaddesk/toolbar_api.dart';
++import 'package:flutter_hbb/steaddesk/toolbar_api.dart';
  
  part '../../steaddesk/session_surface.dart';
  
 diff --git a/flutter/lib/steaddesk/cases/case_dialog.dart b/flutter/lib/steaddesk/cases/case_dialog.dart
-index dc3f898..69ddb47 100644
+index dc3f898..644c469 100644
 --- a/flutter/lib/steaddesk/cases/case_dialog.dart
 +++ b/flutter/lib/steaddesk/cases/case_dialog.dart
 @@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
  import 'package:flutter/services.dart';
  
  import '../theme.dart';
-+import '../toolbar_api.dart';
++import 'package:flutter_hbb/steaddesk/toolbar_api.dart';
  import 'case_store.dart';
  
  const caseCategoryLabels = {
@@ -251,14 +251,14 @@ index 6a2d669..9697f5f 100644
                                        const SizedBox(height: 10),
                                      ]))),
 diff --git a/flutter/lib/steaddesk/support_help_queue.dart b/flutter/lib/steaddesk/support_help_queue.dart
-index 45a6b32..7678b4d 100644
+index 45a6b32..0c8123f 100644
 --- a/flutter/lib/steaddesk/support_help_queue.dart
 +++ b/flutter/lib/steaddesk/support_help_queue.dart
 @@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
  import 'package:uuid/uuid.dart';
  import 'cases/case_dialog.dart' show caseCategoryLabels, caseResultLabels;
  import 'support_help.dart';
-+import 'toolbar_api.dart';
++import 'package:flutter_hbb/steaddesk/toolbar_api.dart';
  
  class SupportHelpQueue extends StatefulWidget {
    final SupportHelpApi api;
