@@ -823,10 +823,10 @@ index 0000000..c62bb87
 +}
 diff --git a/flutter/lib/steaddesk/store_features.dart b/flutter/lib/steaddesk/store_features.dart
 new file mode 100644
-index 0000000..054462b
+index 0000000..9068e79
 --- /dev/null
 +++ b/flutter/lib/steaddesk/store_features.dart
-@@ -0,0 +1,173 @@
+@@ -0,0 +1,178 @@
 +import 'dart:async';
 +import 'dart:convert';
 +
@@ -843,8 +843,13 @@ index 0000000..054462b
 +export 'store_feature_policy.dart';
 +
 +String operatorContext() {
-+  final token = bind.mainGetLocalOption(key: 'access_token');
-+  return token.isEmpty ? '' : sha256.convert(utf8.encode(token)).toString();
++  try {
++    final token = bind.mainGetLocalOption(key: 'access_token');
++    return token.isEmpty ? '' : sha256.convert(utf8.encode(token)).toString();
++  } catch (_) {
++    // The native bridge may not be ready when a dialog first mounts.
++    return '';
++  }
 +}
 +
 +typedef _Scope = ({Uri origin, String device, String identity, bool merchant});
