@@ -62,7 +62,17 @@ callback_enabled = callback in ("true", "1")
     f"const merchantCallbacksEnabled = {str(callback_enabled and merchant).lower()};\n"
     f"const supportCallbacksEnabled = {str(callback_enabled and not merchant).lower()};\n",
     encoding="utf-8")
-help_enabled = help_flag in ("true", "1") or callback_enabled
+kb = os.environ.get("STEADDESK_KB", "").strip().lower()
+if kb not in ("", "0", "1", "false", "true"):
+    raise ValueError("STEADDESK_KB must be true, false, 1 or 0")
+kb = kb in ("true", "1")
+(lib / "kb_build.dart").write_text(
+    f"const merchantKbEnabled = {str(kb and merchant).lower()};\n"
+    f"const supportKbEnabled = {str(kb and not merchant).lower()};\n", encoding="utf-8")
+editor = "admin_host" if kb and not merchant else "admin_off"
+(lib / "kb_admin_api.dart").write_text(f"export 'kb/{editor}.dart';\n", encoding="utf-8")
+# Merchant cards live in the help waiting room; the admin editor is independent.
+help_enabled = help_flag in ("true", "1") or callback_enabled or (kb and merchant)
 support_help = not merchant and help_enabled
 module = "support_help_host" if support_help else "support_help_off"
 (lib / "support_help_header_api.dart").write_text(f"export '{module}.dart';\n", encoding="utf-8")

@@ -87,3 +87,8 @@ health, help and case writeback. The Android merchant package enables help.
 Each package artifact includes `ops-test-profile.json` with the generated
 feature settings, workflow run, source commit, package filename and SHA-256.
 The update client and publisher panel have independent switches.
+
+
+### Knowledge cards in a preview build
+
+Knowledge cards are off by default. To include them, select the knowledge-card option in **Build SteadDesk** on `preview/ui-v7`, or set `STEADDESK_KB=true` when configuring a local edition. The merchant edition includes the help waiting room; the support edition includes an editor that requires administrator access. The server must enable the same feature before either can use it. Normal PR and tag builds leave it off.

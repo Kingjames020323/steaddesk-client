@@ -6,6 +6,10 @@ name: Build SteadDesk
     tags: ['v1.5.0-sd.*']
   workflow_dispatch:
     inputs:
+      steaddesk_kb:
+        description: Include knowledge cards on preview/ui-v7 (requires an enabled server)
+        type: boolean
+        default: false
       steaddesk_callback:
         description: Enable scheduled help callbacks on preview/ui-v7
         type: boolean
@@ -42,6 +46,7 @@ permissions:
   contents: read
 env:
   VERIFY_OPS_PROFILE: ${{ inputs.steaddesk_ops_integration && 'true' || 'false' }}
+  STEADDESK_KB: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/preview/ui-v7' && inputs.steaddesk_kb && 'true' || 'false' }}
   STEADDESK_CALLBACK: ${{ github.event_name == 'workflow_dispatch' && github.ref_type == 'branch' && github.ref == 'refs/heads/preview/ui-v7' && inputs.steaddesk_callback && 'true' || 'false' }}
   STEADDESK_TOOLBAR: ${{ github.event_name == 'workflow_dispatch' && github.ref_type == 'branch' && inputs.steaddesk_toolbar && 'true' || 'false' }}
   STEADDESK_FLEET_ADMIN: ${{ github.event_name == 'workflow_dispatch' && github.ref_type == 'branch' && inputs.steaddesk_fleet_admin && 'true' || 'false' }}
@@ -713,15 +718,15 @@ jobs:
       if: matrix.edition == 'merchant' && env.STEADDESK_FLEET_UPDATE == 'true'
       shell: bash
       run: python3 .distribution/scripts/tests/windows-fleet/run-controller.py --repo-root .distribution --source-root .
-    - name: Test support case closing with its feature enabled
+    - name: Test opted-in support features before restoring the installer profile
       if: matrix.edition == 'support'
       shell: bash
       run: |
-        STEADDESK_TOOLBAR=true STEADDESK_CASES=true bash .distribution/scripts/configure-edition.sh "$PWD" support
+        STEADDESK_KB=true STEADDESK_TOOLBAR=true STEADDESK_CASES=true bash .distribution/scripts/configure-edition.sh "$PWD" support
         (
           cd flutter
           flutter pub get
-          flutter analyze --no-pub --no-fatal-infos --no-fatal-warnings lib/steaddesk/toolbar lib/steaddesk/metrics lib/steaddesk/cases lib/models/model.dart lib/utils/multi_window_manager.dart lib/desktop/pages/desktop_home_page.dart lib/steaddesk/support_home.dart lib/desktop/pages/remote_page.dart lib/desktop/pages/remote_tab_page.dart lib/desktop/widgets/remote_toolbar.dart
+          flutter analyze --no-pub --no-fatal-infos --no-fatal-warnings lib/steaddesk/kb lib/steaddesk/toolbar lib/steaddesk/metrics lib/steaddesk/cases lib/models/model.dart lib/utils/multi_window_manager.dart lib/desktop/pages/desktop_home_page.dart lib/steaddesk/support_home.dart lib/desktop/pages/remote_page.dart lib/desktop/pages/remote_tab_page.dart lib/desktop/widgets/remote_toolbar.dart
           flutter test --no-pub test/steaddesk
         )
         # Restore this run's chosen setting for the actual installer.
