@@ -1,0 +1,414 @@
+diff --git a/build.rs b/build.rs
+--- a/build.rs
++++ b/build.rs
+@@ -110,6 +110,19 @@
+         "true" => (),
+         _ => panic!("invalid SteadDesk edition"),
+     }
++    let fleet_selector = "src/steaddesk_fleet.rs";
++    println!("cargo:rerun-if-changed={}", fleet_selector);
++    println!("cargo:rerun-if-changed=src/steaddesk_fleet_key.rs");
++    let fleet_enabled = match std::fs::read_to_string(fleet_selector) {
++        Ok(value) if value.trim() == "true" => true,
++        Ok(value) if value.trim() == "false" => false,
++        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
++        _ => panic!("invalid SteadDesk fleet selector"),
++    };
++    if target_os == "android" && fleet_enabled
++        && std::fs::read_to_string(selector).map(|s| s.trim() == "false").unwrap_or(false) {
++        println!("cargo:rustc-cfg=steaddesk_fleet_merchant");
++    }
+     if target_os == "android" {
+         build_android_ifaddrs();
+     }
+diff --git a/src/lib.rs b/src/lib.rs
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -3,6 +3,8 @@
+ mod keyboard;
+ #[cfg(steaddesk_help_merchant)]
+ mod steaddesk_help;
++#[cfg(all(target_os = "android", steaddesk_fleet_merchant))]
++mod steaddesk_fleet_native;
+ /// cbindgen:ignore
+ pub mod platform;
+ #[cfg(not(any(target_os = "android", target_os = "ios")))]
+diff --git a/src/steaddesk_fleet_native.rs b/src/steaddesk_fleet_native.rs
+new file mode 100644
+--- /dev/null
++++ b/src/steaddesk_fleet_native.rs
+@@ -0,0 +1,374 @@
++//! Merchant Android only. Fixed update domains use the existing HELP-2 identity;
++//! release trust comes exclusively from the configured build, never the network.
++use hbb_common::{
++    base64::{engine::general_purpose::STANDARD, Engine},
++    config::Config,
++    sodiumoxide::{self, crypto::sign, randombytes::randombytes_into, utils::memzero},
++};
++use jni::{
++    objects::{JByteArray, JClass, JString},
++    sys::{jboolean, jint, jlong, jstring},
++    JNIEnv,
++};
++use serde_json::{json, Value};
++use std::{
++    panic::catch_unwind,
++    time::{SystemTime, UNIX_EPOCH},
++};
++
++const RELEASE_KEY: &str = include!("steaddesk_fleet_key.rs");
++const KEY_NOT_BEFORE: u64 = 1767225600;
++const KEY_EXPIRES: u64 = 1924992000;
++const MAX_BODY: usize = 65536;
++const MAX_MANIFEST: usize = 262144;
++
++fn now() -> Option<u64> {
++    Some(SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs())
++}
++
++fn integers_only(v: &Value) -> bool {
++    match v {
++        Value::Number(n) => n.is_i64() || n.is_u64(),
++        Value::Array(a) => a.iter().all(integers_only),
++        Value::Object(o) => o.values().all(integers_only),
++        _ => true,
++    }
++}
++
++// serde_json's default map is ordered. Re-encoding must reproduce every input
++// byte, which also rejects duplicate keys, alternate escaping and whitespace.
++fn request_body(method: &str, path: &str, body: &str, version: i64) -> Option<Value> {
++    let discovery = path == "/ops/v1/device/update-identity";
++    let allowed = matches!(
++        (method, path),
++        ("GET", "/ops/v1/device/update-identity")
++            | ("GET", "/ops/v1/device/update-assignment")
++            | ("POST", "/ops/v1/device/update-safety")
++            | ("POST", "/ops/v1/device/update-attempts")
++            | ("POST", "/ops/v1/device/update-reports")
++    );
++    if !allowed
++        || (discovery && version != 0)
++        || (!discovery && version <= 0)
++        || body.len() > MAX_BODY
++    {
++        return None;
++    }
++    let body_value: Value = serde_json::from_str(body).ok()?;
++    if !body_value.is_object()
++        || !integers_only(&body_value)
++        || serde_json::to_string(&body_value).ok()? != body
++        || (method == "GET" && body != "{}")
++    {
++        return None;
++    }
++    Some(body_value)
++}
++
++fn proof_bytes(
++    method: &str,
++    path: &str,
++    body: Value,
++    device: &str,
++    version: i64,
++    stamp: u64,
++    nonce: &str,
++) -> Option<Vec<u8>> {
++    let mut bytes = b"SteadDesk-fleet-v1\0".to_vec();
++    bytes.extend(
++        serde_json::to_vec(&json!([method, path, body, device, version, stamp, nonce])).ok()?,
++    );
++    Some(bytes)
++}
++
++fn proof(method: &str, path: &str, body: &str, version: i64) -> Option<String> {
++    let body = request_body(method, path, body, version)?;
++    sodiumoxide::init().ok()?;
++    let device = Config::get_id_or(String::new());
++    if !(9..=10).contains(&device.len()) || !device.bytes().all(|b| b.is_ascii_digit()) {
++        return None;
++    }
++    let (mut raw, public) = Config::get_existing_key_pair()?;
++    let key = sign::SecretKey::from_slice(&raw);
++    memzero(&mut raw);
++    let key = key?;
++    let public = sign::PublicKey::from_slice(&public)?;
++    let stamp = now()?;
++    let mut random = [0u8; 16];
++    randombytes_into(&mut random);
++    let nonce: String = random.iter().map(|b| format!("{b:02x}")).collect();
++    let bytes = proof_bytes(method, path, body, &device, version, stamp, &nonce)?;
++    let signature = sign::sign_detached(&bytes, &key);
++    if !sign::verify_detached(&signature, &bytes, &public) {
++        return None;
++    }
++    serde_json::to_string(&json!({
++        "X-Fleet-Device": device,
++        "X-Fleet-Key-Version": version.to_string(),
++        "X-Fleet-Time": stamp.to_string(),
++        "X-Fleet-Nonce": nonce,
++        "X-Fleet-Signature": STANDARD.encode(signature.to_bytes())
++    }))
++    .ok()
++}
++
++fn verify_with_root(
++    raw: &[u8],
++    signature: &[u8],
++    supplied_key: &[u8],
++    root: &[u8],
++    stamp: u64,
++) -> bool {
++    if raw.is_empty()
++        || raw.len() > MAX_MANIFEST
++        || supplied_key != root
++        || !(KEY_NOT_BEFORE..KEY_EXPIRES).contains(&stamp)
++    {
++        return false;
++    }
++    let (Some(public), Ok(signature)) = (
++        sign::PublicKey::from_slice(root),
++        sign::Signature::from_bytes(signature),
++    ) else {
++        return false;
++    };
++    sodiumoxide::init().is_ok() && sign::verify_detached(&signature, raw, &public)
++}
++
++// Boot/package-replaced receipt work must locate the existing Flutter-private
++// configuration without starting a host service or creating a new identity.
++#[no_mangle]
++pub extern "system" fn Java_com_carriez_flutter_1hbb_FleetNative_initialize(
++    mut env: JNIEnv,
++    _class: JClass,
++    directory: JString,
++) -> jboolean {
++    catch_unwind(std::panic::AssertUnwindSafe(|| {
++        let directory: String = env.get_string(&directory).ok()?.into();
++        if !std::path::Path::new(&directory).is_absolute() {
++            return None;
++        }
++        let mut active = hbb_common::config::APP_DIR.write().ok()?;
++        if active.is_empty() {
++            *active = directory;
++        } else if *active != directory {
++            return None;
++        }
++        Some(sodiumoxide::init().is_ok())
++    }))
++    .ok()
++    .flatten()
++    .unwrap_or(false)
++    .into()
++}
++
++#[no_mangle]
++pub extern "system" fn Java_com_carriez_flutter_1hbb_FleetNative_proof(
++    mut env: JNIEnv,
++    _class: JClass,
++    method: JString,
++    path: JString,
++    body: JString,
++    version: jlong,
++) -> jstring {
++    catch_unwind(std::panic::AssertUnwindSafe(|| {
++        // Bound Java strings before allocating UTF-8 copies.
++        if env
++            .call_method(&method, "length", "()I", &[])
++            .ok()?
++            .i()
++            .ok()?
++            > 4
++            || env
++                .call_method(&path, "length", "()I", &[])
++                .ok()?
++                .i()
++                .ok()?
++                > 64
++            || env
++                .call_method(&body, "length", "()I", &[])
++                .ok()?
++                .i()
++                .ok()? as usize
++                > MAX_BODY
++        {
++            return None;
++        }
++        let method: String = env.get_string(&method).ok()?.into();
++        let path: String = env.get_string(&path).ok()?.into();
++        let body: String = env.get_string(&body).ok()?.into();
++        let result = proof(&method, &path, &body, version)?;
++        Some(env.new_string(result).ok()?.into_raw())
++    }))
++    .ok()
++    .flatten()
++    .unwrap_or(std::ptr::null_mut())
++}
++
++#[no_mangle]
++pub extern "system" fn Java_com_carriez_flutter_1hbb_FleetNative_verifyRelease(
++    env: JNIEnv,
++    _class: JClass,
++    raw: JByteArray,
++    signature: JByteArray,
++    public: JByteArray,
++) -> jboolean {
++    catch_unwind(std::panic::AssertUnwindSafe(|| {
++        if env.get_array_length(&raw).ok()? as usize > MAX_MANIFEST
++            || env.get_array_length(&signature).ok()? != 64
++            || env.get_array_length(&public).ok()? != 32
++        {
++            return None;
++        }
++        let raw = env.convert_byte_array(&raw).ok()?;
++        let signature = env.convert_byte_array(&signature).ok()?;
++        let supplied = env.convert_byte_array(&public).ok()?;
++        let root = STANDARD.decode(RELEASE_KEY).ok()?;
++        Some(verify_with_root(&raw, &signature, &supplied, &root, now()?))
++    }))
++    .ok()
++    .flatten()
++    .unwrap_or(false)
++    .into()
++}
++
++#[no_mangle]
++pub extern "system" fn Java_com_carriez_flutter_1hbb_FleetNative_sessionState(
++    _env: JNIEnv,
++    _class: JClass,
++) -> jint {
++    crate::server::AUTHED_CONNS
++        .lock()
++        .map_or(3, |active| if active.is_empty() { 0 } else { 2 })
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    #[test]
++    fn restricts_domains_versions_and_canonical_bodies() {
++        assert!(request_body("GET", "/ops/v1/device/update-identity", "{}", 0).is_some());
++        assert!(request_body(
++            "POST",
++            "/ops/v1/device/update-reports",
++            r#"{"reason":"打印机","seq":1}"#,
++            7
++        )
++        .is_some());
++        for (method, path, body, version) in [
++            ("POST", "/ops/v1/fleet-updates/stop", "{}", 7),
++            ("GET", "/ops/v1/device/update-assignment?x=1", "{}", 7),
++            ("GET", "/ops/v1/device/update-assignment", "{}", 0),
++            ("GET", "/ops/v1/device/update-identity", "{}", 7),
++            ("GET", "/ops/v1/device/update-assignment", r#"{"x":1}"#, 7),
++            (
++                "POST",
++                "/ops/v1/device/update-safety",
++                r#"{"x":1,"x":1}"#,
++                7,
++            ),
++            ("POST", "/ops/v1/device/update-safety", r#"{"x":1.0}"#, 7),
++            ("POST", "/ops/v1/device/update-safety", r#"{ "x":1}"#, 7),
++            (
++                "POST",
++                "/ops/v1/device/update-safety",
++                r#"{"z":0,"a":1}"#,
++                7,
++            ),
++        ] {
++            assert!(request_body(method, path, body, version).is_none());
++        }
++    }
++    #[test]
++    fn protocol_vector_and_signature_bind_all_bytes() {
++        sodiumoxide::init().unwrap();
++        let bytes = proof_bytes(
++            "POST",
++            "/ops/v1/device/update-reports",
++            json!({"reason":"打印机", "seq":1}),
++            "790001001",
++            7,
++            1794729600,
++            "000102030405060708090a0b0c0d0e0f",
++        )
++        .unwrap();
++        assert_eq!(String::from_utf8(bytes.clone()).unwrap(),
++            "SteadDesk-fleet-v1\0[\"POST\",\"/ops/v1/device/update-reports\",{\"reason\":\"打印机\",\"seq\":1},\"790001001\",7,1794729600,\"000102030405060708090a0b0c0d0e0f\"]");
++        let (pk, sk) = sign::gen_keypair();
++        let sig = sign::sign_detached(&bytes, &sk);
++        assert!(sign::verify_detached(&sig, &bytes, &pk));
++        let mut changed = bytes.clone();
++        changed[18] ^= 1;
++        assert!(!sign::verify_detached(&sig, &changed, &pk));
++    }
++    #[test]
++    fn proof_uses_existing_isolated_identity_and_fresh_nonce() {
++        let fixture = std::env::temp_dir().join(format!("fleet-proof-{}", std::process::id()));
++        std::fs::create_dir_all(&fixture).unwrap();
++        let name = fixture.join("identity");
++        *hbb_common::config::APP_NAME.write().unwrap() = name.to_str().unwrap().to_owned();
++        assert_eq!(Config::file(), name.with_extension("toml"));
++        Config::set_id("790001001");
++        let public = Config::get_key_pair().1;
++        let pk = sign::PublicKey::from_slice(&public).unwrap();
++        let first: Value =
++            serde_json::from_str(&proof("GET", "/ops/v1/device/update-identity", "{}", 0).unwrap())
++                .unwrap();
++        let second: Value =
++            serde_json::from_str(&proof("GET", "/ops/v1/device/update-identity", "{}", 0).unwrap())
++                .unwrap();
++        assert_ne!(first["X-Fleet-Nonce"], second["X-Fleet-Nonce"]);
++        assert_eq!(first["X-Fleet-Device"], "790001001");
++        let bytes = proof_bytes(
++            "GET",
++            "/ops/v1/device/update-identity",
++            json!({}),
++            "790001001",
++            0,
++            first["X-Fleet-Time"].as_str().unwrap().parse().unwrap(),
++            first["X-Fleet-Nonce"].as_str().unwrap(),
++        )
++        .unwrap();
++        let sig = STANDARD
++            .decode(first["X-Fleet-Signature"].as_str().unwrap())
++            .unwrap();
++        assert!(sign::verify_detached(
++            &sign::Signature::from_bytes(&sig).unwrap(),
++            &bytes,
++            &pk
++        ));
++        std::fs::remove_dir_all(fixture).unwrap();
++    }
++    #[test]
++    fn release_verifies_exact_bytes_trust_and_time_before_parsing() {
++        sodiumoxide::init().unwrap();
++        let (pk, sk) = sign::gen_keypair();
++        let raw = b"{\"release\":\"preview\"}\n";
++        let sig = sign::sign_detached(raw, &sk).to_bytes();
++        assert!(verify_with_root(raw, &sig, &pk.0, &pk.0, KEY_NOT_BEFORE));
++        assert!(!verify_with_root(b"{}", &sig, &pk.0, &pk.0, KEY_NOT_BEFORE));
++        let (other, _) = sign::gen_keypair();
++        assert!(!verify_with_root(
++            raw,
++            &sig,
++            &other.0,
++            &pk.0,
++            KEY_NOT_BEFORE
++        ));
++        assert!(!verify_with_root(
++            raw,
++            &sig[..63],
++            &pk.0,
++            &pk.0,
++            KEY_NOT_BEFORE
++        ));
++        assert!(!verify_with_root(raw, &sig, &pk.0, &pk.0, KEY_EXPIRES));
++        assert!(!verify_with_root(
++            raw,
++            &sig,
++            &pk.0,
++            &pk.0,
++            KEY_NOT_BEFORE - 1
++        ));
++    }
++}
