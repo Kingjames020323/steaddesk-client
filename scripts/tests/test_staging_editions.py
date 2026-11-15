@@ -30,14 +30,17 @@ class StagingEditionTests(unittest.TestCase):
             main.write_text(original)
             assets = app / "steaddeskStaging"
             manifest = assets / "AndroidManifest.xml"
-            for edition, flag, enable, metrics in [
-                ("support", "", False, ""), ("support", "true", True, "false"),
-                ("merchant", "true", False, "true"), ("support", "false", False, "1"),
-                ("merchant", "", False, ""),
+            base_env = {key: value for key, value in os.environ.items()
+                        if not key.startswith("STEADDESK_")}
+            for edition, flag, enable, metrics, help_enabled in [
+                ("support", "", False, "", False), ("support", "true", True, "false", False),
+                ("merchant", "true", False, "true", True), ("support", "false", False, "1", False),
+                ("merchant", "", False, "", False), ("support", "false", False, "1", True),
             ]:
-                with self.subTest(edition=edition, flag=flag, metrics=metrics):
+                with self.subTest(edition=edition, flag=flag, metrics=metrics, help_enabled=help_enabled):
                     subprocess.run(["bash", ROOT / "scripts/configure-edition.sh", tree, edition],
-                                   env={**os.environ, "STEADDESK_CASES": flag,
+                                   env={**base_env, "STEADDESK_CASES": flag,
+                                        "STEADDESK_HELP": str(help_enabled).lower(),
                                         "STEADDESK_METRICS": metrics,
                                         "STEADDESK_OPS_GROUPS": flag,
                                         "STEADDESK_OPS_HEALTH": metrics,
@@ -45,7 +48,10 @@ class StagingEditionTests(unittest.TestCase):
                                         "STEADDESK_RECONNECT": metrics,
                                         "STEADDESK_AGENT_CERT_SHA256": "aa" * 32 if flag else ""}, check=True)
                     lib = tree / "flutter/lib/steaddesk"
-                    self.assertIn(f"const casesEnabled = {str(enable).lower()};",
+                    with_cases = enable or (edition == "support" and help_enabled)
+                    self.assertIn(f"const normalCasesEnabled = {str(enable).lower()};",
+                                  (lib / "merchant_build.dart").read_text())
+                    self.assertIn(f"const casesEnabled = {str(with_cases).lower()};",
                                   (lib / "merchant_build.dart").read_text())
                     self.assertIn(f"const opsGroupsEnabled = {str(enable).lower()};",
                                   (lib / "merchant_build.dart").read_text())
@@ -61,7 +67,7 @@ class StagingEditionTests(unittest.TestCase):
                     self.assertEqual((lib / "metrics_api.dart").read_text().strip(),
                                      f"export 'metrics/{expected_metrics}.dart';")
                     for name in ("case_session", "case_inbox", "history_host"):
-                        target = name if enable else name + "_off"
+                        target = name if with_cases else name + "_off"
                         self.assertEqual((lib / f"{name}_api.dart").read_text().strip(),
                                          f"export 'cases/{target}.dart';")
                     self.assertEqual(main.read_text(), original)
