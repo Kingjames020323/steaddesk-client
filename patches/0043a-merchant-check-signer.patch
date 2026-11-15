@@ -16,14 +16,25 @@ index 4bc2c43..5f28318 100644
                  println!("cargo:rustc-cfg=steaddesk_merchant");
              }
 diff --git a/flutter/lib/steaddesk/help_signer.dart b/flutter/lib/steaddesk/help_signer.dart
-index 3233054..35cbb53 100644
+index 3233054..66b11c9 100644
 --- a/flutter/lib/steaddesk/help_signer.dart
 +++ b/flutter/lib/steaddesk/help_signer.dart
-@@ -19,6 +19,28 @@ class MerchantHelpSigner {
+@@ -19,6 +19,39 @@ class MerchantHelpSigner {
    final DynamicLibrary _core;
    MerchantHelpSigner(this._core);
  
++  String quickCheckBinding() =>
++      _quickCheckCall('binding', 0, const {})['fingerprint']!;
++
 +  Map<String, String> signQuickCheck(
++      String operation, int keyVersion, Map<String, dynamic> body) {
++    if (!const {'identity', 'inventory', 'report'}.contains(operation)) {
++      throw ArgumentError('Unsupported merchant check operation');
++    }
++    return _quickCheckCall(operation, keyVersion, body);
++  }
++
++  Map<String, String> _quickCheckCall(
 +      String operation, int keyVersion, Map<String, dynamic> body) {
 +    final bytes = utf8.encode(jsonEncode({
 +      'operation': operation, 'key_version': keyVersion, 'body': body,
@@ -63,14 +74,15 @@ index 542fc71..ca8a4c6 100644
  #[cfg(all(target_os = "android", steaddesk_fleet_merchant))]
 diff --git a/src/steaddesk_check_signer.rs b/src/steaddesk_check_signer.rs
 new file mode 100644
-index 0000000..b49b83e
+index 0000000..1064635
 --- /dev/null
 +++ b/src/steaddesk_check_signer.rs
-@@ -0,0 +1,197 @@
+@@ -0,0 +1,208 @@
 +//! Merchant-only device proofs for three fixed operations. No key material crosses the C ABI.
 +use hbb_common::{
 +    base64::{engine::general_purpose::STANDARD, Engine},
 +    config::Config,
++    sha2::{Digest, Sha256},
 +    sodiumoxide::{self, crypto::sign, randombytes::randombytes_into, utils::memzero},
 +};
 +use serde_derive::{Deserialize, Serialize};
@@ -168,6 +180,16 @@ index 0000000..b49b83e
 +    let device = Config::get_id_or(String::new());
 +    if !(9..=10).contains(&device.len()) || !device.bytes().all(|b| b.is_ascii_digit()) {
 +        return None;
++    }
++    if input.operation == "binding" {
++        if input.key_version != 0 || input.body != json!({}) {
++            return None;
++        }
++        let (mut secret, public) = Config::get_existing_key_pair()?;
++        memzero(&mut secret);
++        sign::PublicKey::from_slice(&public)?;
++        return serde_json::to_vec(&json!({"fingerprint":format!("{:x}",Sha256::digest(&public))}))
++            .ok();
 +    }
 +    let version = input.key_version;
 +    let ts = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
