@@ -3,7 +3,12 @@
   "controller_tests": {
     "core_sha256": "edeac63296853072e9593f3692a6e46e3e55c7b5e29de450c44353887bf93690",
     "failed": 0,
-    "passed": 14,
+    "final_barrier_cases": [
+      "permit expires during submitted-state fsync: zero launches",
+      "same-build service PID/creation/hash changes during submitted-state fsync: zero launches",
+      "active/unknown recovery session is not merchant_pause"
+    ],
+    "passed": 17,
     "public_patch_source_matches": true,
     "scope": "actual portable controller and real cryptography with explicit mocked OS/HTTP Host"
   },

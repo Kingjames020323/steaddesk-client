@@ -21,6 +21,9 @@ struct Mock {
     preparations: usize,
     requests: Vec<Operation>,
     reports: Vec<Value>,
+    expire_on_submitted: bool,
+    replace_on_submitted: bool,
+    replacement: bool,
     snapshots: Vec<State>,
     events: Vec<(String, String)>,
 }
@@ -39,9 +42,9 @@ impl Host for Mock {
         Ok(Installed {
             build: 69,
             os: 10,
-            pid: 42,
-            created: 1000,
-            binary_sha256: [9; 32],
+            pid: if self.replacement { 43 } else { 42 },
+            created: if self.replacement { 1001 } else { 1000 },
+            binary_sha256: if self.replacement { [10; 32] } else { [9; 32] },
         })
     }
     fn request(&mut self, op: Operation, body: &Value, _version: u64) -> Result<Value> {
@@ -96,6 +99,18 @@ impl Host for Mock {
     }
     fn persist(&mut self, s: &State) -> Result<()> {
         self.snapshots.push(s.clone());
+        if s.transaction.as_ref().map_or(false, |t| {
+            t.stage == "submitted" && t.installer_code.is_none()
+        }) {
+            if self.expire_on_submitted {
+                self.at += 16;
+                self.expire_on_submitted = false;
+            }
+            if self.replace_on_submitted {
+                self.replacement = true;
+                self.replace_on_submitted = false;
+            }
+        }
         Ok(())
     }
     fn log(&mut self, event: &str, reason: &str) -> Result<()> {
@@ -140,6 +155,9 @@ fn setup(version: u64) -> (Mock, State, BuildConfig) {
             preparations: 0,
             requests: vec![],
             reports: vec![],
+            expire_on_submitted: false,
+            replace_on_submitted: false,
+            replacement: false,
             snapshots: vec![],
             events: vec![],
         },
@@ -310,5 +328,41 @@ fn native_verifier_failure_never_requests_install_authorization() {
     );
     assert_eq!(h.launches, 0);
     assert!(!h.requests.iter().any(|o| matches!(o, Operation::Attempts)));
+    no_health(&h);
+}
+
+#[test]
+fn permit_expiring_during_submitted_fsync_never_launches() {
+    let (mut h, mut s, cfg) = setup(70);
+    h.expire_on_submitted = true;
+    assert_eq!(tick(&mut h, &mut s, &cfg).unwrap_err().0, "no_safety");
+    assert_eq!(h.launches, 0);
+    assert_eq!(s.transaction.as_ref().unwrap().stage, "submitted");
+    s = h.snapshots.last().unwrap().clone();
+    tick(&mut h, &mut s, &cfg).unwrap();
+    assert_eq!(h.launches, 0);
+    no_health(&h);
+}
+#[test]
+fn same_build_service_identity_changed_during_submitted_fsync_never_launches() {
+    let (mut h, mut s, cfg) = setup(70);
+    h.replace_on_submitted = true;
+    assert!(tick(&mut h, &mut s, &cfg).is_err());
+    assert!(h.replacement);
+    assert_eq!(h.launches, 0);
+    s = h.snapshots.last().unwrap().clone();
+    tick(&mut h, &mut s, &cfg).unwrap();
+    assert_eq!(h.launches, 0);
+    no_health(&h);
+}
+#[test]
+fn active_or_unknown_recovery_session_is_not_mislabeled_merchant_pause() {
+    let (mut h, mut s, cfg) = setup(70);
+    tick(&mut h, &mut s, &cfg).unwrap();
+    h.healthy = true;
+    h.local_error = Some("session_unknown");
+    tick(&mut h, &mut s, &cfg).unwrap();
+    assert_eq!(h.launches, 1);
+    assert!(h.reports.iter().all(|r| r["state"] != "paused"));
     no_health(&h);
 }
