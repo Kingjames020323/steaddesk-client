@@ -37,7 +37,40 @@ public final class FleetPolicyTest {
     return Instant.parse(at).getEpochSecond();
   }
 
+  static byte[] release(String id, long issued, long expires) throws Exception {
+    String hash = String.join("", java.util.Collections.nCopies(64, "1"));
+    JSONObject manifest = new JSONObject()
+        .put("schema", 1).put("release_id", "fixture").put("sequence", 2).put("key_id", id)
+        .put("issued_at", issued).put("expires_at", expires).put("ring", 0).put("batch", 0)
+        .put("bucket_end", 100).put("platform", "android").put("package", "com.steaddesk.remote")
+        .put("channel", "merchant").put("architecture", "universal").put("versionCode", 2)
+        .put("display_version", "v2").put("min_os", 1).put("size_bytes", 100)
+        .put("artifact_path", "fixture.apk").put("sha256", hash).put("signer_cert_sha256", hash)
+        .put("previous_release_id", JSONObject.NULL).put("health_policy_id", "c4-v1");
+    return manifest.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8);
+  }
+
+  static void overlappingRoots() throws Exception {
+    FleetRoot old = new FleetRoot("old", "fixture-old", 10, 30, false);
+    FleetRoot next = new FleetRoot("next", "fixture-next", 20, 40, false);
+    FleetRoot[] roots = {old, next};
+    for (FleetRoot root : roots) {
+      FleetRoot selected = FleetRoot.select(roots, root.id, 20);
+      check(FleetPolicy.manifest(release(root.id, 20, 30), selected, 20).getString("key_id").equals(root.id));
+    }
+    rejected(() -> FleetRoot.select(roots, "old", 30));
+    rejected(() -> FleetRoot.select(roots, "next", 19));
+    rejected(() -> FleetRoot.select(roots, "unknown", 20));
+    rejected(() -> FleetPolicy.manifest(release("next", 19, 30), next, 20));
+    rejected(() -> FleetPolicy.manifest(release("next", 20, 41), next, 20));
+    rejected(() -> FleetPolicy.manifest(release("old", 20, 30), next, 20));
+    roots[0] = new FleetRoot("old", old.publicKey, 10, 30, true);
+    rejected(() -> FleetRoot.select(roots, "old", 20));
+    check(FleetRoot.select(roots, "next", 20) == next);
+  }
+
   public static void main(String[] args) throws Exception {
+    overlappingRoots();
     check(
         FleetPolicy.canonical(new JSONObject().put("z", "中文\n").put("a", 1))
             .equals("{\"a\":1,\"z\":\"中文\\n\"}"));

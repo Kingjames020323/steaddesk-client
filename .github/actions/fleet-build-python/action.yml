@@ -1,0 +1,9 @@
+name: Fleet build Python dependency
+description: Install the public-key validator in this runner's temporary directory.
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: |
+        python3 -m pip install --only-binary=:all: --target "$RUNNER_TEMP/fleet-python" PyNaCl==1.6.2
+        echo "PYTHONPATH=$RUNNER_TEMP/fleet-python" >> "$GITHUB_ENV"

@@ -28,8 +28,8 @@ final class FleetHost implements FleetRuntime.Host {
     return FleetPolicy.Strict.parse(value);
   }
 
-  public boolean verifyRelease(byte[] raw, byte[] sig, byte[] key) {
-    return FleetNative.verifyRelease(raw, sig, key);
+  public boolean verifyRelease(byte[] raw, byte[] sig, FleetRoot root) {
+    return FleetNative.verifyRelease(raw, sig, root.id);
   }
 
   public int sessionState() {

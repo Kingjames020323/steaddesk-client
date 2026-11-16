@@ -185,21 +185,21 @@ fn setup(version: u64) -> (Mock, State, BuildConfig) {
     let at = 1799901000;
     let (pk, sk) = sign::gen_keypair();
     let cfg = BuildConfig {
-        key_id: "test-windows-fixture",
-        public_key: Box::leak(STANDARD.encode(pk.0).into_boxed_str()),
-        valid_from: at - 1000,
-        valid_until: at + 86400,
+        roots: Box::leak(Box::new([ReleaseRoot::new(
+            "test-windows-fixture", Box::leak(STANDARD.encode(pk.0).into_boxed_str()),
+            at - 1000, at + 86400, false,
+        )])),
         current_build: 69,
         silent_profile: "fixture_firmware",
     };
-    let m = json!({"schema":1,"release_id":"fixture_release","sequence":1,"key_id":cfg.key_id,"issued_at":at-100,"expires_at":at+3600,"ring":0,"batch":0,"bucket_end":100,"platform":"windows","package":"SteadDesk","channel":"merchant","architecture":"x64","versionCode":version,"display_version":"1.5.0-sd.2","min_os":10,"size_bytes":100,"artifact_path":"fixed/fixture.exe","sha256":"11".repeat(32),"signer_cert_sha256":"22".repeat(32),"previous_release_id":null,"health_policy_id":"c4-v1"});
+    let m = json!({"schema":1,"release_id":"fixture_release","sequence":1,"key_id":cfg.roots[0].id,"issued_at":at-100,"expires_at":at+3600,"ring":0,"batch":0,"bucket_end":100,"platform":"windows","package":"SteadDesk","channel":"merchant","architecture":"x64","versionCode":version,"display_version":"1.5.0-sd.2","min_os":10,"size_bytes":100,"artifact_path":"fixed/fixture.exe","sha256":"11".repeat(32),"signer_cert_sha256":"22".repeat(32),"previous_release_id":null,"health_policy_id":"c4-v1"});
     let raw = serde_json::to_vec(&m).unwrap();
     let signature = sign::sign_detached(&raw, &sk);
     let day = chrono::DateTime::<chrono::Utc>::from_timestamp(at as i64, 0)
         .unwrap()
         .date_naive()
         .to_string();
-    let assignment = json!({"assignment":"fixture_assignment","ring":0,"manifest":STANDARD.encode(&raw),"signature":STANDARD.encode(signature.to_bytes()),"key_id":cfg.key_id,"expires_at":at+300,"silent_profile":cfg.silent_profile,"window":{"zone":"UTC","start_min":0,"end_min":1439,"business_day":day}});
+    let assignment = json!({"assignment":"fixture_assignment","ring":0,"manifest":STANDARD.encode(&raw),"signature":STANDARD.encode(signature.to_bytes()),"key_id":cfg.roots[0].id,"expires_at":at+300,"silent_profile":cfg.silent_profile,"window":{"zone":"UTC","start_min":0,"end_min":1439,"business_day":day}});
     (
         Mock {
             at,

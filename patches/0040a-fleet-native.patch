@@ -37,7 +37,7 @@ diff --git a/src/steaddesk_fleet_native.rs b/src/steaddesk_fleet_native.rs
 new file mode 100644
 --- /dev/null
 +++ b/src/steaddesk_fleet_native.rs
-@@ -0,0 +1,374 @@
+@@ -0,0 +1,365 @@
 +//! Merchant Android only. Fixed update domains use the existing HELP-2 identity;
 +//! release trust comes exclusively from the configured build, never the network.
 +use hbb_common::{
@@ -56,9 +56,8 @@ new file mode 100644
 +    time::{SystemTime, UNIX_EPOCH},
 +};
 +
-+const RELEASE_KEY: &str = include!("steaddesk_fleet_key.rs");
-+const KEY_NOT_BEFORE: u64 = 1767225600;
-+const KEY_EXPIRES: u64 = 1924992000;
++#[path = "steaddesk_fleet_root.rs"]
++mod trust;
 +const MAX_BODY: usize = 65536;
 +const MAX_MANIFEST: usize = 262144;
 +
@@ -155,19 +154,17 @@ new file mode 100644
 +fn verify_with_root(
 +    raw: &[u8],
 +    signature: &[u8],
-+    supplied_key: &[u8],
-+    root: &[u8],
++    key_id: &str,
++    roots: &[trust::ReleaseRoot],
 +    stamp: u64,
 +) -> bool {
-+    if raw.is_empty()
-+        || raw.len() > MAX_MANIFEST
-+        || supplied_key != root
-+        || !(KEY_NOT_BEFORE..KEY_EXPIRES).contains(&stamp)
-+    {
++    if raw.is_empty() || raw.len() > MAX_MANIFEST {
 +        return false;
 +    }
++    let Some(record) = trust::select(roots, key_id, stamp) else { return false };
++    let Ok(root) = STANDARD.decode(record.public_key) else { return false };
 +    let (Some(public), Ok(signature)) = (
-+        sign::PublicKey::from_slice(root),
++        sign::PublicKey::from_slice(&root),
 +        sign::Signature::from_bytes(signature),
 +    ) else {
 +        return false;
@@ -247,24 +244,23 @@ new file mode 100644
 +
 +#[no_mangle]
 +pub extern "system" fn Java_com_carriez_flutter_1hbb_FleetNative_verifyRelease(
-+    env: JNIEnv,
++    mut env: JNIEnv,
 +    _class: JClass,
 +    raw: JByteArray,
 +    signature: JByteArray,
-+    public: JByteArray,
++    key_id: JString,
 +) -> jboolean {
 +    catch_unwind(std::panic::AssertUnwindSafe(|| {
 +        if env.get_array_length(&raw).ok()? as usize > MAX_MANIFEST
 +            || env.get_array_length(&signature).ok()? != 64
-+            || env.get_array_length(&public).ok()? != 32
++            || env.call_method(&key_id, "length", "()I", &[]).ok()?.i().ok()? > 64
 +        {
 +            return None;
 +        }
 +        let raw = env.convert_byte_array(&raw).ok()?;
 +        let signature = env.convert_byte_array(&signature).ok()?;
-+        let supplied = env.convert_byte_array(&public).ok()?;
-+        let root = STANDARD.decode(RELEASE_KEY).ok()?;
-+        Some(verify_with_root(&raw, &signature, &supplied, &root, now()?))
++        let id: String = env.get_string(&key_id).ok()?.into();
++        Some(verify_with_root(&raw, &signature, &id, trust::BUILD_ROOTS, now()?))
 +    }))
 +    .ok()
 +    .flatten()
@@ -385,30 +381,25 @@ new file mode 100644
 +        let (pk, sk) = sign::gen_keypair();
 +        let raw = b"{\"release\":\"preview\"}\n";
 +        let sig = sign::sign_detached(raw, &sk).to_bytes();
-+        assert!(verify_with_root(raw, &sig, &pk.0, &pk.0, KEY_NOT_BEFORE));
-+        assert!(!verify_with_root(b"{}", &sig, &pk.0, &pk.0, KEY_NOT_BEFORE));
-+        let (other, _) = sign::gen_keypair();
-+        assert!(!verify_with_root(
-+            raw,
-+            &sig,
-+            &other.0,
-+            &pk.0,
-+            KEY_NOT_BEFORE
-+        ));
-+        assert!(!verify_with_root(
-+            raw,
-+            &sig[..63],
-+            &pk.0,
-+            &pk.0,
-+            KEY_NOT_BEFORE
-+        ));
-+        assert!(!verify_with_root(raw, &sig, &pk.0, &pk.0, KEY_EXPIRES));
-+        assert!(!verify_with_root(
-+            raw,
-+            &sig,
-+            &pk.0,
-+            &pk.0,
-+            KEY_NOT_BEFORE - 1
-+        ));
++        let public = Box::leak(STANDARD.encode(pk.0).into_boxed_str());
++        let (next_pk, next_sk) = sign::gen_keypair();
++        let next_public = Box::leak(STANDARD.encode(next_pk.0).into_boxed_str());
++        let next_sig = sign::sign_detached(raw, &next_sk).to_bytes();
++        let roots = [
++            trust::ReleaseRoot::new("old", public, 10, 30, false),
++            trust::ReleaseRoot::new("new", next_public, 20, 40, false),
++        ];
++        assert!(verify_with_root(raw, &sig, "old", &roots, 20));
++        assert!(verify_with_root(raw, &next_sig, "new", &roots, 20));
++        assert!(!verify_with_root(raw, &sig, "new", &roots, 20));
++        assert!(!verify_with_root(b"{}", &sig, "old", &roots, 20));
++        assert!(!verify_with_root(raw, &sig[..63], "old", &roots, 20));
++        assert!(!verify_with_root(raw, &sig, "unknown", &roots, 20));
++        assert!(!verify_with_root(raw, &sig, "old", &roots, 9));
++        assert!(!verify_with_root(raw, &sig, "old", &roots, 30));
++        let mut revoked = roots;
++        revoked[0].revoked = true;
++        assert!(!verify_with_root(raw, &sig, "old", &revoked, 20));
++        assert!(verify_with_root(raw, &next_sig, "new", &revoked, 20));
 +    }
 +}

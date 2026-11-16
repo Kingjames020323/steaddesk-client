@@ -111,8 +111,8 @@ final class FixtureHost implements FleetRuntime.Host {
             .put("X-Fleet-Time", String.valueOf(at)).put("X-Fleet-Nonce", nonce)
             .put("X-Fleet-Signature", Base64.encodeToString(signing.sign(), Base64.NO_WRAP));
     }
-    public boolean verifyRelease(byte[] raw, byte[] signature, byte[] publicKey) throws Exception {
-        PublicKey key = new EdDSAPublicKey(new EdDSAPublicKeySpec(publicKey, EdDSANamedCurveTable.getByName("Ed25519")));
+    public boolean verifyRelease(byte[] raw, byte[] signature, FleetRoot root) throws Exception {
+        PublicKey key = new EdDSAPublicKey(new EdDSAPublicKeySpec(decode(root.publicKey), EdDSANamedCurveTable.getByName("Ed25519")));
         Signature checking = new EdDSAEngine(MessageDigest.getInstance("SHA-512")); checking.initVerify(key); checking.update(raw);
         return checking.verify(signature);
     }

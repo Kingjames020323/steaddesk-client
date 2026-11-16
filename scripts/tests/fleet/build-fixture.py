@@ -43,11 +43,11 @@ def main():
     generated = scratch / "generated"
     generated.mkdir(exist_ok=True)
     fields = {"OPS_ORIGIN": config["origin"], "ARTIFACT_ORIGIN": config["origin"],
-              "KEY_ID": config["key_id"], "PUBLIC_KEY": config["public_key"],
               "SILENT_PROFILE": config["silent_profile"]}
     java = "package com.carriez.flutter_hbb; final class FleetBuild {\n"
     java += "\n".join("static final String " + k + "=" + json.dumps(v) + ";" for k,v in fields.items())
-    java += "\nstatic final long KEY_VALID_FROM=0L, KEY_VALID_UNTIL=4102444800L;\n}\n"
+    java += ("\nstatic final FleetRoot[] ROOTS = {new FleetRoot(" + json.dumps(config["key_id"]) + ", " +
+             json.dumps(config["public_key"]) + ", 0L, 4102444800L, false)};\n}\n")
     (generated / "FleetBuild.java").write_text(java)
     (generated / "FixtureSecrets.java").write_text(
         "package com.carriez.flutter_hbb; final class FixtureSecrets {\n" +
@@ -66,7 +66,7 @@ def main():
     candidate = repo / "android-fleet/src/main/java/com/carriez/flutter_hbb"
     snapshot = scratch / "candidate-source"
     snapshot.mkdir(exist_ok=True)
-    for name in ("FleetRuntime.java", "FleetPolicy.java", "FleetArchive.java"):
+    for name in ("FleetRuntime.java", "FleetPolicy.java", "FleetRoot.java", "FleetArchive.java"):
         (snapshot / name).write_bytes((candidate / name).read_bytes())
     sources = [*snapshot.glob("*.java"), *fixture.glob("*.java"), *generated.glob("*.java")]
     run("javac", "--release", "8", "-classpath", str(android) + ":" + str(a.apksig) + ":" + str(a.eddsa), "-d", classes, *sources)

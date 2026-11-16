@@ -1,4 +1,4 @@
-# Merchant fleet updates (preview, default off)
+# Merchant fleet updates (default off)
 
 The normal merchant application starts this component through `FleetEntry` after
 native initialization, on merchant app launch, on boot/package replacement, through
@@ -11,7 +11,7 @@ for a user-tapped notification.
 The support and disabled merchant source selections contain only a no-op entry.
 Neither selection includes the updater's classes, manifest entries or APK verifier.
 
-Enable only for an explicitly configured preview build:
+An opt-in branch preview can use the following configuration (Python with PyNaCl 1.6.2 is required for an enabled updater).
 
 ```sh
 STEADDESK_EDITION=merchant \
@@ -28,9 +28,36 @@ root `test-upd2-v1` is compiled into Java and the merchant native verifier; its 
 private counterpart was discarded. To build a usable disposable test package,
 supply `STEADDESK_FLEET_TEST_KEY_ID` (must start `test-`) and
 `STEADDESK_FLEET_TEST_PUBLIC_KEY` (canonical base64 Ed25519 public key) at trusted
-build time. There is no downloaded keyring, runtime key replacement, device-key
-export, or bypass verifier. Enabled tagged builds are rejected. Production release
-roots require a separate reviewed change.
+build time.
+
+Android and Windows use the same public JSON input, `STEADDESK_FLEET_KEYRING`.
+The JSON is limited to 32,768 UTF-8 bytes. The object maps each unique key ID to exactly four fields: `public_key` (canonical
+Base64, valid 32-byte Ed25519 point), `valid_from` and `valid_until` (Unix
+seconds), and `revoked` (boolean). Supply only reviewed public records. A new
+and an old ID may overlap. The selected key must cover both verification time
+and the entire signed manifest lifetime. A revoked key is also disabled under
+all other IDs for the same public bytes, regardless of its validity window.
+Distribute updated trust records in a platform-signed app update.
+
+In Build SteadDesk, branch previews take `STEADDESK_FLEET_PREVIEW_KEYRING` from
+repository variables and accept only `test-` IDs. With no keyring set they use
+the existing preview inputs above. Tagged merchant builds enable the updater
+only when the repository variable `STEADDESK_RELEASE_FLEET_UPDATE=true` is set.
+They require a nonempty `STEADDESK_FLEET_RELEASE_KEYRING` and reject every
+`test-` ID. The workflow passes the appropriate JSON into
+`STEADDESK_FLEET_KEYRING`. For a local build set that input directly; the
+configure script derives the build type from the GitHub tag/branch context.
+Tagged builds take origins exclusively from `STEADDESK_FLEET_RELEASE_OPS_ORIGIN`
+and `STEADDESK_FLEET_RELEASE_ARTIFACT_ORIGIN` repository variables. An empty
+artifact origin defaults to the corresponding ops origin. Both modes require a
+fixed HTTPS control-plane origin. The typed keyring and
+legacy preview inputs are mutually exclusive. For an offline build, install
+`PyNaCl==1.6.2` and its dependencies from the approved wheels into the Python
+environment used by `scripts/apply-patches.sh` and `scripts/archive-source.py`:
+
+```sh
+python3 -m pip install --no-index --only-binary=:all: --find-links "$PUBLIC_WHEELHOUSE" PyNaCl==1.6.2
+```
 
 A nonempty `STEADDESK_FLEET_SILENT_PROFILE` is the lowercase SHA-256 of the approved
 firmware's UTF-8 `Build.FINGERPRINT`, and must equal both the current device's value

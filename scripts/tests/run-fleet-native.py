@@ -66,12 +66,16 @@ public class NativeFixture {
   public static void main(String[] args) throws Exception {
     Path dir=Path.of(args[1]);
     if(args[0].equals("make")) {
-      KeyPair pair=KeyPairGenerator.getInstance("Ed25519").generateKeyPair();
-      byte[] encoded=pair.getPublic().getEncoded();
       byte[] raw="{\\"release\\":\\"native-fixture\\"}\\n".getBytes(java.nio.charset.StandardCharsets.UTF_8);
-      Signature signer=Signature.getInstance("Ed25519"); signer.initSign(pair.getPrivate()); signer.update(raw);
-      Files.write(dir.resolve("raw"),raw); Files.write(dir.resolve("sig"),signer.sign());
-      Files.write(dir.resolve("pk"),java.util.Arrays.copyOfRange(encoded,encoded.length-32,encoded.length)); return;
+      Files.write(dir.resolve("raw"),raw);
+      for(String label:new String[]{"old","new","revoked"}) {
+        KeyPair pair=KeyPairGenerator.getInstance("Ed25519").generateKeyPair();
+        byte[] encoded=pair.getPublic().getEncoded();
+        Signature signer=Signature.getInstance("Ed25519"); signer.initSign(pair.getPrivate()); signer.update(raw);
+        Files.write(dir.resolve(label+".sig"),signer.sign());
+        Files.write(dir.resolve(label+".pk"),java.util.Arrays.copyOfRange(encoded,encoded.length-32,encoded.length));
+      }
+      return;
     }
     System.load(args[2]); require(!FleetNative.initialize("relative")); require(FleetNative.initialize(dir.toString())); require(FleetNative.initialize(dir.toString())); require(!FleetNative.initialize(dir.resolve("other").toString())); prepare(dir.resolve("identity").toString());
     String first=FleetNative.proof("GET","/ops/v1/device/update-identity","{}",0);
@@ -80,10 +84,15 @@ public class NativeFixture {
     require(FleetNative.proof("POST","/ops/v1/fleet-updates/stop","{}",1)==null);
     require(FleetNative.proof("GET","/ops/v1/device/update-assignment","{}",0)==null);
     require(FleetNative.proof("POST","/ops/v1/device/update-reports","{\\"x\\":1,\\"x\\":1}",1)==null);
-    byte[] raw=Files.readAllBytes(dir.resolve("raw")),sig=Files.readAllBytes(dir.resolve("sig")),pk=Files.readAllBytes(dir.resolve("pk"));
-    require(FleetNative.verifyRelease(raw,sig,pk)); raw[0]^=1;
-    require(!FleetNative.verifyRelease(raw,sig,pk)); raw[0]^=1; pk[0]^=1;
-    require(!FleetNative.verifyRelease(raw,sig,pk));
+    byte[] raw=Files.readAllBytes(dir.resolve("raw"));
+    byte[] sig=Files.readAllBytes(dir.resolve("old.sig"));
+    require(FleetNative.verifyRelease(raw,sig,"fixture-old"));
+    require(FleetNative.verifyRelease(raw,Files.readAllBytes(dir.resolve("new.sig")),"fixture-new"));
+    require(!FleetNative.verifyRelease(raw,Files.readAllBytes(dir.resolve("revoked.sig")),"fixture-revoked"));
+    require(!FleetNative.verifyRelease(raw,Files.readAllBytes(dir.resolve("revoked.sig")),"fixture-alias"));
+    require(!FleetNative.verifyRelease(raw,sig,"fixture-new"));
+    require(!FleetNative.verifyRelease(raw,sig,"unknown"));
+    raw[0]^=1; require(!FleetNative.verifyRelease(raw,sig,"fixture-old"));
     require(FleetNative.sessionState()==0); active(true); require(FleetNative.sessionState()==2);
     System.out.println("JNI smoke PASS: existing identity, nonce freshness, domains, duplicate rejection, embedded release trust, tamper, session source");
   }
@@ -92,7 +101,21 @@ public class NativeFixture {
     run(["javac", "-d", work/"classes", work/"NativeFixture.java", work/"com/carriez/flutter_hbb/FleetNative.java"])
     run(["java", "-cp", work/"classes", "NativeFixture", "make", work])
     (work/"src/steaddesk_fleet_native.rs").write_text(module)
-    (work/"src/steaddesk_fleet_key.rs").write_text(json.dumps(base64.b64encode((work/"pk").read_bytes()).decode())+"\n")
+    # Exercise the actual tagged-build configuration using only ephemeral public fixtures.
+    roots = {f"fixture-{label}": {
+        "public_key": base64.b64encode((work / (label + ".pk")).read_bytes()).decode(),
+        "valid_from": 0, "valid_until": 4102444800, "revoked": label == "revoked",
+    } for label in ("old", "new", "revoked")}
+    roots["fixture-alias"] = dict(roots["fixture-revoked"], revoked=False)
+    (work / "RELEASE_VERSION").write_text("1.5.0-sd.1")
+    manifest_path = work / "flutter/android/app/src/steaddeskStaging/AndroidManifest.xml"
+    manifest_path.parent.mkdir(parents=True)
+    manifest_path.write_text("<manifest>\n    <application>\n    </application>\n</manifest>\n")
+    build_env = {k: v for k, v in os.environ.items() if not k.startswith("STEADDESK_FLEET_")}
+    build_env.update(GITHUB_REF_TYPE="tag", STEADDESK_FLEET_UPDATE="1",
+                     STEADDESK_FLEET_OPS_ORIGIN="https://fixture.invalid",
+                     STEADDESK_FLEET_KEYRING=json.dumps(roots))
+    run([sys.executable, ROOT/"scripts/configure-fleet.py", work, "merchant"], env=build_env)
     (work/"src/lib.rs").write_text('''
 #![allow(unexpected_cfgs)]
 pub mod server { pub static AUTHED_CONNS: std::sync::Mutex<Vec<i32>> = std::sync::Mutex::new(Vec::new()); }

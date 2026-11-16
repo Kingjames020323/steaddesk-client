@@ -29,7 +29,7 @@ public final class FleetPolicy {
     return n;
   }
 
-  public static JSONObject manifest(byte[] raw, String keyId, long now) throws Exception {
+  public static JSONObject manifest(byte[] raw, FleetRoot root, long now) throws Exception {
     require(raw.length > 0 && raw.length <= 32768, "manifest_signature");
     String text = new String(raw, StandardCharsets.UTF_8);
     require(Arrays.equals(raw, text.getBytes(StandardCharsets.UTF_8)), "manifest_signature");
@@ -63,8 +63,10 @@ public final class FleetPolicy {
             && integer(m, "versionCode") > 0
             && integer(m, "min_os") > 0,
         "manifest_signature");
-    require(integer(m, "issued_at") <= now && now < integer(m, "expires_at"), "manifest_signature");
-    require(keyId.equals(m.getString("key_id")), "manifest_signature");
+    long issued = integer(m, "issued_at"), expires = integer(m, "expires_at");
+    require(root.validFrom <= issued && issued <= now && now < expires && expires <= root.validUntil,
+            "manifest_signature");
+    require(root.id.equals(m.getString("key_id")), "manifest_signature");
     for (String key : new String[] {"release_id", "key_id", "display_version"})
       require(m.getString(key).matches("[A-Za-z0-9][A-Za-z0-9_.-]{0,63}"), "manifest_signature");
     require("android".equals(m.getString("platform")), "platform_mismatch");

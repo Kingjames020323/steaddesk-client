@@ -22,7 +22,7 @@ public final class FleetRuntime {
     JSONObject proof(String method, String path, String canonicalBody, long keyVersion)
         throws Exception;
 
-    boolean verifyRelease(byte[] raw, byte[] signature, byte[] publicKey) throws Exception;
+    boolean verifyRelease(byte[] raw, byte[] signature, FleetRoot root) throws Exception;
 
     int sessionState(); // 0 idle, 2 active, everything else unknown
 
@@ -223,22 +223,11 @@ public final class FleetRuntime {
     long at = now();
     FleetPolicy.require(FleetPolicy.integer(assignment, "expires_at") > at, "no_safety");
     String key = assignment.getString("key_id");
-    FleetPolicy.require(
-        key.equals(FleetBuild.KEY_ID)
-            && at >= FleetBuild.KEY_VALID_FROM
-            && at < FleetBuild.KEY_VALID_UNTIL,
-        "manifest_signature");
+    FleetRoot root = FleetRoot.select(FleetBuild.ROOTS, key, at);
     byte[] raw = unbase(assignment.getString("manifest"), 32768),
-        sig = unbase(assignment.getString("signature"), 64),
-        pub = unbase(FleetBuild.PUBLIC_KEY, 32);
-    FleetPolicy.require(
-        sig.length == 64 && pub.length == 32 && host.verifyRelease(raw, sig, pub),
-        "manifest_signature");
-    manifest = FleetPolicy.manifest(raw, key, at);
-    FleetPolicy.require(
-        manifest.getLong("issued_at") >= FleetBuild.KEY_VALID_FROM
-            && manifest.getLong("expires_at") <= FleetBuild.KEY_VALID_UNTIL,
-        "manifest_signature");
+        sig = unbase(assignment.getString("signature"), 64);
+    FleetPolicy.require(sig.length == 64 && host.verifyRelease(raw, sig, root), "manifest_signature");
+    manifest = FleetPolicy.manifest(raw, root, at);
     FleetPolicy.require(
         FleetPolicy.integer(assignment, "ring") == manifest.getLong("ring"), "manifest_signature");
     FleetPolicy.require(

@@ -108,7 +108,7 @@ diff --git a/src/steaddesk_fleet_windows.rs b/src/steaddesk_fleet_windows.rs
 new file mode 100644
 --- /dev/null
 +++ b/src/steaddesk_fleet_windows.rs
-@@ -0,0 +1,996 @@
+@@ -0,0 +1,1015 @@
 +//! Fixed merchant update protocol. The controller is portable for focused tests;
 +//! only the existing installed Windows service-owned server links its native host.
 +use chrono::{DateTime, Duration as ChronoDuration, LocalResult, Offset, TimeZone, Utc};
@@ -142,11 +142,12 @@ new file mode 100644
 +    }
 +}
 +
++#[path = "steaddesk_fleet_root.rs"]
++mod trust;
++pub use trust::ReleaseRoot;
++
 +pub struct BuildConfig {
-+    pub key_id: &'static str,
-+    pub public_key: &'static str,
-+    pub valid_from: u64,
-+    pub valid_until: u64,
++    pub roots: &'static [ReleaseRoot],
 +    pub current_build: u64,
 +    pub silent_profile: &'static str,
 +}
@@ -309,13 +310,8 @@ new file mode 100644
 +    pub health_policy_id: String,
 +}
 +pub fn verified_manifest(assignment: &Value, cfg: &BuildConfig, now: u64) -> Result<Manifest> {
-+    check(
-+        text(assignment, "key_id")? == cfg.key_id
-+            && cfg.key_id.starts_with("test-")
-+            && now >= cfg.valid_from
-+            && now < cfg.valid_until,
-+        "manifest_signature",
-+    )?;
++    let key_id = text(assignment, "key_id")?;
++    let root = trust::select(cfg.roots, key_id, now).ok_or(Error("manifest_signature"))?;
 +    let raw = STANDARD
 +        .decode(text(assignment, "manifest")?)
 +        .map_err(|_| Error("manifest_signature"))?;
@@ -324,7 +320,7 @@ new file mode 100644
 +        .map_err(|_| Error("manifest_signature"))?;
 +    check(!raw.is_empty() && raw.len() <= 32768, "manifest_signature")?;
 +    let pk = STANDARD
-+        .decode(cfg.public_key)
++        .decode(root.public_key)
 +        .map_err(|_| Error("manifest_signature"))?;
 +    let pk = sign::PublicKey::from_slice(&pk).ok_or(Error("manifest_signature"))?;
 +    let sig = sign::Signature::from_bytes(&sig).map_err(|_| Error("manifest_signature"))?;
@@ -342,16 +338,16 @@ new file mode 100644
 +            && m.sequence > 0
 +            && m.version > 0
 +            && m.version <= 65535
-+            && m.key_id == cfg.key_id
++            && m.key_id == root.id
 +            && token(&m.release_id)
 +            && token(&m.display_version),
 +        "manifest_signature",
 +    )?;
 +    check(
-+        m.issued_at >= cfg.valid_from
++        m.issued_at >= root.valid_from
 +            && m.issued_at <= now
 +            && now < m.expires_at
-+            && m.expires_at <= cfg.valid_until,
++            && m.expires_at <= root.valid_until,
 +        "manifest_signature",
 +    )?;
 +    check(
@@ -1043,11 +1039,14 @@ new file mode 100644
 +        let (pk, sk) = sign::gen_keypair();
 +        let public = STANDARD.encode(pk.0);
 +        let public = Box::leak(public.into_boxed_str());
++        let (next_pk, next_sk) = sign::gen_keypair();
++        let next_public = Box::leak(STANDARD.encode(next_pk.0).into_boxed_str());
++        let roots = [
++            ReleaseRoot::new("test-preview", public, 1700000000, 1900000000, false),
++            ReleaseRoot::new("test-next", next_public, 1794729500, 1900000000, false),
++        ];
 +        let cfg = BuildConfig {
-+            key_id: "test-preview",
-+            public_key: public,
-+            valid_from: 1700000000,
-+            valid_until: 1900000000,
++            roots: Box::leak(Box::new(roots)),
 +            current_build: 69,
 +            silent_profile: "approved",
 +        };
@@ -1070,6 +1069,26 @@ new file mode 100644
 +        assert!(verified_manifest(&assignment, &cfg, 1794729600).is_err());
 +        assignment["key_id"] = json!("test-preview");
 +        assert!(verified_manifest(&assignment, &cfg, 1900000000).is_err());
++        let mut next = m.clone();
++        next["key_id"] = json!("test-next");
++        let assign = |m: &Value| {
++            let bytes = serde_json::to_vec(m).unwrap();
++            json!({"ring":0,"key_id":"test-next","manifest":STANDARD.encode(&bytes),
++                   "signature":STANDARD.encode(sign::sign_detached(&bytes, &next_sk).to_bytes())})
++        };
++        let at = 1794729600;
++        let next_assignment = assign(&next);
++        assert!(verified_manifest(&next_assignment, &cfg, at).is_ok());
++        let mut revoked = roots;
++        revoked[0].revoked = true;
++        let rotated = BuildConfig { roots: Box::leak(Box::new(revoked)), ..cfg };
++        assert!(verified_manifest(&assignment, &rotated, at).is_err());
++        assert!(verified_manifest(&next_assignment, &rotated, at).is_ok());
++        next["issued_at"] = json!(1794729499);
++        assert!(verified_manifest(&assign(&next), &rotated, at).is_err());
++        next["issued_at"] = json!(1794729500);
++        next["expires_at"] = json!(1900000001);
++        assert!(verified_manifest(&assign(&next), &rotated, at).is_err());
 +    }
 +    #[test]
 +    fn existing_help_identity_signs_without_exposing_keys_and_nonce_is_fresh() {
@@ -1109,7 +1128,7 @@ diff --git a/src/steaddesk_fleet_windows_host.rs b/src/steaddesk_fleet_windows_h
 new file mode 100644
 --- /dev/null
 +++ b/src/steaddesk_fleet_windows_host.rs
-@@ -0,0 +1,464 @@
+@@ -0,0 +1,461 @@
 +//! Concrete Windows host: fixed HTTPS origins, existing identity and protected native handles.
 +use super::*;
 +use hbb_common::sha2::{Digest, Sha256};
@@ -1550,10 +1569,7 @@ new file mode 100644
 +                        }
 +                    };
 +                    let cfg = BuildConfig {
-+                        key_id: build::KEY_ID,
-+                        public_key: build::PUBLIC_KEY,
-+                        valid_from: build::KEY_VALID_FROM,
-+                        valid_until: build::KEY_VALID_UNTIL,
++                        roots: trust::BUILD_ROOTS,
 +                        current_build: build::CURRENT_BUILD,
 +                        silent_profile: build::SILENT_PROFILE,
 +                    };

@@ -60,11 +60,12 @@ env:
   STEADDESK_TOOLBAR: ${{ github.event_name == 'workflow_dispatch' && github.ref_type == 'branch' && inputs.steaddesk_toolbar && 'true' || 'false' }}
   STEADDESK_TOOLBAR_ACTIONS: ${{ github.event_name == 'workflow_dispatch' && github.ref_type == 'branch' && inputs.steaddesk_toolbar_actions && 'true' || 'false' }}
   STEADDESK_FLEET_ADMIN: ${{ github.event_name == 'workflow_dispatch' && github.ref_type == 'branch' && inputs.steaddesk_fleet_admin && 'true' || 'false' }}
-  STEADDESK_FLEET_UPDATE: ${{ github.event_name == 'workflow_dispatch' && github.ref_type == 'branch' && inputs.steaddesk_fleet_update && 'true' || 'false' }}
-  STEADDESK_FLEET_OPS_ORIGIN: ${{ inputs.fleet_ops_origin || vars.STEADDESK_FLEET_OPS_ORIGIN }}
-  STEADDESK_FLEET_ARTIFACT_ORIGIN: ${{ inputs.fleet_artifact_origin || vars.STEADDESK_FLEET_ARTIFACT_ORIGIN }}
-  STEADDESK_FLEET_TEST_PUBLIC_KEY: ${{ vars.STEADDESK_FLEET_TEST_PUBLIC_KEY }}
-  STEADDESK_FLEET_TEST_KEY_ID: ${{ vars.STEADDESK_FLEET_TEST_KEY_ID }}
+  STEADDESK_FLEET_UPDATE: ${{ github.event_name == 'workflow_dispatch' && github.ref_type == 'branch' && inputs.steaddesk_fleet_update && 'true' || github.ref_type == 'tag' && vars.STEADDESK_RELEASE_FLEET_UPDATE == 'true' && 'true' || 'false' }}
+  STEADDESK_FLEET_OPS_ORIGIN: ${{ github.ref_type == 'tag' && vars.STEADDESK_FLEET_RELEASE_OPS_ORIGIN || github.ref_type != 'tag' && (inputs.fleet_ops_origin || vars.STEADDESK_FLEET_OPS_ORIGIN) || '' }}
+  STEADDESK_FLEET_ARTIFACT_ORIGIN: ${{ github.ref_type == 'tag' && vars.STEADDESK_FLEET_RELEASE_ARTIFACT_ORIGIN || github.ref_type != 'tag' && (inputs.fleet_artifact_origin || vars.STEADDESK_FLEET_ARTIFACT_ORIGIN) || '' }}
+  STEADDESK_FLEET_KEYRING: ${{ github.ref_type == 'tag' && vars.STEADDESK_FLEET_RELEASE_KEYRING || github.ref_type != 'tag' && vars.STEADDESK_FLEET_PREVIEW_KEYRING || '' }}
+  STEADDESK_FLEET_TEST_PUBLIC_KEY: ${{ github.ref_type != 'tag' && !vars.STEADDESK_FLEET_PREVIEW_KEYRING && vars.STEADDESK_FLEET_TEST_PUBLIC_KEY || '' }}
+  STEADDESK_FLEET_TEST_KEY_ID: ${{ github.ref_type != 'tag' && !vars.STEADDESK_FLEET_PREVIEW_KEYRING && vars.STEADDESK_FLEET_TEST_KEY_ID || '' }}
   STEADDESK_FLEET_WINDOWS_PROFILE: ${{ vars.STEADDESK_FLEET_WINDOWS_PROFILE }}
   STEADDESK_FLEET_SILENT_PROFILE: ${{ vars.STEADDESK_FLEET_SILENT_PROFILE }}
   STEADDESK_HELP: ${{ github.event_name == 'workflow_dispatch' && github.ref_type == 'branch' && inputs.steaddesk_ops_integration && 'true' || vars.STEADDESK_HELP }}
@@ -105,6 +106,7 @@ jobs:
         if [[ $GITHUB_REF_TYPE == tag ]]; then
           test "$GITHUB_REF_NAME" = "v$version"
         fi
+    - uses: ./.github/actions/fleet-build-python
     - name: Test release packaging and signing handoff without credentials
       run: python3 -B -m unittest discover -s scripts/tests -v
     - name: Scan the distribution repository history
@@ -138,6 +140,8 @@ jobs:
       with:
         path: ".distribution"
         persist-credentials: false
+    - uses: ./.distribution/.github/actions/fleet-build-python
+      if: env.STEADDESK_FLEET_UPDATE == 'true'
     - name: Apply distribution patches and assets
       shell: bash
       run: bash .distribution/scripts/apply-patches.sh "$GITHUB_WORKSPACE"
@@ -290,6 +294,8 @@ jobs:
       with:
         path: ".distribution"
         persist-credentials: false
+    - uses: ./.distribution/.github/actions/fleet-build-python
+      if: env.STEADDESK_FLEET_UPDATE == 'true'
     - name: Apply distribution patches and assets
       shell: bash
       run: bash .distribution/scripts/apply-patches.sh "$GITHUB_WORKSPACE"
@@ -462,6 +468,8 @@ jobs:
       with:
         path: ".distribution"
         persist-credentials: false
+    - uses: ./.distribution/.github/actions/fleet-build-python
+      if: env.STEADDESK_FLEET_UPDATE == 'true'
     - name: Apply distribution patches and assets
       shell: bash
       run: bash .distribution/scripts/apply-patches.sh "$GITHUB_WORKSPACE"
@@ -647,6 +655,8 @@ jobs:
       with:
         path: ".distribution"
         persist-credentials: false
+    - uses: ./.distribution/.github/actions/fleet-build-python
+      if: env.STEADDESK_FLEET_UPDATE == 'true'
     - name: Apply distribution patches and assets
       shell: bash
       run: bash .distribution/scripts/apply-patches.sh "$GITHUB_WORKSPACE"
@@ -874,6 +884,8 @@ jobs:
       with:
         submodules: recursive
         persist-credentials: false
+    - uses: ./.github/actions/fleet-build-python
+      if: env.STEADDESK_FLEET_UPDATE == 'true'
     - name: Archive the patched distribution
       run: |
         version=$(cat RELEASE_VERSION)

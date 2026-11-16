@@ -11,7 +11,7 @@ public final class FleetNative {
   public static native String proof(
       String method, String path, String canonicalBody, long keyVersion);
 
-  public static native boolean verifyRelease(byte[] raw, byte[] signature, byte[] publicKey);
+  public static native boolean verifyRelease(byte[] raw, byte[] signature, String keyId);
 
   public static native int sessionState();
 
