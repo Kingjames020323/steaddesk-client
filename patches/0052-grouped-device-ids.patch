@@ -1,0 +1,960 @@
+diff --git a/flutter/lib/common.dart b/flutter/lib/common.dart
+index b5b0286eec7a5dc000647fe9ebc41794146b6936..2f8bf82f9f77b08e12cfc7e1a55f8525ec1027fc 100644
+--- a/flutter/lib/common.dart
++++ b/flutter/lib/common.dart
+@@ -1,3 +1,4 @@
++import 'steaddesk/device_id.dart';
+ import 'dart:async';
+ import 'dart:convert';
+ import 'dart:math';
+@@ -2525,7 +2526,7 @@ connect(BuildContext context, String id,
+       }
+     } catch (_) {}
+   }
+-  id = id.replaceAll(' ', '');
++  id = trimID(id);
+   final oldId = id;
+   id = await bind.mainHandleRelayId(id: id);
+   forceRelay = id != oldId || forceRelay;
+@@ -3227,22 +3228,15 @@ Widget buildErrorBanner(BuildContext context,
+       ));
+ }
+ 
+-String getDesktopTabLabel(String peerId, String alias) {
+-  String label = alias.isEmpty ? peerId : alias;
++String getDesktopTabLabel(String peerId, String alias, {bool spoken = false}) {
++  String hostname = '';
+   try {
+-    String peer = bind.mainGetPeerSync(id: peerId);
+-    Map<String, dynamic> config = jsonDecode(peer);
+-    if (config['info']['hostname'] is String) {
+-      String hostname = config['info']['hostname'];
+-      if (hostname.isNotEmpty &&
+-          !label.toLowerCase().contains(hostname.toLowerCase())) {
+-        label += "@$hostname";
+-      }
+-    }
++    final config = jsonDecode(bind.mainGetPeerSync(id: peerId));
++    if (config['info']['hostname'] case final String name) hostname = name;
+   } catch (e) {
+     debugPrint("Failed to get hostname:$e");
+   }
+-  return label;
++  return deviceTabLabel(peerId, alias, hostname, speak: spoken ? translate : null);
+ }
+ 
+ sessionRefreshVideo(SessionID sessionId, PeerInfo pi) async {
+diff --git a/flutter/lib/common/formatter/id_formatter.dart b/flutter/lib/common/formatter/id_formatter.dart
+index c2329d53fa3e757106a573c775ab7ae99eec804f..3ecc2f6b371294f0441989785d85d87c15f6a1ca 100644
+--- a/flutter/lib/common/formatter/id_formatter.dart
++++ b/flutter/lib/common/formatter/id_formatter.dart
+@@ -40,7 +40,7 @@ String formatID(String id) {
+     suffix = id2.substring(id2.length - 2, id2.length);
+     id2 = id2.substring(0, id2.length - 2);
+   }
+-  if (int.tryParse(id2) == null) return id;
++  if (!RegExp(r'^[0-9]+$').hasMatch(id2)) return id;
+   String newID = '';
+   if (id2.length <= 3) {
+     newID = id2;
+@@ -56,5 +56,10 @@ String formatID(String id) {
+ }
+ 
+ String trimID(String id) {
+-  return id.replaceAll(' ', '');
++  // A qualified ID may end in @server?key=... . Only normalize its ID.
++  final at = id.indexOf('@');
++  final peer = at < 0 ? id : id.substring(0, at);
++  final compact = peer.replaceAll(' ', '');
++  if (!RegExp(r'^[0-9]+(?:[/\\]r)?$').hasMatch(compact)) return id;
++  return at < 0 ? compact : '$compact${id.substring(at)}';
+ }
+diff --git a/flutter/lib/common/widgets/autocomplete.dart b/flutter/lib/common/widgets/autocomplete.dart
+index e83f5fb4131b07e9da8e3e3e465e522b3c6da9c2..8b122451a5fea6b9cd5293849a4b796a7feec965 100644
+--- a/flutter/lib/common/widgets/autocomplete.dart
++++ b/flutter/lib/common/widgets/autocomplete.dart
+@@ -2,7 +2,7 @@ import 'dart:async';
+ 
+ import 'package:flutter/foundation.dart';
+ import 'package:flutter/material.dart';
+-import 'package:flutter_hbb/common/formatter/id_formatter.dart';
++import '../../steaddesk/device_id.dart';
+ import '../../../models/platform_model.dart';
+ import 'package:flutter_hbb/models/peer_model.dart';
+ import 'package:flutter_hbb/common.dart';
+@@ -363,9 +363,11 @@ class AutocompletePeerTileState extends State<AutocompletePeerTile> {
+                                                     Expanded(
+                                                         child: Text(
+                                                       widget.peer.alias.isEmpty
+-                                                          ? formatID(
+-                                                              widget.peer.id)
++                                                          ? groupedDeviceId(widget.peer.id)
+                                                           : widget.peer.alias,
++                                                      semanticsLabel: widget.peer.alias.isEmpty
++                                                          ? spokenDeviceId(widget.peer.id, translate)
++                                                          : null,
+                                                       overflow:
+                                                           TextOverflow.ellipsis,
+                                                       style: Theme.of(context)
+@@ -380,7 +382,8 @@ class AutocompletePeerTileState extends State<AutocompletePeerTile> {
+                                                                     left: 5,
+                                                                     right: 5),
+                                                             child: Text(
+-                                                              "(${widget.peer.id})",
++                                                              "(${groupedDeviceId(widget.peer.id)})",
++                                                              semanticsLabel: spokenDeviceId(widget.peer.id, translate),
+                                                               style: greyStyle,
+                                                               overflow:
+                                                                   TextOverflow
+diff --git a/flutter/lib/common/widgets/peer_card.dart b/flutter/lib/common/widgets/peer_card.dart
+index 6cb8f67dca4ad346afe70f95476ced1225006a12..61ab19be049d0c8e31460f9498cbb9010ec33a2b 100644
+--- a/flutter/lib/common/widgets/peer_card.dart
++++ b/flutter/lib/common/widgets/peer_card.dart
+@@ -1,3 +1,4 @@
++import '../../steaddesk/device_id.dart';
+ import 'package:bot_toast/bot_toast.dart';
+ import 'package:flutter/material.dart';
+ import 'package:flutter_hbb/steaddesk/theme.dart';
+@@ -189,7 +190,8 @@ class _PeerCardState extends State<_PeerCard>
+                         getOnline(isPortrait ? 4 : 8, peer.online),
+                         Expanded(
+                             child: Text(
+-                          peer.alias.isEmpty ? formatID(peer.id) : peer.alias,
++                          peer.alias.isEmpty ? groupedDeviceId(peer.id) : peer.alias,
++                          semanticsLabel: peer.alias.isEmpty ? spokenDeviceId(peer.id, translate) : null,
+                           overflow: TextOverflow.ellipsis,
+                           style: Theme.of(context).textTheme.titleSmall,
+                         )),
+@@ -371,7 +373,8 @@ class _PeerCardState extends State<_PeerCard>
+                         getOnline(8, peer.online),
+                         Expanded(
+                             child: Text(
+-                          peer.alias.isEmpty ? formatID(peer.id) : peer.alias,
++                          peer.alias.isEmpty ? groupedDeviceId(peer.id) : peer.alias,
++                          semanticsLabel: peer.alias.isEmpty ? spokenDeviceId(peer.id, translate) : null,
+                           overflow: TextOverflow.ellipsis,
+                           style: Theme.of(context).textTheme.titleSmall,
+                         )),
+diff --git a/flutter/lib/desktop/widgets/remote_toolbar.dart b/flutter/lib/desktop/widgets/remote_toolbar.dart
+index f92f85067efcb3323642cd8dca60184b4b6e70ee..0931400ba0ff6661819336a89954249f717b9f03 100644
+--- a/flutter/lib/desktop/widgets/remote_toolbar.dart
++++ b/flutter/lib/desktop/widgets/remote_toolbar.dart
+@@ -1,3 +1,4 @@
++import '../../steaddesk/device_id_widgets.dart';
+ import 'dart:convert';
+ import 'dart:async';
+ import 'dart:math' as math;
+diff --git a/flutter/lib/desktop/widgets/tabbar_widget.dart b/flutter/lib/desktop/widgets/tabbar_widget.dart
+index 0c88cb813e0c10c5e0f511605c2d20d44345adea..8b46208e10bb4ea65f27db2667061a94da23318d 100644
+--- a/flutter/lib/desktop/widgets/tabbar_widget.dart
++++ b/flutter/lib/desktop/widgets/tabbar_widget.dart
+@@ -284,6 +284,11 @@ class DesktopTab extends StatefulWidget {
+     return RxString(getDesktopTabLabel(peerId, alias));
+   }
+ 
++  static String spokenTabLabel(String peerId) {
++    final alias = bind.mainGetPeerOptionSync(id: peerId, key: 'alias');
++    return getDesktopTabLabel(peerId, alias, spoken: true);
++  }
++
+   @override
+   State<DesktopTab> createState() {
+     return _DesktopTabState();
+@@ -1085,12 +1090,16 @@ class _TabState extends State<_Tab> with RestorationMixin {
+       return ConstrainedBox(
+           constraints: BoxConstraints(maxWidth: widget.maxLabelWidth ?? 200),
+           child: Tooltip(
++            excludeFromSemantics: widget.tabType == DesktopTabType.remoteScreen,
+             message:
+                 widget.tabType == DesktopTabType.main ? '' : widget.label.value,
+             child: Text(
+               widget.tabType == DesktopTabType.main
+                   ? translate(widget.label.value)
+                   : widget.label.value,
++              semanticsLabel: widget.tabType == DesktopTabType.remoteScreen
++                  ? DesktopTab.spokenTabLabel(widget.tabInfoKey)
++                  : null,
+               textAlign: TextAlign.center,
+               style: TextStyle(
+                   color: isSelected
+@@ -1389,7 +1398,10 @@ class _TabDropDownButtonState extends State<_TabDropDownButton> {
+                 child: Row(
+                   children: [
+                     Expanded(
+-                      child: InkWell(child: Text(label)),
++                      child: InkWell(child: Text(label,
++                          semanticsLabel: widget.controller.tabType == DesktopTabType.remoteScreen
++                              ? '${index + 1}. ${DesktopTab.spokenTabLabel(e)}'
++                              : null)),
+                     ),
+                     Obx(
+                       () {
+diff --git a/flutter/lib/steaddesk/device_card.dart b/flutter/lib/steaddesk/device_card.dart
+index 1c5eac7002543d4b83de129fcc6c5480e4608408..3f96fd42615d0c49bc2286552eeccd60da52884a 100644
+--- a/flutter/lib/steaddesk/device_card.dart
++++ b/flutter/lib/steaddesk/device_card.dart
+@@ -244,8 +244,13 @@ class _DeviceCardState extends State<_DeviceCard> {
+                   color: _blue),
+               title: Row(children: [
+                 Flexible(
+-                    child: Text(name,
+-                        maxLines: 2, overflow: TextOverflow.ellipsis)),
++                    child: d.alias.isEmpty && d.name.isEmpty
++                        ? DeviceIdText(d.id,
++                            translate: translate,
++                            maxLines: 2,
++                            overflow: TextOverflow.ellipsis)
++                        : Text(name,
++                            maxLines: 2, overflow: TextOverflow.ellipsis)),
+                 if (canRename)
+                   IconButton(
+                       iconSize: 16,
+@@ -279,7 +284,8 @@ class _DeviceCardState extends State<_DeviceCard> {
+                       Text(translate('Device ID')),
+                       Row(children: [
+                         Expanded(
+-                            child: SelectableText(d.id,
++                            child: SelectableDeviceId(d.id,
++                                translate: translate,
+                                 style: const TextStyle(
+                                     fontSize: 22,
+                                     fontWeight: FontWeight.w600))),
+diff --git a/flutter/lib/steaddesk/device_id.dart b/flutter/lib/steaddesk/device_id.dart
+new file mode 100644
+index 0000000000000000000000000000000000000000..a6e4834b149f448b4f208eaf39ee853c4595edd5
+--- /dev/null
++++ b/flutter/lib/steaddesk/device_id.dart
+@@ -0,0 +1,36 @@
++// Presentation only. Keep the original ID for connection routing and clipboard.
++final _deviceId = RegExp(r'^[0-9]{9,10}$');
++const deviceDigitNames = 'zero one two three four five six seven eight nine';
++
++String groupedDeviceId(String id) {
++  if (!_deviceId.hasMatch(id)) return id;
++  final first = id.length == 10 ? 1 : 3;
++  return [
++    id.substring(0, first),
++    for (int i = first; i < id.length; i += 3) id.substring(i, i + 3),
++  ].join(' ');
++}
++
++String spokenDeviceId(String id, String Function(String) translate) {
++  if (!_deviceId.hasMatch(id)) return id;
++  // Localized digit names also work with accessibility bridges that ignore
++  // attributed spell-out hints. Visual grouping never reaches the speech label.
++  final localized = translate(deviceDigitNames).split(' ');
++  final digits =
++      localized.length == 10 ? localized : deviceDigitNames.split(' ');
++  return id.codeUnits.map((digit) => digits[digit - 48]).join(' ');
++}
++
++String deviceTabLabel(String peerId, String alias, String hostname,
++    {String Function(String)? speak}) {
++  final base = alias.isEmpty ? peerId : alias;
++  final label = alias.isNotEmpty
++      ? alias
++      : speak == null
++          ? groupedDeviceId(peerId)
++          : spokenDeviceId(peerId, speak);
++  if (hostname.isEmpty || base.toLowerCase().contains(hostname.toLowerCase())) {
++    return label;
++  }
++  return '$label@$hostname';
++}
+diff --git a/flutter/lib/steaddesk/device_id_widgets.dart b/flutter/lib/steaddesk/device_id_widgets.dart
+new file mode 100644
+index 0000000000000000000000000000000000000000..417405be1c9e03e3ab64a3861086edfbae7c8b6c
+--- /dev/null
++++ b/flutter/lib/steaddesk/device_id_widgets.dart
+@@ -0,0 +1,193 @@
++import 'dart:ui' show FontFeature;
++
++import 'package:flutter/material.dart';
++import 'package:flutter/rendering.dart';
++import 'package:flutter/services.dart';
++
++import 'device_id.dart';
++
++class DeviceIdText extends StatelessWidget {
++  const DeviceIdText(this.id,
++      {super.key,
++      required this.translate,
++      this.style,
++      this.prefix = '',
++      this.maxLines,
++      this.overflow});
++
++  final String id, prefix;
++  final String Function(String) translate;
++  final TextStyle? style;
++  final int? maxLines;
++  final TextOverflow? overflow;
++
++  @override
++  Widget build(BuildContext context) => Text('$prefix${groupedDeviceId(id)}',
++      semanticsLabel: '$prefix${spokenDeviceId(id, translate)}',
++      style: style,
++      maxLines: maxLines,
++      overflow: overflow);
++}
++
++// Flutter asks this delegate for selected text on keyboard, toolbar and
++// accessibility copy. Its only child is one paragraph containing one ID.
++class _IdSelection extends MultiSelectableSelectionContainerDelegate {
++  @override
++  void ensureChildUpdated(Selectable selectable) {}
++
++  @override
++  SelectedContent? getSelectedContent() {
++    final selected = super.getSelectedContent();
++    return selected == null
++        ? null
++        : SelectedContent(plainText: selected.plainText.replaceAll(' ', ''));
++  }
++}
++
++class SelectableDeviceId extends StatefulWidget {
++  const SelectableDeviceId(this.id,
++      {super.key, required this.translate, this.style});
++  final String id;
++  final String Function(String) translate;
++  final TextStyle? style;
++
++  @override
++  State<SelectableDeviceId> createState() => _SelectableDeviceIdState();
++}
++
++class _SelectableDeviceIdState extends State<SelectableDeviceId> {
++  final selection = _IdSelection();
++
++  @override
++  Widget build(BuildContext context) {
++    if (groupedDeviceId(widget.id) == widget.id) {
++      return SelectableText(widget.id, style: widget.style);
++    }
++    return SelectionArea(
++        child: SelectionContainer(
++            delegate: selection,
++            child: DeviceIdText(widget.id,
++                translate: widget.translate, style: widget.style)));
++  }
++
++  @override
++  void dispose() {
++    selection.dispose();
++    super.dispose();
++  }
++}
++
++class MerchantDeviceIdentity extends StatelessWidget {
++  const MerchantDeviceIdentity(
++      {super.key,
++      required this.id,
++      required this.device,
++      required this.android,
++      required this.translate});
++  final String id, device;
++  final bool android;
++  final String Function(String) translate;
++
++  @override
++  Widget build(BuildContext context) =>
++      Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
++        Semantics(container: true, child: Text(translate('This device ID'))),
++        const SizedBox(height: 4),
++        Row(children: [
++          Expanded(
++              child: FittedBox(
++                  fit: BoxFit.scaleDown,
++                  alignment: Alignment.centerLeft,
++                  child: SelectableDeviceId(
++                      id.isEmpty ? translate('Generating ...') : id,
++                      translate: translate,
++                      style: TextStyle(
++                          fontSize: android ? 52 : 32,
++                          fontWeight: FontWeight.bold,
++                          letterSpacing: 1,
++                          fontFeatures: const [
++                            FontFeature.tabularFigures()
++                          ])))),
++          if (id.isNotEmpty)
++            IconButton(
++                icon: const Icon(Icons.copy_outlined),
++                color: const Color(0xff0a6fa8),
++                tooltip: translate('Copy ID'),
++                onPressed: () => Clipboard.setData(ClipboardData(text: id))),
++        ]),
++        if (device.isNotEmpty) Text(device),
++      ]);
++}
++
++class DirectoryDeviceIdentity extends StatelessWidget {
++  const DirectoryDeviceIdentity(
++      {super.key,
++      required this.id,
++      required this.alias,
++      required this.name,
++      required this.translate});
++  final String id, alias, name;
++  final String Function(String) translate;
++
++  @override
++  Widget build(BuildContext context) {
++    final title = alias.isNotEmpty ? alias : name;
++    const titleStyle = TextStyle(fontWeight: FontWeight.w600);
++    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
++      if (title.isEmpty)
++        DeviceIdText(id,
++            translate: translate,
++            maxLines: 1,
++            overflow: TextOverflow.ellipsis,
++            style: titleStyle)
++      else
++        Text(title,
++            maxLines: 1, overflow: TextOverflow.ellipsis, style: titleStyle),
++      DeviceIdText(id,
++          translate: translate,
++          prefix: name.isEmpty ? '' : '$name · ',
++          maxLines: 1,
++          overflow: TextOverflow.ellipsis,
++          style: const TextStyle(
++              color: Color(0xff4b5563),
++              fontSize: 12,
++              fontFeatures: [FontFeature.tabularFigures()])),
++    ]);
++  }
++}
++
++class SessionDeviceTitle extends StatelessWidget {
++  const SessionDeviceTitle(
++      {super.key,
++      required this.id,
++      required this.alias,
++      required this.subtitle,
++      required this.translate});
++  final String id, alias, subtitle;
++  final String Function(String) translate;
++
++  @override
++  Widget build(BuildContext context) {
++    const style =
++        TextStyle(color: Color(0xff0b2e42), fontWeight: FontWeight.w600);
++    return Column(
++        mainAxisAlignment: MainAxisAlignment.center,
++        crossAxisAlignment: CrossAxisAlignment.start,
++        children: [
++          if (alias.isEmpty)
++            DeviceIdText(id,
++                translate: translate,
++                maxLines: 1,
++                overflow: TextOverflow.ellipsis,
++                style: style)
++          else
++            Text(alias,
++                maxLines: 1, overflow: TextOverflow.ellipsis, style: style),
++          if (subtitle.isNotEmpty)
++            Text(subtitle,
++                maxLines: 1,
++                overflow: TextOverflow.ellipsis,
++                style: const TextStyle(fontSize: 11, color: Color(0xff4b5563))),
++        ]);
++  }
++}
+diff --git a/flutter/lib/steaddesk/merchant_panel.dart b/flutter/lib/steaddesk/merchant_panel.dart
+index 60b471a70bdefb67a9a4b43984cf764848cc1975..f14aa8f9e91025328aa058a1bc4fb70694d8bdef 100644
+--- a/flutter/lib/steaddesk/merchant_panel.dart
++++ b/flutter/lib/steaddesk/merchant_panel.dart
+@@ -1,7 +1,7 @@
+ import 'dart:async';
+ import 'package:device_info_plus/device_info_plus.dart';
+ import 'package:flutter/material.dart';
+-import 'package:flutter/services.dart';
++import 'device_id_widgets.dart';
+ import 'package:window_manager/window_manager.dart';
+ 
+ import '../common.dart';
+@@ -332,33 +332,8 @@ class _MerchantPanelState extends State<MerchantPanel>
+         languageMenu(),
+       ]);
+ 
+-  Widget identity() =>
+-      Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+-        Semantics(container: true, child: Text(translate('This device ID'))),
+-        const SizedBox(height: 4),
+-        Row(children: [
+-          Expanded(
+-              child: FittedBox(
+-                  fit: BoxFit.scaleDown,
+-                  alignment: Alignment.centerLeft,
+-                  child: SelectableText(
+-                      id.isEmpty ? translate('Generating ...') : id,
+-                      style: TextStyle(
+-                          fontSize: merchantAndroid ? 52 : 32,
+-                          fontWeight: FontWeight.bold,
+-                          letterSpacing: 1,
+-                          fontFeatures: const [
+-                            FontFeature.tabularFigures()
+-                          ])))),
+-          if (merchantWindows && id.isNotEmpty)
+-            IconButton(
+-                icon: const Icon(Icons.copy_outlined),
+-                color: _blue,
+-                tooltip: translate('Copy ID'),
+-                onPressed: () => Clipboard.setData(ClipboardData(text: id)))
+-        ]),
+-        if (device.isNotEmpty) Text(device),
+-      ]);
++  Widget identity() => MerchantDeviceIdentity(
++      id: id, device: device, android: merchantAndroid, translate: translate);
+ 
+   Widget status() {
+     final active = sessions;
+diff --git a/flutter/lib/steaddesk/session_surface.dart b/flutter/lib/steaddesk/session_surface.dart
+index 9697f5fea664bf69d6b62ea7482e12eb366b065a..ac14e333563a398d27e6ec70f547ff7e1061b13a 100644
+--- a/flutter/lib/steaddesk/session_surface.dart
++++ b/flutter/lib/steaddesk/session_surface.dart
+@@ -169,11 +169,6 @@ class _SessionHeader extends StatelessWidget {
+     final pi = model.pi;
+     final alias = gFFI.abModel.find(session.id)?.alias ?? '';
+     final localAlias = bind.mainGetPeerOptionSync(id: session.id, key: 'alias');
+-    final title = alias.isNotEmpty
+-        ? alias
+-        : localAlias.isNotEmpty
+-            ? localAlias
+-            : session.id;
+     final subtitle =
+         [pi.hostname, pi.platform].where((s) => s.isNotEmpty).join(' · ');
+     final controlsEnabled = session.ready && !model.reconnectInputLocked;
+@@ -246,22 +241,11 @@ class _SessionHeader extends StatelessWidget {
+           return Row(children: [
+             SizedBox(
+                 width: math.min(200.0, bounds.maxWidth * .22),
+-                child: Column(
+-                    mainAxisAlignment: MainAxisAlignment.center,
+-                    crossAxisAlignment: CrossAxisAlignment.start,
+-                    children: [
+-                      Text(title,
+-                          maxLines: 1,
+-                          overflow: TextOverflow.ellipsis,
+-                          style: const TextStyle(
+-                              color: _ink, fontWeight: FontWeight.w600)),
+-                      if (session.ready && subtitle.isNotEmpty)
+-                        Text(subtitle,
+-                            maxLines: 1,
+-                            overflow: TextOverflow.ellipsis,
+-                            style: const TextStyle(
+-                                fontSize: 11, color: Color(0xff4b5563))),
+-                    ])),
++                child: SessionDeviceTitle(
++                    id: session.id,
++                    alias: alias.isNotEmpty ? alias : localAlias,
++                    subtitle: session.ready ? subtitle : '',
++                    translate: translate)),
+             Expanded(
+                 child: SingleChildScrollView(
+                     scrollDirection: Axis.horizontal,
+diff --git a/flutter/lib/steaddesk/support_directory.dart b/flutter/lib/steaddesk/support_directory.dart
+index 522f895adea9d63e2880a137ee3a85e5c7d6ed8d..ed7b36916257d940663d28b48122a84b04a6f82c 100644
+--- a/flutter/lib/steaddesk/support_directory.dart
++++ b/flutter/lib/steaddesk/support_directory.dart
+@@ -391,19 +391,36 @@ class _DirectoryState extends State<_Directory> {
+     showDialog<void>(
+         context: context,
+         builder: (ctx) => AlertDialog(
+-                title: Text(d.alias.isEmpty ? d.id : d.alias),
+-                content: SelectableText([
+-                  if (d.name.isNotEmpty) d.name,
+-                  'ID: ${d.id}',
+-                  translate(d.online == null
+-                      ? 'Unknown'
+-                      : d.online!
+-                          ? 'Online'
+-                          : 'Offline'),
+-                  if (d.platform.isNotEmpty) d.platform,
+-                  if (d.model.isNotEmpty) d.model,
+-                  if (d.groupName.isNotEmpty) d.groupName
+-                ].join('\n')),
++                title: d.alias.isEmpty
++                    ? DeviceIdText(d.id, translate: translate)
++                    : Text(d.alias),
++                content: Column(
++                    mainAxisSize: MainAxisSize.min,
++                    crossAxisAlignment: CrossAxisAlignment.start,
++                    children: [
++                      if (d.name.isNotEmpty) SelectableText(d.name),
++                      Row(mainAxisSize: MainAxisSize.min, children: [
++                        const Text('ID: '),
++                        Flexible(
++                            child:
++                                SelectableDeviceId(d.id, translate: translate)),
++                        IconButton(
++                            tooltip: translate('Copy ID'),
++                            icon: const Icon(Icons.copy_outlined),
++                            onPressed: () =>
++                                Clipboard.setData(ClipboardData(text: d.id))),
++                      ]),
++                      SelectableText([
++                        translate(d.online == null
++                            ? 'Unknown'
++                            : d.online!
++                                ? 'Online'
++                                : 'Offline'),
++                        if (d.platform.isNotEmpty) d.platform,
++                        if (d.model.isNotEmpty) d.model,
++                        if (d.groupName.isNotEmpty) d.groupName
++                      ].join('\n'))
++                    ]),
+                 actions: [
+                   TextButton(
+                       onPressed: () => Navigator.pop(ctx),
+@@ -588,7 +605,8 @@ class _DirectoryState extends State<_Directory> {
+       // Typing only searches. The operator must explicitly start a connection.
+       return TextButton(
+           onPressed: () => connect(context, id),
+-          child: Text('${translate("Connect")} · $id'));
++          child: DeviceIdText(id,
++              prefix: '${translate("Connect")} · ', translate: translate));
+     }
+     return Text(translate('No devices'));
+   }
+@@ -708,24 +726,11 @@ class _DirectoryState extends State<_Directory> {
+             onTap: () => _openCard(row),
+             hoverColor: const Color(0xfff3f4f6),
+             child: _columns(
+-                Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+-                  Text(
+-                      d.alias.isNotEmpty
+-                          ? d.alias
+-                          : d.name.isNotEmpty
+-                              ? d.name
+-                              : d.id,
+-                      maxLines: 1,
+-                      overflow: TextOverflow.ellipsis,
+-                      style: const TextStyle(fontWeight: FontWeight.w600)),
+-                  Text([if (d.name.isNotEmpty) d.name, d.id].join(' · '),
+-                      maxLines: 1,
+-                      overflow: TextOverflow.ellipsis,
+-                      style: const TextStyle(
+-                          color: Color(0xff4b5563),
+-                          fontSize: 12,
+-                          fontFeatures: [ui.FontFeature.tabularFigures()]))
+-                ]),
++                DirectoryDeviceIdentity(
++                    id: d.id,
++                    alias: d.alias,
++                    name: d.name,
++                    translate: translate),
+                 Text(translate(status),
+                     style: TextStyle(
+                         color: d.online == true
+@@ -756,7 +761,9 @@ class _DirectoryState extends State<_Directory> {
+             elevation: 3,
+             child: Padding(
+                 padding: const EdgeInsets.all(8),
+-                child: Text(d.alias.isEmpty ? d.id : d.alias))),
++                child: d.alias.isEmpty
++                    ? DeviceIdText(d.id, translate: translate)
++                    : Text(d.alias))),
+         child: child);
+   }
+ }
+diff --git a/flutter/lib/steaddesk/support_home.dart b/flutter/lib/steaddesk/support_home.dart
+index 85d97b02d5b4b4fab6da2064317c7cfeb85fd59d..e3250490dc136cbc807cab2248cfea80c341b7b9 100644
+--- a/flutter/lib/steaddesk/support_home.dart
++++ b/flutter/lib/steaddesk/support_home.dart
+@@ -1,3 +1,5 @@
++import 'device_id.dart';
++import 'device_id_widgets.dart';
+ import 'dart:async';
+ import 'dart:io';
+ import 'package:path_provider/path_provider.dart';
+diff --git a/flutter/lib/steaddesk/support_search.dart b/flutter/lib/steaddesk/support_search.dart
+index 7be06a5946957d7f7e85bd4dffe8cfb4d008b1bb..dfed035a5da80568eb3352f5fe59823ba828ece2 100644
+--- a/flutter/lib/steaddesk/support_search.dart
++++ b/flutter/lib/steaddesk/support_search.dart
+@@ -293,7 +293,22 @@ class _SupportSearchFieldState extends State<_SupportSearchField> {
+   Widget _tile(_Choice c, _DirectoryState? dir) {
+     final d = c.row?.device;
+     final prefix = widget.search.text.trim().replaceAll(' ', '');
+-    final bold = d != null && d.id.startsWith(prefix) ? prefix.length : 0;
++    final shownId = groupedDeviceId(d?.id ?? '');
++    int bold = 0;
++    if (d != null && prefix.isNotEmpty && d.id.startsWith(prefix)) {
++      // Include each display separator preceding a matched digit.
++      while (bold < shownId.length &&
++          shownId.substring(0, bold).replaceAll(' ', '').length <
++              prefix.length) {
++        bold++;
++      }
++    }
++    final extra = [
++      if (d != null && d.groupName.isNotEmpty) d.groupName,
++      if (d?.merchant != null) d!.merchant!,
++      if (d?.store != null) d!.store!,
++    ];
++    final direct = c.key == 'direct' ? directSupportId(c.label) : null;
+     final key = tileKeys.putIfAbsent(c.key, () => GlobalKey());
+     final tile = Material(
+         key: key,
+@@ -308,8 +323,11 @@ class _SupportSearchFieldState extends State<_SupportSearchField> {
+                 child: d == null
+                     ? Text(
+                         c.key == 'direct'
+-                            ? '${translate("Direct connect ID")} ${c.label}'
++                            ? '${translate("Direct connect ID")} ${direct == null ? c.label : groupedDeviceId(direct)}'
+                             : c.label,
++                        semanticsLabel: direct == null
++                            ? null
++                            : '${translate("Direct connect ID")} ${spokenDeviceId(direct, translate)}',
+                         style:
+                             TextStyle(color: _enabled(c) ? _ink : Colors.grey))
+                     : Row(children: [
+@@ -317,22 +335,32 @@ class _SupportSearchFieldState extends State<_SupportSearchField> {
+                             child: Column(
+                                 crossAxisAlignment: CrossAxisAlignment.start,
+                                 children: [
+-                              Text(c.label,
+-                                  maxLines: 1, overflow: TextOverflow.ellipsis),
++                              Text(
++                                  d.alias.isEmpty && d.name.isEmpty
++                                      ? shownId
++                                      : c.label,
++                                  semanticsLabel:
++                                      d.alias.isEmpty && d.name.isEmpty
++                                          ? spokenDeviceId(d.id, translate)
++                                          : null,
++                                  maxLines: 1,
++                                  overflow: TextOverflow.ellipsis),
+                               Text.rich(
+                                   TextSpan(children: [
+                                     TextSpan(
+-                                        text: d.id.substring(0, bold),
++                                        text: shownId.substring(0, bold),
+                                         style: const TextStyle(
+                                             fontWeight: FontWeight.bold)),
+                                     TextSpan(
+                                         text: [
+-                                      d.id.substring(bold),
+-                                      if (d.groupName.isNotEmpty) d.groupName,
+-                                      if (d.merchant != null) d.merchant,
+-                                      if (d.store != null) d.store
++                                      shownId.substring(bold),
++                                      ...extra
+                                     ].join(' · '))
+                                   ]),
++                                  semanticsLabel: [
++                                    spokenDeviceId(d.id, translate),
++                                    ...extra
++                                  ].join(' · '),
+                                   maxLines: 1,
+                                   overflow: TextOverflow.ellipsis,
+                                   style: const TextStyle(fontSize: 12))
+diff --git a/flutter/test/steaddesk/device_id_test.dart b/flutter/test/steaddesk/device_id_test.dart
+new file mode 100644
+index 0000000000000000000000000000000000000000..57b8f99f497ac6384f88b423de1a90b600931ee5
+--- /dev/null
++++ b/flutter/test/steaddesk/device_id_test.dart
+@@ -0,0 +1,167 @@
++import 'package:flutter/material.dart';
++import 'package:flutter/services.dart';
++import 'package:flutter_test/flutter_test.dart';
++
++import 'package:flutter_hbb/common/formatter/id_formatter.dart';
++import 'package:flutter_hbb/steaddesk/device_id.dart';
++import 'package:flutter_hbb/steaddesk/device_id_widgets.dart';
++import 'package:flutter_hbb/steaddesk/support_device.dart';
++
++void main() {
++  const ten = '0123456789', nine = '987654321';
++  const dictionaries = {
++    'en': deviceDigitNames,
++    'zh-cn': '零 一 二 三 四 五 六 七 八 九',
++    'es': 'cero uno dos tres cuatro cinco seis siete ocho nueve',
++  };
++
++  test('only nine and ten digit IDs are grouped, raw IDs preserve zeros', () {
++    expect(groupedDeviceId(ten), '0 123 456 789');
++    expect(groupedDeviceId(nine), '987 654 321');
++    for (final value in [
++      '',
++      '12345678',
++      '12345678901',
++      'desk-123456789',
++      '12345678x',
++      'https://lab.invalid/123456789',
++      'desk 123'
++    ]) {
++      expect(groupedDeviceId(value), value);
++      expect(spokenDeviceId(value, (s) => s), value);
++    }
++  });
++
++  test('window title uses the ID fallback, aliases and hostnames verbatim', () {
++    expect(deviceTabLabel(nine, '', 'host'), '987 654 321@host');
++    expect(deviceTabLabel(ten, '', ''), '0 123 456 789');
++    expect(deviceTabLabel(nine, '1234567890', 'host'), '1234567890@host');
++    expect(deviceTabLabel(nine, 'Office host', 'HOST'), 'Office host');
++    expect(deviceTabLabel(nine, '', '654'), '987 654 321');
++    expect(deviceTabLabel(ten, '', 'host', speak: (_) => dictionaries['es']!),
++        'cero uno dos tres cuatro cinco seis siete ocho nueve@host');
++  });
++
++  test('directory dispatches raw IDs, free text and relay suffix remain intact',
++      () {
++    for (final input in [ten, '0 123 456 789', nine, '987 654 321']) {
++      expect(supportSearchTarget(input, const []), input.replaceAll(' ', ''));
++    }
++    expect(supportSearchTarget('shop 12', [nine]), nine);
++    for (final input in ['12345678', '12345678901', 'store abc', 'store 123']) {
++      expect(directSupportId(input), isNull);
++    }
++    for (final value in [
++      'desk 12',
++      'https://host.invalid/a b?q=1 2',
++      'key=demo 456',
++      '0x12abcd',
++      'peer@server.invalid?key=a b'
++    ]) {
++      expect(trimID(value), value);
++      expect(formatID(value), value);
++    }
++    expect(trimID('987 654 321/r@lab.invalid?key=fixture key'),
++        '987654321/r@lab.invalid?key=fixture key');
++  });
++
++  for (final entry in dictionaries.entries) {
++    testWidgets(
++        '${entry.key}: merchant, directory and session accessibility labels',
++        (t) async {
++      final semantics = t.ensureSemantics();
++
++      String translate(String s) => s == deviceDigitNames ? entry.value : s;
++      await t.pumpWidget(MaterialApp(
++          home: Scaffold(
++              body: Column(children: [
++        MerchantDeviceIdentity(
++            id: ten, device: '', android: true, translate: translate),
++        DirectoryDeviceIdentity(
++            id: nine,
++            alias: '1234567890',
++            name: 'Fixture',
++            translate: translate),
++        SessionDeviceTitle(
++            id: ten, alias: '', subtitle: 'Fixture', translate: translate),
++      ]))));
++      expect(find.text('0 123 456 789'), findsNWidgets(2));
++      expect(find.text('Fixture · 987 654 321'), findsOneWidget);
++      expect(find.text('1234567890'), findsOneWidget);
++      final spoken = entry.value;
++      expect(find.bySemanticsLabel(spoken), findsNWidgets(2));
++      final descending = entry.value.split(' ').reversed.take(9).join(' ');
++      expect(find.bySemanticsLabel('Fixture · $descending'), findsOneWidget);
++      expect(find.bySemanticsLabel('0 123 456 789'), findsNothing);
++      semantics.dispose();
++    });
++  }
++
++  testWidgets(
++      'copy button and keyboard selection put raw digits on the clipboard',
++      (t) async {
++    final system =
++        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
++    String? clipboard;
++    system.setMockMethodCallHandler(SystemChannels.platform, (call) async {
++      if (call.method == 'Clipboard.setData')
++        clipboard = call.arguments['text'] as String;
++      if (call.method == 'Clipboard.getData') return {'text': clipboard};
++      return null;
++    });
++    addTearDown(
++        () => system.setMockMethodCallHandler(SystemChannels.platform, null));
++    await t.pumpWidget(MaterialApp(
++        home: Scaffold(
++            body: MerchantDeviceIdentity(
++                id: ten, device: '', android: true, translate: (s) => s))));
++    await t.tap(find.byIcon(Icons.copy_outlined));
++    await t.pump();
++    expect(clipboard, ten);
++    clipboard = null;
++    await t.tap(find.text('0 123 456 789'));
++    await t.pump();
++    await t.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
++    await t.sendKeyEvent(LogicalKeyboardKey.keyA);
++    await t.sendKeyEvent(LogicalKeyboardKey.keyC);
++    await t.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
++    await t.pump();
++    expect(clipboard, ten);
++  }, variant: TargetPlatformVariant.only(TargetPlatform.windows));
++
++  testWidgets('ID input accepts typed and pasted IDs with and without grouping',
++      (t) async {
++    final controller = IDTextEditingController();
++    addTearDown(controller.dispose);
++    String? submitted, clipboard;
++    final system =
++        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
++    system.setMockMethodCallHandler(
++        SystemChannels.platform,
++        (call) async =>
++            call.method == 'Clipboard.getData' ? {'text': clipboard} : null);
++    addTearDown(
++        () => system.setMockMethodCallHandler(SystemChannels.platform, null));
++    await t.pumpWidget(MaterialApp(
++        home: Scaffold(
++            body: TextField(
++                controller: controller,
++                inputFormatters: [IDTextInputFormatter()],
++                onSubmitted: (_) => submitted = controller.id))));
++    for (final input in [nine, '987 654 321', ten, '0 123 456 789']) {
++      await t.enterText(find.byType(TextField), input);
++      await t.testTextInput.receiveAction(TextInputAction.done);
++      expect(submitted, input.replaceAll(' ', ''));
++      submitted = null;
++      controller.clear();
++      await t.tap(find.byType(TextField));
++      clipboard = input;
++      await t.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
++      await t.sendKeyEvent(LogicalKeyboardKey.keyV);
++      await t.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
++      await t.pump();
++      await t.testTextInput.receiveAction(TextInputAction.done);
++      expect(submitted, input.replaceAll(' ', ''));
++    }
++  }, variant: TargetPlatformVariant.only(TargetPlatform.windows));
++}
+diff --git a/src/lang/cn.rs b/src/lang/cn.rs
+index 6cfdc952de1cb16880bae034c820235e3a1cd910..d9387666015f113b275a3e9dea30ddcf29f87871 100644
+--- a/src/lang/cn.rs
++++ b/src/lang/cn.rs
+@@ -1,6 +1,7 @@
+ lazy_static::lazy_static! {
+ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
+     [
++        ("zero one two three four five six seven eight nine", "零 一 二 三 四 五 六 七 八 九"),
+         ("Contact name", "联系人姓名"),
+         ("Callback phone number", "回电号码"),
+         ("Preferred language", "首选语言"),
+diff --git a/src/lang/en.rs b/src/lang/en.rs
+index 0a77b2e40f30fdd91e40ebd9104466a115afe46a..04da072a0e57e287294d081bab28b6ced47f5ecc 100644
+--- a/src/lang/en.rs
++++ b/src/lang/en.rs
+@@ -1,6 +1,7 @@
+ lazy_static::lazy_static! {
+ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
+     [
++        ("zero one two three four five six seven eight nine", "zero one two three four five six seven eight nine"),
+         ("Suggested steps", "Suggested steps"),
+         ("Confirm card display", "Confirm card display"),
+         ("Merchant force-stopped the app", "Merchant force-stopped the app"),
+diff --git a/src/lang/es.rs b/src/lang/es.rs
+index f4a83a3e9ff744cc355a10d1f18143562854bc6b..11b421dd58f67a54aa642ebe4c5f03da009759c2 100644
+--- a/src/lang/es.rs
++++ b/src/lang/es.rs
+@@ -1,6 +1,7 @@
+ lazy_static::lazy_static! {
+ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
+     [
++        ("zero one two three four five six seven eight nine", "cero uno dos tres cuatro cinco seis siete ocho nueve"),
+         ("Contact name", "Nombre de contacto"),
+         ("Callback phone number", "Número de teléfono de contacto"),
+         ("Preferred language", "Idioma preferido"),
