@@ -131,12 +131,37 @@ click_control(wait_for("local device button", local_id_button))
 wait_for("incoming permission switch", lambda: by_name(window, "Allow incoming connections"))
 send_keys("{ESC}")
 
-# Exercise the packaged directory and its explicit action without dialing a peer.
-wait_for("support directory", lambda: by_name(window, "Devices"))
+# Flutter can expose adjacent static labels as separate lines in one UIA name.
+def wait_for_home_label(label):
+    def visible_label():
+        matches = controls(window, lambda text: label in text.splitlines())
+        return matches[0] if matches else None
+
+    return wait_for(label, visible_label)
+
+
+def wait_for_empty_directory():
+    # The rail also offers Devices. These headers belong to the directory body.
+    # Model is responsive and can be hidden in the default runner viewport.
+    for label in ("Devices", "Device", "Status", "Actions", "No devices"):
+        wait_for_home_label(label)
+
+
+if os.environ.get("STEADDESK_TODAY") == "true":
+    wait_for_home_label("请登录客服账号后查看今天的数据。")
+    print("PASS signed-out Today landing page", flush=True)
+else:
+    wait_for_empty_directory()
+    print("PASS directory landing page", flush=True)
+
+# Typing in the global search opens Devices without connecting to the peer.
 send_keys("^k")
 send_keys("765432109", pause=0.05)
-wait_for("numeric search connect action", lambda: by_name(window, "Connect · 765432109"))
+numeric_action = "Connect · 765432109"
+wait_for("numeric search connect action", lambda: by_name(window, numeric_action))
 send_keys("^a{BACKSPACE}")
+wait_for("numeric search cleared", lambda: True if by_name(window, numeric_action) is None else None)
+wait_for_empty_directory()
 main_labels = {"Devices", "Device", "Status", "Model", "Actions", "SUNMI", "Windows"}
 save_evidence(window, "main", controls(window, main_labels.__contains__))
 print("PASS support directory, numeric search and incoming permission dialog", flush=True)
