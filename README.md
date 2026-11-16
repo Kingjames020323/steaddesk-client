@@ -45,6 +45,10 @@ The Android merchant service checks its paired Agent at startup and every five m
 
 The merchant managed-configuration boolean `self_heal_enabled` defaults to true. Turning it off retains passive checks. The separate Agent setting controls the reverse direction. After three wake reservations in a rolling hour the caller pauses further attempts; its heartbeat exposes `selfHealPaused`. The private `files/self-heal.jsonl` retains the last 500 events. A wake acknowledgement confirms the request reached its peer. Check a remote first frame separately.
 
+The peer check waits up to two seconds for a passive bind and ten seconds for a budgeted bind. The five-minute timer is fixed. Both endpoints use status 1 for healthy and status 2 for an active session. A merchant reports healthy while idle only when its current foreground service holds an approved screen projection. Pause, active assistance and unknown session state suppress wake requests.
+
+After process death or projection revocation, the merchant endpoint reports capture unavailable (Binder status 5). Older Agents treat this as unknown and skip the wake. Open the merchant app and tap **Screen Capture** to use Android’s consent screen. The existing panel refresh runs on opening, resuming and every three seconds while mounted. A peer health check alone cannot establish a new screen-sharing session or guarantee a recovery time.
+
 ### Support connection measurements
 
 The support build records ordinary outgoing remote desktop sessions locally by default. In the support home navigation menu, choose **Export connection statistics** to save the current account’s CSV. Signed-out sessions have their own history. The application support directory retains up to 5,000 rows per account in `support-metrics-v1.jsonl`. The records contain timing, outcome, and sampled quality. No session contents are collected or sent.
