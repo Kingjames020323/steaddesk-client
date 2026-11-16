@@ -1,0 +1,261 @@
+diff --git a/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MainActivity.kt b/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MainActivity.kt
+index 3b84ab8..85538c1 100644
+--- a/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MainActivity.kt
++++ b/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MainActivity.kt
+@@ -56,9 +56,9 @@ class MainActivity : FlutterActivity() {
+     private var mainService: MainService? = null
+     private var serviceBound = false
+ 
+-    private fun bindMainService() {
++    private fun bindMainService(flags: Int = Context.BIND_AUTO_CREATE) {
+         if (!serviceBound && !MerchantRecovery.userPaused(this)) {
+-            serviceBound = bindService(Intent(this, MainService::class.java), serviceConnection, Context.BIND_AUTO_CREATE)
++            serviceBound = bindService(Intent(this, MainService::class.java), serviceConnection, flags)
+         }
+     }
+ 
+@@ -128,11 +128,15 @@ class MainActivity : FlutterActivity() {
+         super.onPause()
+     }
+ 
++    private var projectionRequestPending = false
++
+     private fun requestMediaProjection() {
++        if (BuildConfig.MERCHANT_EDITION && projectionRequestPending) return
+         val intent = Intent(this, PermissionRequestTransparentActivity::class.java).apply {
+             action = ACT_REQUEST_MEDIA_PROJECTION
+         }
+         startActivityForResult(intent, REQ_INVOKE_PERMISSION_ACTIVITY_MEDIA_PROJECTION)
++        projectionRequestPending = true
+     }
+ 
+     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+@@ -239,8 +243,11 @@ class MainActivity : FlutterActivity() {
+             }
+             return
+         }
+-        if (requestCode == REQ_INVOKE_PERMISSION_ACTIVITY_MEDIA_PROJECTION && resultCode == RES_FAILED) {
+-            flutterMethodChannel?.invokeMethod("on_media_projection_canceled", null)
++        if (requestCode == REQ_INVOKE_PERMISSION_ACTIVITY_MEDIA_PROJECTION) {
++            projectionRequestPending = false
++            if (resultCode == RES_FAILED) {
++                flutterMethodChannel?.invokeMethod("on_media_projection_canceled", null)
++            }
+         }
+     }
+ 
+@@ -306,6 +313,12 @@ class MainActivity : FlutterActivity() {
+                         result.success(false)
+                         return@setMethodCallHandler
+                     }
++                    if (BuildConfig.MERCHANT_EDITION && call.arguments == false) {
++                        val ready = MainService.isReady
++                        if (ready) bindMainService(flags = 0)
++                        result.success(ready)
++                        return@setMethodCallHandler
++                    }
+                     bindMainService()
+                     if (BuildConfig.MERCHANT_EDITION) FFI.startService()
+                     if (MainService.isReady) {
+diff --git a/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MainService.kt b/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MainService.kt
+index d967f6f..70fd708 100644
+--- a/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MainService.kt
++++ b/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MainService.kt
+@@ -204,13 +204,18 @@ class MainService : Service() {
+     private val wakeLock: PowerManager.WakeLock by lazy { powerManager.newWakeLock(PowerManager.ACQUIRE_CAUSES_WAKEUP or PowerManager.SCREEN_BRIGHT_WAKE_LOCK, "rustdesk:wakelock")}
+ 
+     companion object {
+-        var runningInstance: MainService? = null
++        @Volatile var runningInstance: MainService? = null
+             private set
+-        private var _isReady = false // media permission ready status
+         private var _isStart = false // screen capture start status
+         private var _isAudioStart = false // audio capture start status
+         val isReady: Boolean
+-            get() = _isReady
++            get() {
++                val service = runningInstance ?: return false
++                if (!service.projectionReady) return false
++                // On earlier releases the grant is installed only after startForeground succeeds.
++                return !BuildConfig.MERCHANT_EDITION || Build.VERSION.SDK_INT < Build.VERSION_CODES.Q ||
++                    (service.getForegroundServiceType() and ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION) != 0
++            }
+         val isStart: Boolean
+             get() = _isStart
+         val isAudioStart: Boolean
+@@ -224,6 +229,7 @@ class MainService : Service() {
+     private var reuseVirtualDisplay = Build.VERSION.SDK_INT > 33
+ 
+     // video
++    @Volatile private var projectionReady = false
+     private var mediaProjection: MediaProjection? = null
+     private var mediaProjectionCallback: MediaProjection.Callback? = null
+     private var captureRestartPending = false
+@@ -469,6 +475,7 @@ class MainService : Service() {
+     }
+ 
+     private fun releaseMediaProjection() {
++        projectionReady = false
+         val projection = mediaProjection
+         val callback = mediaProjectionCallback
+         mediaProjection = null
+@@ -484,6 +491,7 @@ class MainService : Service() {
+         if (mediaProjection !== stoppedProjection) {
+             return
+         }
++        projectionReady = false
+         Log.d(logTag, "MediaProjection stopped")
+         setMediaProjectionForegroundService(false)
+         stopCapture()
+@@ -491,7 +499,6 @@ class MainService : Service() {
+         virtualDisplay = null
+         mediaProjection = null
+         mediaProjectionCallback = null
+-        _isReady = false
+         checkMediaPermission()
+     }
+ 
+@@ -511,7 +518,7 @@ class MainService : Service() {
+         if (!setMediaProjectionForegroundService(true)) {
+             if (!hadProjection) {
+                 cancelMediaProjectionRecovery()
+-                _isReady = false
++                projectionReady = false
+                 checkMediaPermission()
+             }
+             return
+@@ -521,7 +528,7 @@ class MainService : Service() {
+         if (projection == null) {
+             if (!hadProjection) {
+                 cancelMediaProjectionRecovery()
+-                _isReady = false
++                projectionReady = false
+                 setMediaProjectionForegroundService(false)
+                 checkMediaPermission()
+             }
+@@ -542,7 +549,7 @@ class MainService : Service() {
+         projection.registerCallback(callback, Handler(Looper.getMainLooper()))
+         mediaProjection = projection
+         mediaProjectionCallback = callback
+-        _isReady = true
++        projectionReady = true
+         checkMediaPermission()
+         if (restartCapture) {
+             captureRestartPending = false
+@@ -721,7 +728,7 @@ class MainService : Service() {
+ 
+     fun destroy() {
+         Log.d(logTag, "destroy service")
+-        _isReady = false
++        projectionReady = false
+         _isAudioStart = false
+ 
+         stopCapture()
+@@ -814,9 +821,13 @@ class MainService : Service() {
+         virtualDisplay = null
+         releaseMediaProjection()
+         setMediaProjectionForegroundService(false)
+-        _isReady = false
++        projectionReady = false
+         checkMediaPermission()
+-        requestMediaProjection(true)
++        if (BuildConfig.MERCHANT_EDITION) {
++            cancelMediaProjectionRecovery()
++        } else {
++            requestMediaProjection(true)
++        }
+         return false
+     }
+ 
+diff --git a/flutter/android/app/src/steaddeskMerchant/java/com/carriez/flutter_hbb/AgentWakeService.java b/flutter/android/app/src/steaddeskMerchant/java/com/carriez/flutter_hbb/AgentWakeService.java
+index 261e112..655c40b 100644
+--- a/flutter/android/app/src/steaddeskMerchant/java/com/carriez/flutter_hbb/AgentWakeService.java
++++ b/flutter/android/app/src/steaddeskMerchant/java/com/carriez/flutter_hbb/AgentWakeService.java
+@@ -30,7 +30,7 @@ public final class AgentWakeService extends Service {
+                     if (state == 1 || state == 2) MerchantToday.append(AgentWakeService.this, reply);
+                     return true;
+                 }
+-                if (code == FIRST_CALL_TRANSACTION && state == 0 && !MerchantRecovery.restore(AgentWakeService.this))
++                if (code == FIRST_CALL_TRANSACTION && state == MerchantRecovery.CAPTURE_UNAVAILABLE)
+                     throw new IllegalStateException(MerchantLanguage.text(AgentWakeService.this, R.string.recovery_unavailable));
+                 if (code == FIRST_CALL_TRANSACTION + 2) {
+                     int result = state == 4 ? 4 : state == 2 ? MerchantLogs.collect(AgentWakeService.this) : 0;
+diff --git a/flutter/android/app/src/steaddeskMerchant/java/com/carriez/flutter_hbb/MerchantRecovery.java b/flutter/android/app/src/steaddeskMerchant/java/com/carriez/flutter_hbb/MerchantRecovery.java
+index 8128e04..4b43065 100644
+--- a/flutter/android/app/src/steaddeskMerchant/java/com/carriez/flutter_hbb/MerchantRecovery.java
++++ b/flutter/android/app/src/steaddeskMerchant/java/com/carriez/flutter_hbb/MerchantRecovery.java
+@@ -7,6 +7,8 @@ import com.steaddesk.recovery.PeerWatchdog;
+ 
+ /** Loaded only by the merchant edition. Native state also covers sessions during FGS teardown. */
+ public final class MerchantRecovery {
++    // Nonzero so installed companions skip WAKE until a local user authorizes screen sharing.
++    static final int CAPTURE_UNAVAILABLE = 5;
+     private static PeerWatchdog watchdog;
+     private static ServiceConnection publication;
+ 
+@@ -48,12 +50,8 @@ public final class MerchantRecovery {
+     static synchronized int status(Context context) {
+         if (userPaused(context)) return 4;
+         int session = sessionState();
+-        return session == 0 ? (watchdog == null ? 0 : 1) : session;
+-    }
+-
+-    static synchronized boolean restore(Context context) {
+-        FleetEntry.start(context);
+-        return status(context) != 0 || BootReceiver.resumeService(context);
++        if (session != 0) return session;
++        return MainService.Companion.isReady() ? 1 : CAPTURE_UNAVAILABLE;
+     }
+ 
+     public static synchronized String paused() {
+diff --git a/flutter/lib/models/server_model.dart b/flutter/lib/models/server_model.dart
+index da03d79..32eff80 100644
+--- a/flutter/lib/models/server_model.dart
++++ b/flutter/lib/models/server_model.dart
+@@ -430,13 +430,13 @@ class ServerModel with ChangeNotifier {
+   }
+ 
+   /// Start the screen sharing service.
+-  Future<void> startService() async {
++  Future<void> startService({bool requestProjection = true}) async {
+     _isStart = true;
+     notifyListeners();
+     parent.target?.ffiModel.updateEventListener(parent.target!.sessionId, "");
+     if (merchantEdition && isAndroid) {
+       // The native main thread serializes startup with the merchant's pause action.
+-      if (await parent.target?.invokeMethod("init_service") != true) {
++      if (await parent.target?.invokeMethod("init_service", requestProjection) != true) {
+         _isStart = false;
+         notifyListeners();
+         return;
+@@ -490,7 +490,8 @@ class ServerModel with ChangeNotifier {
+       case "media":
+         _mediaOk = value;
+         if (value && !_isStart) {
+-          startService();
++          // A readiness notification may arrive after Android has already revoked the grant.
++          startService(requestProjection: false);
+         }
+         break;
+       case "input":
+diff --git a/flutter/lib/steaddesk/merchant_panel.dart b/flutter/lib/steaddesk/merchant_panel.dart
+index e57d0a2..60b471a 100644
+--- a/flutter/lib/steaddesk/merchant_panel.dart
++++ b/flutter/lib/steaddesk/merchant_panel.dart
+@@ -481,6 +481,16 @@ class _MerchantPanelState extends State<MerchantPanel>
+           brand(),
+           const SizedBox(height: 26),
+           status(),
++          if (merchantAndroid &&
++              remotePaused == false &&
++              !changingPause &&
++              !model.mediaOk &&
++              sessions.isEmpty)
++            OutlinedButton.icon(
++              onPressed: model.startService,
++              icon: const Icon(Icons.screen_share_outlined),
++              label: Text(translate('Screen Capture')),
++            ),
+           const SizedBox(height: 22),
+           identity(),
+           const SizedBox(height: 16),
