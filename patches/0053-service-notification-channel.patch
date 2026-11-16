@@ -1,0 +1,238 @@
+diff --git a/flutter/android/app/src/main/AndroidManifest.xml b/flutter/android/app/src/main/AndroidManifest.xml
+index 5a5186fcd483408ac33f3afe540fa7d17b2b3dff..097c2f778db34c50b2535a46cf7f299f76e9465a 100644
+--- a/flutter/android/app/src/main/AndroidManifest.xml
++++ b/flutter/android/app/src/main/AndroidManifest.xml
+@@ -33,6 +33,13 @@
+         android:roundIcon="@mipmap/ic_launcher"
+         android:supportsRtl="true">
+ 
++        <receiver android:name=".ServiceNotificationChannel" android:exported="false">
++            <intent-filter>
++                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
++                <action android:name="android.intent.action.LOCALE_CHANGED" />
++            </intent-filter>
++        </receiver>
++
+         <receiver
+             android:name=".BootReceiver"
+             android:enabled="true"
+diff --git a/flutter/android/app/src/main/java/com/carriez/flutter_hbb/ServiceNotificationChannel.java b/flutter/android/app/src/main/java/com/carriez/flutter_hbb/ServiceNotificationChannel.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..737057907027e295d6d43bf7fd88a832aabfe5be
+--- /dev/null
++++ b/flutter/android/app/src/main/java/com/carriez/flutter_hbb/ServiceNotificationChannel.java
+@@ -0,0 +1,68 @@
++package com.carriez.flutter_hbb;
++
++import android.annotation.TargetApi;
++import android.app.Notification;
++import android.app.NotificationChannel;
++import android.app.NotificationManager;
++import android.content.BroadcastReceiver;
++import android.content.Context;
++import android.content.Intent;
++import android.graphics.Color;
++import android.os.Build;
++import android.text.TextUtils;
++
++import androidx.core.app.NotificationCompat;
++
++/** Maintains the Android foreground service's channel, including while the service is stopped. */
++public final class ServiceNotificationChannel extends BroadcastReceiver {
++    private static final String ID = "SteadDesk";
++    private static final String LEGACY_ID = "RustDesk";
++
++    @Override
++    public void onReceive(Context context, Intent intent) {
++        if (Intent.ACTION_MY_PACKAGE_REPLACED.equals(intent.getAction())
++                || Intent.ACTION_LOCALE_CHANGED.equals(intent.getAction())) {
++            refreshExisting(context);
++        }
++    }
++
++    static void refreshExisting(Context context) {
++        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) configure(context, false);
++    }
++
++    static NotificationCompat.Builder builder(Context context) {
++        String id = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O ? configure(context, true) : "";
++        return new NotificationCompat.Builder(context, id);
++    }
++
++    @TargetApi(Build.VERSION_CODES.O)
++    private static String configure(Context context, boolean create) {
++        NotificationManager manager = context.getSystemService(NotificationManager.class);
++        NotificationChannel channel = manager.getNotificationChannel(LEGACY_ID);
++        NotificationChannel branded = manager.getNotificationChannel(ID);
++        // An upgrade must keep the user's channel, even if its importance is NONE.
++        // If a downgrade left both IDs, also respect a block on the branded one.
++        if (channel == null || (branded != null
++                && branded.getImportance() == NotificationManager.IMPORTANCE_NONE)) {
++            channel = branded;
++        }
++        if (channel == null && !create) return "";
++
++        String name = MerchantLanguage.text(context, R.string.merchant_channel);
++        String description = MerchantLanguage.text(context, R.string.merchant_channel_description);
++        if (channel == null) {
++            channel = new NotificationChannel(ID, name, NotificationManager.IMPORTANCE_HIGH);
++            channel.setLightColor(Color.BLUE);
++            channel.setLockscreenVisibility(Notification.VISIBILITY_PRIVATE);
++        } else {
++            if (TextUtils.equals(channel.getName(), name)
++                    && TextUtils.equals(channel.getDescription(), description)) {
++                return channel.getId();
++            }
++            channel.setName(name);
++        }
++        channel.setDescription(description);
++        manager.createNotificationChannel(channel);
++        return channel.getId();
++    }
++}
+diff --git a/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MainActivity.kt b/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MainActivity.kt
+index 85538c149f6ca6bf13805a3761dc623897d4ffc5..f91ec387561d0d494341c3d589e577d5691d387b 100644
+--- a/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MainActivity.kt
++++ b/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MainActivity.kt
+@@ -253,6 +253,7 @@ class MainActivity : FlutterActivity() {
+ 
+     override fun onCreate(savedInstanceState: Bundle?) {
+         super.onCreate(savedInstanceState)
++        ServiceNotificationChannel.refreshExisting(this)
+         if (_rdClipboardManager == null) {
+             _rdClipboardManager = RdClipboardManager(getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager)
+             FFI.setClipboardManager(_rdClipboardManager!!)
+diff --git a/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MainService.kt b/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MainService.kt
+index 70fd708888ddd6bff515e0a75e971d5af36ac856..a9aaae229d48f66b5c38a154878a5a4a8c9c092a 100644
+--- a/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MainService.kt
++++ b/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MainService.kt
+@@ -21,7 +21,6 @@ import android.content.pm.PackageManager
+ import android.content.pm.ServiceInfo
+ import android.content.res.Configuration
+ import android.content.res.Configuration.ORIENTATION_LANDSCAPE
+-import android.graphics.Color
+ import android.graphics.PixelFormat
+ import android.hardware.display.DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR
+ import android.hardware.display.VirtualDisplay
+@@ -47,7 +46,6 @@ import java.nio.ByteBuffer
+ import kotlin.math.max
+ import kotlin.math.min
+ 
+-const val DEFAULT_NOTIFY_TITLE = "RustDesk"
+ const val DEFAULT_NOTIFY_TEXT = "Service is running"
+ const val DEFAULT_NOTIFY_ID = 1
+ const val NOTIFY_ID_OFFSET = 100
+@@ -255,7 +253,6 @@ class MainService : Service() {
+ 
+     // notification
+     private lateinit var notificationManager: NotificationManager
+-    private lateinit var notificationChannel: String
+     private lateinit var notificationBuilder: NotificationCompat.Builder
+ 
+     private var notificationLanguage = ""
+@@ -877,23 +874,7 @@ class MainService : Service() {
+     private fun initNotification() {
+         if (BuildConfig.MERCHANT_EDITION) notificationLanguage = MerchantLanguage.language(this)
+         notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+-        notificationChannel = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+-            val channelId = "RustDesk"
+-            val channelName = merchantText(R.string.merchant_channel) { "RustDesk Service" }
+-            val channel = NotificationChannel(
+-                channelId,
+-                channelName, NotificationManager.IMPORTANCE_HIGH
+-            ).apply {
+-                description = merchantText(R.string.merchant_channel_description) { "RustDesk Service Channel" }
+-            }
+-            channel.lightColor = Color.BLUE
+-            channel.lockscreenVisibility = Notification.VISIBILITY_PRIVATE
+-            notificationManager.createNotificationChannel(channel)
+-            channelId
+-        } else {
+-            ""
+-        }
+-        notificationBuilder = NotificationCompat.Builder(this, notificationChannel)
++        notificationBuilder = ServiceNotificationChannel.builder(this)
+     }
+ 
+     @SuppressLint("UnspecifiedImmutableFlag")
+@@ -915,7 +896,7 @@ class MainService : Service() {
+             .setDefaults(Notification.DEFAULT_ALL)
+             .setAutoCancel(true)
+             .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+-            .setContentTitle(merchantText(R.string.app_name) { DEFAULT_NOTIFY_TITLE })
++            .setContentTitle(getString(R.string.app_name))
+             .setContentText(merchantText(R.string.merchant_service_running) { translate(DEFAULT_NOTIFY_TEXT) })
+             .setOnlyAlertOnce(true)
+             .setContentIntent(pendingIntent)
+@@ -1054,7 +1035,7 @@ class MainService : Service() {
+     }
+ 
+     private fun setTextNotification(_title: String?, _text: String?) {
+-        val title = _title ?: merchantText(R.string.app_name) { DEFAULT_NOTIFY_TITLE }
++        val title = _title ?: getString(R.string.app_name)
+         val text = _text ?: merchantText(R.string.merchant_service_running) { translate(DEFAULT_NOTIFY_TEXT) }
+         val notification = notificationBuilder
+             .clearActions()
+diff --git a/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MerchantLanguage.java b/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MerchantLanguage.java
+index 08a36b6f359fcbfe02f2320b0bec55d914b63b15..cdbac6575c3614a78409311e6d288e3da1cb0576 100644
+--- a/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MerchantLanguage.java
++++ b/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MerchantLanguage.java
+@@ -19,7 +19,11 @@ public final class MerchantLanguage {
+         if (!BuildConfig.MERCHANT_EDITION || option == null) return false;
+         if (!option.isEmpty() && !option.equals("en") && !option.equals("zh-cn") && !option.equals("es"))
+             return false;
+-        return preferences(context).edit().putString(OPTION, option).commit();
++        SharedPreferences prefs = preferences(context);
++        if (option.equals(prefs.getString(OPTION, ""))) return true;
++        boolean saved = prefs.edit().putString(OPTION, option).commit();
++        if (saved) ServiceNotificationChannel.refreshExisting(context);
++        return saved;
+     }
+ 
+     static String language(Context context) {
+diff --git a/flutter/android/app/src/main/res/values-es/steaddesk_service.xml b/flutter/android/app/src/main/res/values-es/steaddesk_service.xml
+index 89722ceb4536fd310c6412ae8a964562000cbf9c..532eaef42279070049c1eac2f495ed0f899f4a4f 100644
+--- a/flutter/android/app/src/main/res/values-es/steaddesk_service.xml
++++ b/flutter/android/app/src/main/res/values-es/steaddesk_service.xml
+@@ -1,3 +1,5 @@
+ <resources>
+     <string name="steaddesk_service_started">Se ha iniciado el servicio de SteadDesk</string>
++    <string name="merchant_channel">Servicio de SteadDesk</string>
++    <string name="merchant_channel_description">Notificaciones del servicio de acceso remoto de SteadDesk</string>
+ </resources>
+diff --git a/flutter/android/app/src/main/res/values-zh/steaddesk_service.xml b/flutter/android/app/src/main/res/values-zh/steaddesk_service.xml
+index 52c09effaad790df698a2b5e33a1c769a3eebc94..6a4e736f0b5591d90720b73febd0affbef0dee5f 100644
+--- a/flutter/android/app/src/main/res/values-zh/steaddesk_service.xml
++++ b/flutter/android/app/src/main/res/values-zh/steaddesk_service.xml
+@@ -1,3 +1,5 @@
+ <resources>
+     <string name="steaddesk_service_started">SteadDesk 服务已开启</string>
++    <string name="merchant_channel">SteadDesk 服务</string>
++    <string name="merchant_channel_description">SteadDesk 远程访问服务的通知</string>
+ </resources>
+diff --git a/flutter/android/app/src/steaddeskMerchant/res/values-es/merchant_language.xml b/flutter/android/app/src/steaddeskMerchant/res/values-es/merchant_language.xml
+index 3383121a6fa50a70aa6f9271929319bc5dcc96ae..c64e02bab91f2642162cc8345d9ff718a0a67350 100644
+--- a/flutter/android/app/src/steaddeskMerchant/res/values-es/merchant_language.xml
++++ b/flutter/android/app/src/steaddeskMerchant/res/values-es/merchant_language.xml
+@@ -2,8 +2,6 @@
+     <string name="app_name">SteadDesk</string>
+     <string name="merchant_self_heal">Permitir que SteadDesk reactive la aplicación Agent asociada</string>
+     <string name="accessibility_service_description">Permite que otros dispositivos controlen este teléfono mediante gestos táctiles simulados cuando se comparte la pantalla con SteadDesk</string>
+-    <string name="merchant_channel">Servicio de SteadDesk</string>
+-    <string name="merchant_channel_description">Notificaciones del servicio de acceso remoto de SteadDesk</string>
+     <string name="merchant_service_running">El servicio se está ejecutando</string>
+     <string name="merchant_transfer">Transferir archivo</string>
+     <string name="merchant_screen">Compartir pantalla</string>
+diff --git a/flutter/android/app/src/steaddeskMerchant/res/values-zh/merchant_language.xml b/flutter/android/app/src/steaddeskMerchant/res/values-zh/merchant_language.xml
+index c4c1a13fa54a9719f825fe13742cec30896631c4..48285dbfb3759ec494a7c5a1fa95aaa2a83115f6 100644
+--- a/flutter/android/app/src/steaddeskMerchant/res/values-zh/merchant_language.xml
++++ b/flutter/android/app/src/steaddeskMerchant/res/values-zh/merchant_language.xml
+@@ -2,8 +2,6 @@
+     <string name="app_name">SteadDesk</string>
+     <string name="merchant_self_heal">允许 SteadDesk 唤醒配套的 Agent 应用</string>
+     <string name="accessibility_service_description">通过 SteadDesk 共享屏幕后，允许其他设备使用模拟触控操作此设备</string>
+-    <string name="merchant_channel">SteadDesk 服务</string>
+-    <string name="merchant_channel_description">SteadDesk 远程访问服务的通知</string>
+     <string name="merchant_service_running">服务正在运行</string>
+     <string name="merchant_transfer">传输文件</string>
+     <string name="merchant_screen">共享屏幕</string>

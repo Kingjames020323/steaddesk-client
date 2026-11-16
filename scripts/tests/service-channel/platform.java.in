@@ -1,0 +1,133 @@
+// One public declaration per generated file. The real channel registration and
+// locale resolver run on the host against this small Android API fixture.
+package android.annotation;
+public @interface TargetApi { int value(); }
+
+package android.os;
+public class Build {
+    public static class VERSION { public static int SDK_INT = 34; }
+    public static class VERSION_CODES { public static final int O = 26; }
+}
+
+package android.graphics;
+public class Color { public static final int BLUE = 0xff0000ff; }
+
+package android.text;
+public class TextUtils {
+    public static boolean equals(CharSequence a, CharSequence b) { return java.util.Objects.equals(a, b); }
+}
+
+package android.content;
+public class Intent {
+    public static final String ACTION_MY_PACKAGE_REPLACED = "android.intent.action.MY_PACKAGE_REPLACED";
+    public static final String ACTION_LOCALE_CHANGED = "android.intent.action.LOCALE_CHANGED";
+    private final String action;
+    public Intent(String action) { this.action = action; }
+    public String getAction() { return action; }
+}
+
+package android.content;
+public abstract class BroadcastReceiver { public abstract void onReceive(Context context, Intent intent); }
+
+package android.content;
+public class SharedPreferences {
+    private final java.util.Map<String,String> data = new java.util.HashMap<>();
+    public String getString(String key, String fallback) { return data.getOrDefault(key, fallback); }
+    public Editor edit() { return new Editor(); }
+    public class Editor {
+        public Editor putString(String key, String value) { data.put(key, value); return this; }
+        public boolean commit() { return true; }
+    }
+}
+
+package android.content.res;
+public class Configuration {
+    public java.util.Locale locale = java.util.Locale.ENGLISH;
+    public Configuration() {}
+    public Configuration(Configuration copy) { locale = copy.locale; }
+    public void setLocale(java.util.Locale value) { locale = value; }
+    public java.util.List<java.util.Locale> getLocales() { return java.util.Collections.singletonList(locale); }
+}
+
+package android.content.res;
+public class Resources {
+    private final Configuration config;
+    public Resources(Configuration config) { this.config = config; }
+    public Configuration getConfiguration() { return config; }
+}
+
+package android.content;
+public abstract class Context {
+    public static final int MODE_PRIVATE = 0;
+    public abstract SharedPreferences getSharedPreferences(String name, int mode);
+    public abstract <T> T getSystemService(Class<T> type);
+    public abstract android.content.res.Resources getResources();
+    public abstract Context createConfigurationContext(android.content.res.Configuration config);
+    public abstract String getString(int resource);
+}
+
+package android.app;
+public class Notification {
+    public static final int VISIBILITY_PRIVATE = 0;
+    public String channelId;
+}
+
+package android.app;
+public class NotificationChannel {
+    private final String id;
+    private CharSequence name;
+    private String description;
+    public int importance, lightColor, visibility;
+    public String sound = "default";
+    public boolean vibrate = true;
+    public NotificationChannel(String id, CharSequence name, int importance) {
+        this.id = id; this.name = name; this.importance = importance;
+    }
+    public String getId() { return id; }
+    public CharSequence getName() { return name; }
+    public int getImportance() { return importance; }
+    public void setName(CharSequence value) { name = value; }
+    public String getDescription() { return description; }
+    public void setDescription(String value) { description = value; }
+    public void setLightColor(int value) { lightColor = value; }
+    public void setLockscreenVisibility(int value) { visibility = value; }
+}
+
+package android.app;
+public class NotificationManager {
+    public static final int IMPORTANCE_NONE = 0, IMPORTANCE_HIGH = 4;
+    public int registrations, visible;
+    public boolean enabled = true;
+    public void notify(int id, Notification notification) {
+        if (enabled && channels.get(notification.channelId).getImportance() != IMPORTANCE_NONE) visible++;
+    }
+    public final java.util.Map<String,NotificationChannel> channels = new java.util.HashMap<>();
+    public NotificationChannel getNotificationChannel(String id) { return channels.get(id); }
+    public void createNotificationChannel(NotificationChannel channel) {
+        channels.put(channel.getId(), channel);
+        registrations++;
+    }
+}
+
+package com.carriez.flutter_hbb;
+public class BuildConfig { public static boolean MERCHANT_EDITION = true; }
+
+package com.carriez.flutter_hbb;
+public class R {
+    public static class string {
+        public static final int merchant_channel = 0, merchant_channel_description = 1;
+    }
+}
+
+package androidx.core.app;
+public class NotificationCompat {
+    public static class Builder {
+        private final String id;
+        public Builder(android.content.Context context, String id) { this.id = id; }
+        public android.app.Notification build() {
+            android.app.Notification notification = new android.app.Notification();
+            notification.channelId = id;
+            return notification;
+        }
+    }
+}
