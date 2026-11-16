@@ -136,14 +136,12 @@ def configure(tree, merchant):
     (tree / "src/steaddesk_fleet.rs").write_text(str(enabled).lower()+"\n")
     root_source = native / "steaddesk_fleet_root.rs"
     pins = native / "steaddesk_fleet_key.rs"
-    if enabled:
-        shutil.copyfile(Path(__file__).resolve().parents[1] / "fleet-trust/release_root.rs", root_source)
-        pins.write_text("&[\n" + "".join(
-            f"    ReleaseRoot::new({root_arguments(key, record, '')}),\n"
-            for key, record in sorted(roots.items())) + "]\n", encoding="utf-8")
-    else:
-        pins.unlink(missing_ok=True)
-        root_source.unlink(missing_ok=True)
+    # cbindgen follows explicit module paths even for cfg-disabled platforms.
+    # Give it the same source in every edition. Disabled builds select zero roots.
+    shutil.copyfile(Path(__file__).resolve().parents[1] / "fleet-trust/release_root.rs", root_source)
+    pins.write_text("&[\n" + "".join(
+        f"    ReleaseRoot::new({root_arguments(key, record, '')}),\n"
+        for key, record in sorted(roots.items())) + "]\n", encoding="utf-8")
     source = tree / "flutter/android/app/src"
     out = source / "steaddeskFleet"
     if out.exists():

@@ -51,6 +51,20 @@ class FleetBuildTest(unittest.TestCase):
     def test_missing_https_origin_does_not_build(self):
         with self.assertRaises(ValueError):self.configure(STEADDESK_FLEET_UPDATE="true")
 
+    def test_bridge_parser_inputs_survive_disabled_and_support_reconfiguration(self):
+        native = self.tree / "src"
+        source = MODULE.parents[1] / "fleet-trust/release_root.rs"
+        enabled = {"STEADDESK_FLEET_UPDATE": "true", "STEADDESK_FLEET_OPS_ORIGIN": "https://example.invalid"}
+        for merchant, inputs in ((True, {}), (False, enabled)):
+            # Going from enabled to either off mode must erase every selected root.
+            self.configure(**enabled)
+            self.assertIn(fleet.DEFAULT_PUBLIC, (native / "steaddesk_fleet_key.rs").read_text())
+            self.configure(merchant=merchant, **inputs)
+            self.assertEqual((native / "steaddesk_fleet_root.rs").read_bytes(), source.read_bytes())
+            self.assertEqual((native / "steaddesk_fleet_key.rs").read_text().split(), ["&[", "]"])
+            self.assertEqual((native / "steaddesk_fleet.rs").read_text(), "false\n")
+            self.assertFalse((native / "steaddesk_fleet_windows_config.rs").exists())
+
     def test_windows_config_uses_its_own_profile_and_current_build(self):
         enabled = {"STEADDESK_FLEET_UPDATE": "true", "STEADDESK_FLEET_OPS_ORIGIN": "https://127.0.0.1"}
         self.configure(**enabled, STEADDESK_FLEET_WINDOWS_PROFILE="a" * 64, STEADDESK_FLEET_SILENT_PROFILE="b" * 64)
