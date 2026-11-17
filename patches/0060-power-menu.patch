@@ -1,15 +1,19 @@
 --- a/flutter/lib/desktop/widgets/remote_toolbar.dart
 +++ b/flutter/lib/desktop/widgets/remote_toolbar.dart
-@@ -31,7 +31,7 @@
+@@ -31,8 +31,11 @@
  import '../../steaddesk/dialogs.dart' show steadUsesChinese;
  import '../../steaddesk/history_host_api.dart';
  import '../../steaddesk/quality_badge.dart';
 -import '../../steaddesk/merchant_build.dart' show casesEnabled, opsHealthEnabled;
 +import '../../steaddesk/merchant_build.dart' show casesEnabled, opsHealthEnabled, supportPowerMenuEnabled;
  import '../../steaddesk/ops_health_host.dart';
++import '../../steaddesk/power_menu.dart';
++import '../../steaddesk/ops_health.dart' show OpsHealthHttp;
++import '../../steaddesk/toolbar/actions.dart' show toolbarSessionRoute;
  import 'package:flutter_hbb/steaddesk/toolbar_api.dart';
  
-@@ -2807,10 +2807,6 @@
+ part '../../steaddesk/session_surface.dart';
+@@ -2807,10 +2810,6 @@
        MenuButton(
            child: Text(translate('Volume down')),
            onPressed: () => ffi.inputModel.onMobileVolumeDown(),
@@ -51,8 +55,29 @@
                          }),
                    if (recovering)
                      Positioned.fill(
-@@ -487,7 +491,8 @@
+@@ -485,9 +489,29 @@
+   }
+ }
  
++// The peer receives its ordinary input event even when ops is unavailable.
++Future<void> _recordPowerRequest(String peer, String session, String connection) async {
++  OpsHealthHttp? api;
++  try {
++    final token = bind.mainGetLocalOption(key: 'access_token');
++    if (token.isEmpty) return;
++    final origin = Uri.parse(await bind.mainGetApiServer());
++    if (origin.scheme != 'https' || bind.mainGetLocalOption(key: 'access_token') != token) return;
++    final path = toolbarSessionRoute(peer: peer, session: session,
++        connection: connection, cases: false, caseId: null);
++    api = OpsHealthHttp(origin, token);
++    await api.request('POST', '$path/power-menu-requested', {});
++  } catch (_) {
++    // Audit delivery is best effort. Do not retry or replay the input event.
++  } finally {
++    api?.close();
++  }
++}
++
  class _AndroidKeys extends StatelessWidget {
    final FFI ffi;
 -  const _AndroidKeys({required this.ffi});
@@ -61,31 +86,26 @@
    @override
    Widget build(BuildContext context) {
      final model = Provider.of<FfiModel>(context);
-@@ -513,7 +518,26 @@
+@@ -513,7 +537,21 @@
            key('Volume down', Icons.volume_down_outlined,
                input.onMobileVolumeDown),
            key('Volume up', Icons.volume_up_outlined, input.onMobileVolumeUp),
 -          key('Power menu', Icons.power_settings_new, input.onMobilePower),
-+          if (supportPowerMenuEnabled)
-+            key('电源菜单', Icons.power_settings_new, () async {
-+              final connection = bind.sessionGetConnSessionId(sessionId: ffi.sessionId);
-+              if (connection.isEmpty || connection == '0') return;
-+              final confirmed = await showDialog<bool>(
-+                  context: context,
-+                  builder: (dialog) => AlertDialog(
-+                    title: const Text('电源菜单'),
-+                    content: const Text('将在对方屏幕上打开电源菜单，菜单里有关机和重启'),
-+                    actions: [
-+                      TextButton(onPressed: () => Navigator.pop(dialog, false), child: const Text('取消')),
-+                      TextButton(onPressed: () => Navigator.pop(dialog, true), child: const Text('打开')),
-+                    ],
-+                  ));
-+              if (confirmed != true || !context.mounted || !model.isPeerAndroid ||
-+                  !model.keyboard || model.viewOnly || model.reconnectInputLocked ||
-+                  bind.sessionGetConnSessionId(sessionId: ffi.sessionId) != connection) return;
-+              sent();
-+              await input.onMobilePower();
-+            }),
++          PowerMenuButton(
++              visible: supportPowerMenuEnabled && model.isPeerAndroid,
++              enabled: enabled,
++              activeConnection: () {
++                if (!model.isPeerAndroid || !model.keyboard || model.viewOnly ||
++                    model.reconnectInputLocked) return '';
++                return bind.sessionGetConnSessionId(sessionId: ffi.sessionId);
++              },
++              send: (connection) async {
++                final peer = input.id;
++                final session = ffi.sessionId.toString();
++                await input.onMobilePower();
++                if (context.mounted) sent();
++                unawaited(_recordPowerRequest(peer, session, connection));
++              }),
          ]));
    }
  }
@@ -142,3 +162,100 @@
          ("zero one two three four five six seven eight nine", "cero uno dos tres cuatro cinco seis siete ocho nueve"),
          ("Contact name", "Nombre de contacto"),
          ("Callback phone number", "Número de teléfono de contacto"),
+--- /dev/null
++++ b/flutter/lib/steaddesk/power_menu.dart
+@@ -0,0 +1,53 @@
++import 'package:flutter/material.dart';
++
++class PowerMenuButton extends StatelessWidget {
++  const PowerMenuButton(
++      {super.key,
++      required this.visible,
++      required this.enabled,
++      required this.activeConnection,
++      required this.send});
++  final bool visible, enabled;
++  final String Function() activeConnection;
++  final Future<void> Function(String connection) send;
++
++  @override
++  Widget build(BuildContext context) {
++    if (!visible) return const SizedBox.shrink();
++    return Expanded(
++        child: IconButton(
++      tooltip: '电源菜单',
++      padding: EdgeInsets.zero,
++      constraints: const BoxConstraints(),
++      iconSize: 18,
++      color: const Color(0xff0a6fa8),
++      icon: const FittedBox(child: Icon(Icons.power_settings_new)),
++      onPressed: !enabled
++          ? null
++          : () async {
++              final connection = activeConnection();
++              if (connection.isEmpty || connection == '0') return;
++              final confirmed = await showDialog<bool>(
++                context: context,
++                builder: (dialog) => AlertDialog(
++                  title: const Text('电源菜单'),
++                  content: const Text('将在对方屏幕上打开电源菜单，菜单里有关机和重启'),
++                  actions: [
++                    TextButton(
++                        onPressed: () => Navigator.pop(dialog, false),
++                        child: const Text('取消')),
++                    TextButton(
++                        onPressed: () => Navigator.pop(dialog, true),
++                        child: const Text('打开')),
++                  ],
++                ),
++              );
++              if (confirmed == true &&
++                  context.mounted &&
++                  activeConnection() == connection) {
++                await send(connection);
++              }
++            },
++    ));
++  }
++}
+--- /dev/null
++++ b/flutter/test/steaddesk_power_menu_test.dart
+@@ -0,0 +1,38 @@
++import 'package:flutter/material.dart';
++import 'package:flutter_test/flutter_test.dart';
++import 'package:flutter_hbb/steaddesk/power_menu.dart';
++
++void main() {
++  testWidgets('only a confirmed request for the same connection is sent',
++      (tester) async {
++    var connection = 'first';
++    final sent = <String>[];
++    Widget screen(bool android) => MaterialApp(
++            home: Scaffold(
++                body: Row(children: [
++          PowerMenuButton(
++              visible: android,
++              enabled: true,
++              activeConnection: () => connection,
++              send: (id) async {
++                sent.add(id);
++              }),
++        ])));
++    await tester.pumpWidget(screen(false));
++    expect(find.byTooltip('电源菜单'), findsNothing);
++    await tester.pumpWidget(screen(true));
++    Future<void> choose(String label, {String? changeTo}) async {
++      await tester.tap(find.byTooltip('电源菜单'));
++      await tester.pumpAndSettle();
++      if (changeTo != null) connection = changeTo;
++      await tester.tap(find.text(label));
++      await tester.pumpAndSettle();
++    }
++
++    await choose('取消');
++    await choose('打开', changeTo: 'second');
++    expect(sent, isEmpty);
++    await choose('打开');
++    expect(sent, ['second']);
++  });
++}
