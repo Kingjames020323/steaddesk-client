@@ -135,7 +135,7 @@ send_keys("{ESC}")
 wait_for("support directory", lambda: by_name(window, "Devices"))
 send_keys("^k")
 send_keys("765432109", pause=0.05)
-wait_for("numeric search connect action", lambda: by_name(window, "Connect · 765432109"))
+wait_for("numeric search connect action", lambda: by_name(window, "Connect · seven six five four three two one zero nine"))
 send_keys("^a{BACKSPACE}")
 main_labels = {"Devices", "Device", "Status", "Model", "Actions", "SUNMI", "Windows"}
 save_evidence(window, "main", controls(window, main_labels.__contains__))
