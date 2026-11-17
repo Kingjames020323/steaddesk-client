@@ -129,6 +129,7 @@ def dart_string(value):
 
 (tree / "flutter/lib/steaddesk/merchant_build.dart").write_text(
     "const merchantEdition = " + str(merchant).lower() + ";\n"
+    f"const supportPowerMenuEnabled = {str(not merchant and os.environ.get('STEADDESK_POWER_MENU') == 'true').lower()};\n"
     "const fleetAdminEnabled = " + str(fleet_admin_enabled).lower() + ";\n"
     "const helpEnabled = " + str(help_enabled).lower() + ";\n"
     "const opsHealthEnabled = " + str(ops_health_enabled).lower() + ";\n"

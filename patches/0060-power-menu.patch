@@ -1,0 +1,124 @@
+--- a/flutter/lib/desktop/widgets/remote_toolbar.dart
++++ b/flutter/lib/desktop/widgets/remote_toolbar.dart
+@@ -31,7 +31,7 @@
+ import '../../steaddesk/dialogs.dart' show steadUsesChinese;
+ import '../../steaddesk/history_host_api.dart';
+ import '../../steaddesk/quality_badge.dart';
+-import '../../steaddesk/merchant_build.dart' show casesEnabled, opsHealthEnabled;
++import '../../steaddesk/merchant_build.dart' show casesEnabled, opsHealthEnabled, supportPowerMenuEnabled;
+ import '../../steaddesk/ops_health_host.dart';
+ import 'package:flutter_hbb/steaddesk/toolbar_api.dart';
+ 
+@@ -2807,10 +2807,6 @@
+       MenuButton(
+           child: Text(translate('Volume down')),
+           onPressed: () => ffi.inputModel.onMobileVolumeDown(),
+-          ffi: ffi),
+-      MenuButton(
+-          child: Text(translate('Power')),
+-          onPressed: () => ffi.inputModel.onMobilePower(),
+           ffi: ffi),
+     ];
+   }
+--- a/flutter/lib/steaddesk/session_surface.dart
++++ b/flutter/lib/steaddesk/session_surface.dart
+@@ -41,6 +41,7 @@
+ class _SessionSurfaceState extends State<SessionSurface> {
+   static const panelKey = 'steaddesk-session-panel';
+   late _PanelMode panel;
++  final powerHistory = <String>[];
+   @override
+   void initState() {
+     super.initState();
+@@ -88,7 +89,7 @@
+                 IgnorePointer(
+                     ignoring: grabbed,
+                     child: _DevicePanel(
+-                        ffi: ffi, mode: panel, change: changePanel, history: history, actions: actions)),
++                        ffi: ffi, mode: panel, change: changePanel, history: history, actions: powerHistory.isEmpty ? actions : Column(children: [if (actions != null) actions, ...powerHistory.map((line) => Text(line))]))),
+               Expanded(child: LayoutBuilder(builder: (context, bounds) {
+                 final barHeight =
+                     android ? math.min(36.0, bounds.maxHeight / 3) : 0.0;
+@@ -117,7 +118,10 @@
+                               height: barHeight,
+                               child: IgnorePointer(
+                                   ignoring: grabbed,
+-                                  child: _AndroidKeys(ffi: ffi)));
++                                  child: _AndroidKeys(ffi: ffi, sent: () => setState(() {
++                                    powerHistory.insert(0, '${TimeOfDay.now().format(context)} 已发送电源菜单请求');
++                                    if (powerHistory.length > 10) powerHistory.removeLast();
++                                  }))));
+                         }),
+                   if (recovering)
+                     Positioned.fill(
+@@ -487,7 +491,8 @@
+ 
+ class _AndroidKeys extends StatelessWidget {
+   final FFI ffi;
+-  const _AndroidKeys({required this.ffi});
++  final VoidCallback sent;
++  const _AndroidKeys({required this.ffi, required this.sent});
+   @override
+   Widget build(BuildContext context) {
+     final model = Provider.of<FfiModel>(context);
+@@ -513,7 +518,26 @@
+           key('Volume down', Icons.volume_down_outlined,
+               input.onMobileVolumeDown),
+           key('Volume up', Icons.volume_up_outlined, input.onMobileVolumeUp),
+-          key('Power menu', Icons.power_settings_new, input.onMobilePower),
++          if (supportPowerMenuEnabled)
++            key('电源菜单', Icons.power_settings_new, () async {
++              final connection = bind.sessionGetConnSessionId(sessionId: ffi.sessionId);
++              if (connection.isEmpty || connection == '0') return;
++              final confirmed = await showDialog<bool>(
++                  context: context,
++                  builder: (dialog) => AlertDialog(
++                    title: const Text('电源菜单'),
++                    content: const Text('将在对方屏幕上打开电源菜单，菜单里有关机和重启'),
++                    actions: [
++                      TextButton(onPressed: () => Navigator.pop(dialog, false), child: const Text('取消')),
++                      TextButton(onPressed: () => Navigator.pop(dialog, true), child: const Text('打开')),
++                    ],
++                  ));
++              if (confirmed != true || !context.mounted || !model.isPeerAndroid ||
++                  !model.keyboard || model.viewOnly || model.reconnectInputLocked ||
++                  bind.sessionGetConnSessionId(sessionId: ffi.sessionId) != connection) return;
++              sent();
++              await input.onMobilePower();
++            }),
+         ]));
+   }
+ }
+--- a/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/InputService.kt
++++ b/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/InputService.kt
+@@ -499,7 +499,11 @@
+         if (event.keyCode == KeyEventAndroid.KEYCODE_POWER) {
+             // Perform power dialog action when action is up
+             if (event.action == KeyEventAndroid.ACTION_UP) {
+-                performGlobalAction(GLOBAL_ACTION_POWER_DIALOG);
++                if (!MerchantRecovery.userPaused(this) && performGlobalAction(GLOBAL_ACTION_POWER_DIALOG)) {
++                    android.os.Handler(android.os.Looper.getMainLooper()).post {
++                        android.widget.Toast.makeText(this, R.string.sd_power_menu_opened, android.widget.Toast.LENGTH_SHORT).show()
++                    }
++                }
+             }
+             return true
+         }
+--- /dev/null
++++ b/flutter/android/app/src/main/res/values/sd_power.xml
+@@ -0,0 +1,3 @@
++<resources>
++    <string name="sd_power_menu_opened">Support opened the power menu</string>
++</resources>
+--- /dev/null
++++ b/flutter/android/app/src/main/res/values-zh/sd_power.xml
+@@ -0,0 +1,3 @@
++<resources>
++    <string name="sd_power_menu_opened">客服打开了电源菜单</string>
++</resources>
+--- /dev/null
++++ b/flutter/android/app/src/main/res/values-es/sd_power.xml
+@@ -0,0 +1,3 @@
++<resources>
++    <string name="sd_power_menu_opened">Soporte abrió el menú de encendido</string>
++</resources>
