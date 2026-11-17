@@ -122,3 +122,23 @@
 +<resources>
 +    <string name="sd_power_menu_opened">Soporte abrió el menú de encendido</string>
 +</resources>
+--- a/src/lang/cn.rs
++++ b/src/lang/cn.rs
+@@ -1,6 +1,7 @@
+ lazy_static::lazy_static! {
+ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
+     [
++        ("Support opened the power menu", "客服打开了电源菜单"),
+         ("zero one two three four five six seven eight nine", "零 一 二 三 四 五 六 七 八 九"),
+         ("Contact name", "联系人姓名"),
+         ("Callback phone number", "回电号码"),
+--- a/src/lang/es.rs
++++ b/src/lang/es.rs
+@@ -1,6 +1,7 @@
+ lazy_static::lazy_static! {
+ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
+     [
++        ("Support opened the power menu", "Soporte abrió el menú de encendido"),
+         ("zero one two three four five six seven eight nine", "cero uno dos tres cuatro cinco seis siete ocho nueve"),
+         ("Contact name", "Nombre de contacto"),
+         ("Callback phone number", "Número de teléfono de contacto"),
