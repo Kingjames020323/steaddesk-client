@@ -6,6 +6,10 @@ name: Build SteadDesk
     tags: ['v1.5.0-sd.*']
   workflow_dispatch:
     inputs:
+      steaddesk_power_menu:
+        description: Include the Android power menu in the support preview
+        type: boolean
+        default: false
       steaddesk_today:
         description: Include the Today dashboard in the support preview
         type: boolean
@@ -53,6 +57,7 @@ name: Build SteadDesk
 permissions:
   contents: read
 env:
+  STEADDESK_POWER_MENU: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/preview/ui-v7' && inputs.steaddesk_power_menu && 'true' || 'false' }}
   VERIFY_OPS_PROFILE: ${{ inputs.steaddesk_ops_integration && 'true' || 'false' }}
   STEADDESK_TODAY: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/preview/ui-v7' && inputs.steaddesk_today && 'true' || 'false' }}
   STEADDESK_KB: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/preview/ui-v7' && inputs.steaddesk_kb && 'true' || 'false' }}
