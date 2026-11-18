@@ -1,0 +1,484 @@
+diff --git a/flutter/lib/steaddesk/cases/case_dialog.dart b/flutter/lib/steaddesk/cases/case_dialog.dart
+index 644c469..83c926a 100644
+--- a/flutter/lib/steaddesk/cases/case_dialog.dart
++++ b/flutter/lib/steaddesk/cases/case_dialog.dart
+@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
+ import '../theme.dart';
+ import 'package:flutter_hbb/steaddesk/toolbar_api.dart';
+ import 'case_store.dart';
++import 'team_notes.dart';
+ 
+ const caseCategoryLabels = {
+   'menu': '菜单',
+@@ -22,7 +23,6 @@ const caseResultLabels = {
+   'transferred': '转给同事…',
+   'not_needed': '商户不需要了',
+ };
+-const _phrases = ['重启打印机', '重新插网线', '换纸卷', '重打订单'];
+ 
+ Future<void> showCaseCloseDialog(
+   BuildContext context, {
+@@ -30,6 +30,8 @@ Future<void> showCaseCloseDialog(
+   required String account,
+   required Map<String, dynamic> record,
+   Iterable<String> colleagues = const [],
++  NotesRequest? quickNotes,
++  bool admin = false,
+ }) async {
+   final appendOnly = await store.isAppendOnly(account, record['id'] as String);
+   if (!context.mounted) return;
+@@ -43,6 +45,8 @@ Future<void> showCaseCloseDialog(
+       account: account,
+       record: record,
+       appendOnly: appendOnly,
++      quickNotes: quickNotes,
++      admin: admin,
+       colleagues: colleagues
+           .map((name) => name.trim())
+           .where((name) => name.isNotEmpty && name != account)
+@@ -59,7 +63,11 @@ class _CaseCloseDialog extends StatefulWidget {
+       required this.account,
+       required this.record,
+       required this.appendOnly,
+-      required this.colleagues});
++      required this.colleagues,
++      required this.quickNotes,
++      required this.admin});
++  final NotesRequest? quickNotes;
++  final bool admin;
+   final CaseStore store;
+   final String account;
+   final Map<String, dynamic> record;
+@@ -442,39 +450,11 @@ class _CaseCloseDialogState extends State<_CaseCloseDialog> {
+                   OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+               isDense: true)),
+       const SizedBox(height: 8),
+-      Wrap(
+-          spacing: 6,
+-          runSpacing: 6,
+-          crossAxisAlignment: WrapCrossAlignment.center,
+-          children: [
+-            const Text('常用：', style: _muted),
+-            for (final phrase in _phrases)
+-              SizedBox(
+-                  height: 28,
+-                  child: OutlinedButton(
+-                      style: OutlinedButton.styleFrom(
+-                          minimumSize: Size.zero,
+-                          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+-                          foregroundColor: SteadDeskTheme.secondaryText,
+-                          side: const BorderSide(color: Color(0xFFCBD5E1)),
+-                          shape: RoundedRectangleBorder(
+-                              borderRadius: BorderRadius.circular(6)),
+-                          padding: const EdgeInsets.symmetric(horizontal: 10),
+-                          textStyle: Theme.of(context)
+-                              .textTheme
+-                              .labelLarge
+-                              ?.copyWith(fontSize: 12)),
+-                      onPressed: () {
+-                        final value = note.text.isEmpty
+-                            ? phrase
+-                            : '${note.text}\n$phrase';
+-                        note.value = TextEditingValue(
+-                            text: value,
+-                            selection:
+-                                TextSelection.collapsed(offset: value.length));
+-                      },
+-                      child: Text('+ $phrase'))),
+-          ]),
++      TeamNotes(admin: widget.admin, request: widget.quickNotes, insert: (phrase) {
++        final value = note.text.isEmpty ? phrase : '${note.text}\n$phrase';
++        note.value = TextEditingValue(text: value,
++            selection: TextSelection.collapsed(offset: value.length));
++      }),
+     ]);
+   }
+ 
+diff --git a/flutter/lib/steaddesk/cases/case_inbox.dart b/flutter/lib/steaddesk/cases/case_inbox.dart
+index eb7adaf..feb3183 100644
+--- a/flutter/lib/steaddesk/cases/case_inbox.dart
++++ b/flutter/lib/steaddesk/cases/case_inbox.dart
+@@ -10,6 +10,7 @@ import '../merchant_build.dart' show normalCasesEnabled;
+ import 'case_dialog.dart';
+ import 'case_history.dart';
+ import 'case_store.dart';
++import 'team_notes.dart' show NotesRequest;
+ 
+ /// The main window is the single owner of persistence and of the modal queue.
+ class CaseInbox extends ChangeNotifier {
+@@ -68,11 +69,15 @@ class PendingCasesBar extends StatefulWidget {
+     required this.colleagues,
+     required this.showMainWindow,
+     this.inbox,
++    this.quickNotes,
++    this.admin = false,
+   });
+   final String account;
+   final List<String> Function() colleagues;
+   final Future<void> Function() showMainWindow;
+   final CaseInbox? inbox;
++  final NotesRequest? quickNotes;
++  final bool admin;
+ 
+   @override
+   State<PendingCasesBar> createState() => _PendingCasesBarState();
+@@ -216,6 +221,8 @@ class _PendingCasesBarState extends State<PendingCasesBar> {
+                     store: inbox.store,
+                     account: account,
+                     record: selected,
++                    quickNotes: widget.quickNotes,
++                    admin: widget.admin,
+                     colleagues: widget.colleagues());
+               }
+             } finally {
+diff --git a/flutter/lib/steaddesk/cases/case_inbox_off.dart b/flutter/lib/steaddesk/cases/case_inbox_off.dart
+index 09c33ba..4f5b7cc 100644
+--- a/flutter/lib/steaddesk/cases/case_inbox_off.dart
++++ b/flutter/lib/steaddesk/cases/case_inbox_off.dart
+@@ -9,6 +9,8 @@ class PendingCasesBar extends StatelessWidget {
+   const PendingCasesBar({
+     super.key,
+     required String account,
++    bool admin = false,
++    Future<Map<String, dynamic>> Function(int?, List<String>?)? quickNotes,
+     required List<String> Function() colleagues,
+     required Future<void> Function() showMainWindow,
+   });
+diff --git a/flutter/lib/steaddesk/cases/team_notes.dart b/flutter/lib/steaddesk/cases/team_notes.dart
+new file mode 100644
+index 0000000..5fb46e9
+--- /dev/null
++++ b/flutter/lib/steaddesk/cases/team_notes.dart
+@@ -0,0 +1,207 @@
++import 'package:flutter/material.dart';
++
++import '../ops_health.dart' show HealthFailure;
++
++typedef NotesRequest = Future<Map<String, dynamic>> Function(
++    int? version, List<String>? replacement);
++
++const defaultNotes = ['重启打印机', '重新插网线', '换纸卷', '重打订单'];
++
++class TeamNotes extends StatefulWidget {
++  const TeamNotes(
++      {super.key, required this.insert, this.request, this.admin = false});
++  final ValueChanged<String> insert;
++  final NotesRequest? request;
++  final bool admin;
++
++  @override
++  State<TeamNotes> createState() => _TeamNotesState();
++}
++
++class _TeamNotesState extends State<TeamNotes> {
++  List<String> notes = defaultNotes;
++  int? version;
++  bool? canEdit;
++  bool loading = false;
++  String? message;
++
++  @override
++  void initState() {
++    super.initState();
++    if (widget.request != null) refresh();
++  }
++
++  void apply(Map<String, dynamic> data) {
++    final received = List<String>.from(data['notes'] as List);
++    final revision = data['version'] as int;
++    final admin = data['can_edit'] as bool;
++    notes = received;
++    version = revision;
++    canEdit = admin;
++  }
++
++  Future<void> refresh({String? feedback}) async {
++    setState(() => loading = true);
++    try {
++      final response = await widget.request!(null, null);
++      if (!mounted) return;
++      apply(response);
++      message = feedback;
++    } catch (_) {
++      if (!mounted) return;
++      notes = defaultNotes;
++      version = null;
++      canEdit = null;
++      message = '需要连接 ops';
++    } finally {
++      if (mounted) setState(() => loading = false);
++    }
++  }
++
++  Future<void> edit(bool add) async {
++    final before = version;
++    if (before == null || loading) return;
++    final updated = await showDialog<List<String>>(
++        context: context,
++        useRootNavigator: false,
++        builder: (_) => _Editor(notes: notes, add: add));
++    if (updated == null || !mounted) return;
++    setState(() => loading = true);
++    try {
++      final response = await widget.request!(before, updated);
++      if (mounted) {
++        setState(() {
++          apply(response);
++          message = null;
++          loading = false;
++        });
++      }
++    } catch (e) {
++      if (mounted) {
++        await refresh(
++            feedback: e is HealthFailure && e.status == 409
++                ? '其他管理员已修改常用备注，请核对后再编辑。'
++                : '未能确认保存，请核对当前列表。');
++      }
++    }
++  }
++
++  @override
++  Widget build(BuildContext context) {
++    final online = version != null;
++    final editable = online && !loading;
++    return Wrap(
++        spacing: 6,
++        runSpacing: 6,
++        crossAxisAlignment: WrapCrossAlignment.center,
++        children: [
++          const Text('常用：'),
++          for (final note in notes)
++            OutlinedButton(
++                style: OutlinedButton.styleFrom(
++                    minimumSize: const Size(0, 28),
++                    tapTargetSize: MaterialTapTargetSize.shrinkWrap),
++                onPressed: () => widget.insert(note),
++                child: Text('+ $note')),
++          if (canEdit ?? widget.admin) ...[
++            IconButton(
++                tooltip: !online ? '需要连接 ops' : '新增常用备注',
++                icon: const Icon(Icons.add),
++                onPressed:
++                    editable && notes.length < 30 ? () => edit(true) : null),
++            IconButton(
++                tooltip: !online ? '需要连接 ops' : '编辑常用备注',
++                icon: const Icon(Icons.edit_outlined),
++                onPressed: editable ? () => edit(false) : null),
++          ],
++          if (widget.request != null)
++            IconButton(
++                tooltip: '刷新常用备注',
++                icon: const Icon(Icons.refresh),
++                onPressed: loading ? null : refresh),
++          if (message != null)
++            Text(message!, style: Theme.of(context).textTheme.bodySmall),
++        ]);
++  }
++}
++
++class _Editor extends StatefulWidget {
++  const _Editor({required this.notes, required this.add});
++  final List<String> notes;
++  final bool add;
++  @override
++  State<_Editor> createState() => _EditorState();
++}
++
++class _EditorState extends State<_Editor> {
++  late final rows = [
++    for (final text in widget.notes) TextEditingController(text: text),
++    if (widget.add) TextEditingController(),
++  ];
++  final removed = <TextEditingController>[];
++  String? error;
++  @override
++  void dispose() {
++    for (final row in [...rows, ...removed]) {
++      row.dispose();
++    }
++    super.dispose();
++  }
++
++  void move(int from, int to) =>
++      setState(() => rows.insert(to, rows.removeAt(from)));
++  void save() {
++    final values = rows.map((row) => row.text.trim()).toList();
++    if (values.any((s) => s.isEmpty || s.runes.length > 60)) {
++      setState(() => error = '每条常用备注限 1–60 字。');
++    } else {
++      Navigator.of(context).pop(values);
++    }
++  }
++
++  @override
++  Widget build(BuildContext context) => AlertDialog(
++          title: Text(widget.add ? '新增常用备注' : '编辑常用备注'),
++          content: SizedBox(
++              width: 460,
++              child: SingleChildScrollView(
++                  child: Column(mainAxisSize: MainAxisSize.min, children: [
++                for (var i = 0; i < rows.length; i++)
++                  Row(key: ObjectKey(rows[i]), children: [
++                    Expanded(
++                        child: TextField(
++                            controller: rows[i],
++                            maxLength: 60,
++                            autofocus: widget.add && i == rows.length - 1,
++                            decoration:
++                                InputDecoration(labelText: '备注 ${i + 1}'))),
++                    IconButton(
++                        tooltip: '上移',
++                        icon: const Icon(Icons.arrow_upward),
++                        onPressed: i > 0 ? () => move(i, i - 1) : null),
++                    IconButton(
++                        tooltip: '下移',
++                        icon: const Icon(Icons.arrow_downward),
++                        onPressed:
++                            i + 1 < rows.length ? () => move(i, i + 1) : null),
++                    IconButton(
++                        tooltip: '删除',
++                        icon: const Icon(Icons.delete_outline),
++                        onPressed: () =>
++                            setState(() => removed.add(rows.removeAt(i)))),
++                  ]),
++                if (rows.length < 30)
++                  TextButton.icon(
++                      onPressed: () =>
++                          setState(() => rows.add(TextEditingController())),
++                      icon: const Icon(Icons.add),
++                      label: const Text('添加一条')),
++                if (error != null) Text(error!),
++              ]))),
++          actions: [
++            TextButton(
++                onPressed: () => Navigator.of(context).pop(),
++                child: const Text('取消')),
++            FilledButton(onPressed: save, child: const Text('保存')),
++          ]);
++}
+diff --git a/flutter/lib/steaddesk/support_home.dart b/flutter/lib/steaddesk/support_home.dart
+index e325049..85be7f3 100644
+--- a/flutter/lib/steaddesk/support_home.dart
++++ b/flutter/lib/steaddesk/support_home.dart
+@@ -21,6 +21,7 @@ import '../models/peer_model.dart';
+ import '../models/peer_tab_model.dart';
+ import '../models/ab_model.dart';
+ import 'ops_health_host.dart';
++import 'ops_health.dart' show OpsHealthHttp;
+ import 'store_feature_admin.dart';
+ import 'quick_support_api.dart' show supportQuickEnabled;
+ import 'fleet_admin_api.dart';
+@@ -204,6 +205,26 @@ class _SupportHomeState extends State<SupportHome> {
+     }));
+   }
+ 
++  Future<Map<String, dynamic>> Function(int?, List<String>?) _quickNotesFor(String account) {
++    final token = bind.mainGetLocalOption(key: 'access_token');
++    bool current() => mounted && account.isNotEmpty && token.isNotEmpty &&
++        account == gFFI.userModel.userName.value &&
++        token == bind.mainGetLocalOption(key: 'access_token');
++    return (version, replacement) async {
++      final origin = Uri.parse(await bind.mainGetApiServer());
++      if (!current()) throw StateError('账号已更改');
++      final api = OpsHealthHttp(origin, token);
++      try {
++        final response = await api.request(replacement == null ? 'GET' : 'PUT',
++            'quick-notes', replacement == null ? null : {'version': version, 'notes': replacement});
++        if (!current()) throw StateError('账号已更改');
++        return response;
++      } finally {
++        api.close();
++      }
++    };
++  }
++
+   void _opsChanged() {
+     if (!mounted) return;
+     if (_ops?.signedOut == true) {
+@@ -483,6 +504,8 @@ class _SupportHomeState extends State<SupportHome> {
+                             const Divider(height: 1, color: Color(0xffe5e7eb)),
+                             if (casesEnabled && isWindows)
+                               Obx(() => PendingCasesBar(
++                                  admin: gFFI.userModel.isAdmin.value,
++                                  quickNotes: _quickNotesFor(gFFI.userModel.userName.value),
+                                   account: gFFI.userModel.userName.value,
+                                   colleagues: () => gFFI.groupModel.users
+                                       .where((user) =>
+diff --git a/flutter/test/steaddesk/team_notes_test.dart b/flutter/test/steaddesk/team_notes_test.dart
+new file mode 100644
+index 0000000..274b67a
+--- /dev/null
++++ b/flutter/test/steaddesk/team_notes_test.dart
+@@ -0,0 +1,71 @@
++import 'package:flutter/material.dart';
++import 'package:flutter_hbb/steaddesk/cases/team_notes.dart';
++import 'package:flutter_test/flutter_test.dart';
++
++void main() {
++  testWidgets(
++      'staff reads a team edit on refresh; offline admins see disabled controls',
++      (tester) async {
++    var stored = ['第一条'];
++    var revision = 1;
++    var online = true;
++    var selected = '';
++    Widget panel(bool admin, String key) => TeamNotes(
++        key: ValueKey(key),
++        admin: admin,
++        insert: (value) => selected = value,
++        request: (version, replacement) async {
++          if (!online) throw StateError('offline');
++          if (replacement != null) {
++            expect(admin, isTrue);
++            expect(version, revision);
++            stored = replacement;
++            revision++;
++          }
++          return {
++            'version': revision,
++            'notes': List.of(stored),
++            'can_edit': admin
++          };
++        });
++    await tester.pumpWidget(MaterialApp(
++        home: Scaffold(
++            body: Column(
++                children: [panel(true, 'admin'), panel(false, 'staff')]))));
++    await tester.pumpAndSettle();
++    expect(find.byTooltip('新增常用备注'), findsOneWidget);
++    expect(find.byTooltip('编辑常用备注'), findsOneWidget);
++    await tester.tap(find.byTooltip('新增常用备注'));
++    await tester.pumpAndSettle();
++    await tester.enterText(find.byType(TextField).last, '第二条');
++    await tester.tap(find.byTooltip('上移').last);
++    await tester.pump();
++    await tester.tap(find.text('保存'));
++    await tester.pumpAndSettle();
++    expect(stored, ['第二条', '第一条']);
++    expect(find.text('+ 第二条'), findsOneWidget);
++    await tester.tap(find.byTooltip('刷新常用备注').last);
++    await tester.pumpAndSettle();
++    expect(find.text('+ 第二条'), findsNWidgets(2));
++    await tester.tap(find.text('+ 第二条').last);
++    expect(selected, '第二条');
++    await tester.tap(find.byTooltip('编辑常用备注'));
++    await tester.pumpAndSettle();
++    await tester.enterText(find.byType(TextField).first, '修改');
++    await tester.tap(find.byTooltip('删除').last);
++    await tester.pump();
++    await tester.tap(find.text('保存'));
++    await tester.pumpAndSettle();
++    expect(stored, ['修改']);
++    online = false;
++    await tester.tap(find.byTooltip('刷新常用备注').first);
++    await tester.pumpAndSettle();
++    expect(find.text('+ 修改'), findsNothing);
++    expect(find.text('+ 重启打印机'), findsOneWidget);
++    final buttons = tester
++        .widgetList<IconButton>(find.byType(IconButton))
++        .where((b) => b.tooltip == '需要连接 ops');
++    expect(buttons.length, 2);
++    expect(buttons.every((b) => b.onPressed == null), isTrue);
++  });
++}
