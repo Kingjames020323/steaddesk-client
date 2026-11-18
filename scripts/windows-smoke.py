@@ -1,6 +1,7 @@
 """Verify the packaged app on the isolated Windows desktop; publish only public UI."""
 
 from ctypes import windll, wintypes
+import json
 import os
 import re
 import subprocess
@@ -94,9 +95,26 @@ def save_evidence(window, name, visible_controls, public_regions=()):
 exe = Path(sys.argv[1]).resolve()
 output = Path(sys.argv[2])
 output.mkdir(parents=True, exist_ok=True)
+support = os.environ.get("STEADDESK_EDITION") == "support"
+recent_fixture = support and os.environ.get("GITHUB_ACTIONS") == "true"
+if recent_fixture:
+    # The workflow isolates both services before this process starts. Seed a
+    # disposable account's local preference before launching the packaged UI.
+    product = "SteadDesk Support"
+    config = Path(os.environ["APPDATA"]) / product / "config" / (product + "_local.toml")
+    config.parent.mkdir(parents=True, exist_ok=True)
+    account = "offline-smoke"
+    history = [["direct/765432109", "765 432 109", "deviceId"]]
+    with config.open("x", encoding="utf-8") as handle:
+        handle.write("[options]\n")
+        for key, value in {
+            "access_token": "offline-ui-fixture",
+            "user_info": json.dumps({"name": account}),
+            "support-recent-search-v1-" + account: json.dumps(history),
+        }.items():
+            handle.write(f"{key} = {json.dumps(value)}\n")
 subprocess.Popen([str(exe)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 desktop = Desktop(backend="uia")
-support = os.environ.get("STEADDESK_EDITION") == "support"
 product = "SteadDesk Support" if support else "SteadDesk"
 
 
@@ -134,6 +152,17 @@ send_keys("{ESC}")
 # Exercise the packaged directory and its explicit action without dialing a peer.
 wait_for("support directory", lambda: by_name(window, "Devices"))
 send_keys("^k")
+if recent_fixture:
+    heading = wait_for("recent search heading", lambda: by_name(window, "Recent searches"))
+    kind = wait_for("search result type", lambda: by_name(window, "Device ID"))
+    target = wait_for("grouped recent ID", lambda: by_name(
+        window, "Direct connect ID seven six five four three two one zero nine"))
+    clear = wait_for("clear history action", lambda: by_name(window, "Clear all"))
+    remove = wait_for("single history removal action", lambda: by_name(window, "Remove"))
+    save_evidence(window, "recent-search", [heading, kind, target, clear, remove])
+    click_control(remove)
+    wait_for("removed last history item", lambda: by_name(window, "No recent searches"))
+    send_keys("{ESC}^k")
 send_keys("765432109", pause=0.05)
 wait_for("numeric search connect action", lambda: by_name(window, "Connect · seven six five four three two one zero nine"))
 send_keys("^a{BACKSPACE}")

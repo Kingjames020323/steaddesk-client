@@ -1,0 +1,471 @@
+diff --git a/flutter/lib/steaddesk/recent_search.dart b/flutter/lib/steaddesk/recent_search.dart
+new file mode 100644
+index 0000000..137ef26
+--- /dev/null
++++ b/flutter/lib/steaddesk/recent_search.dart
+@@ -0,0 +1,39 @@
++import 'dart:convert';
++
++enum SearchKind { deviceId, deviceName, store, group }
++
++class RecentSearch {
++  final String key, label;
++  final SearchKind kind;
++  const RecentSearch(this.key, this.label, this.kind);
++}
++
++class RecentSearchHistory {
++  List<RecentSearch> items = [];
++  static String option(String account) =>
++      'support-recent-search-v1-${Uri.encodeComponent(account)}';
++
++  RecentSearchHistory(String saved) {
++    if (saved.isEmpty) return;
++    try {
++      final records = jsonDecode(saved);
++      if (records is! List) return;
++      for (final record in records) {
++        if (record case [String key, String label, String kind]) {
++          final type = SearchKind.values.where((t) => t.name == kind);
++          if (type.isEmpty || items.any((r) => r.key == key)) continue;
++          items.add(RecentSearch(key, label, type.first));
++          if (items.length == 10) break;
++        }
++      }
++    } on FormatException {
++      // An unreadable preference can be replaced by the next selection.
++    }
++  }
++  String encode() => jsonEncode([
++        for (final r in items) [r.key, r.label, r.kind.name]
++      ]);
++  void remember(RecentSearch item) {
++    items = [item, ...items.where((r) => r.key != item.key).take(9)];
++  }
++}
+diff --git a/flutter/lib/steaddesk/support_home.dart b/flutter/lib/steaddesk/support_home.dart
+index e325049..dc0d757 100644
+--- a/flutter/lib/steaddesk/support_home.dart
++++ b/flutter/lib/steaddesk/support_home.dart
+@@ -1,4 +1,5 @@
+ import 'device_id.dart';
++import 'recent_search.dart';
+ import 'device_id_widgets.dart';
+ import 'dart:async';
+ import 'dart:io';
+@@ -256,7 +257,7 @@ class _SupportHomeState extends State<SupportHome> {
+   }
+ 
+   void _search(String value) => setState(() {
+-        if (value.isNotEmpty) page = SupportPage.devices;
++        if (isWindows || value.isNotEmpty) page = SupportPage.devices;
+       });
+ 
+   void _navigate(SupportPage next) {
+@@ -476,9 +477,11 @@ class _SupportHomeState extends State<SupportHome> {
+                                   search.clear();
+                                   searchFocus.unfocus();
+                                   setState(() => page = SupportPage.devices);
+-                                  directoryKeys[SupportPage.devices]
+-                                      ?.currentState
+-                                      ?.selectScope(scope);
++                                  WidgetsBinding.instance.addPostFrameCallback((_) {
++                                    if (mounted && page == SupportPage.devices) {
++                                      directoryKeys[SupportPage.devices]?.currentState?.selectScope(scope);
++                                    }
++                                  });
+                                 }),
+                             const Divider(height: 1, color: Color(0xffe5e7eb)),
+                             if (casesEnabled && isWindows)
+diff --git a/flutter/lib/steaddesk/support_search.dart b/flutter/lib/steaddesk/support_search.dart
+index dfed035..8b84247 100644
+--- a/flutter/lib/steaddesk/support_search.dart
++++ b/flutter/lib/steaddesk/support_search.dart
+@@ -23,6 +23,64 @@ class _SupportSearchFieldState extends State<_SupportSearchField> {
+   final tileKeys = <String, GlobalKey>{};
+   String? selected;
+   bool menuOpen = false;
++  String owner = '';
++  RecentSearchHistory history = RecentSearchHistory('');
++  Future<void> pending = Future.value();
++  bool get recentEnabled => isWindows && !merchantEdition;
++
++  void _loadHistory() {
++    final next = recentEnabled ? gFFI.userModel.userName.value : '';
++    if (owner == next) return;
++    owner = next;
++    history = RecentSearchHistory(next.isEmpty
++        ? ''
++        : bind.mainGetLocalOption(key: RecentSearchHistory.option(next)));
++  }
++
++  void _save() {
++    final key = RecentSearchHistory.option(owner);
++    final value = history.encode();
++    pending = pending
++        .then((_) => bind.mainSetLocalOption(key: key, value: value))
++        .catchError(
++            (Object e) => debugPrint('Recent search preference write failed'));
++  }
++
++  SearchKind _kind(_Choice c) {
++    if (c.scope != null)
++      return RegExp(r'^M[0-9]+/S[0-9]+$', caseSensitive: false)
++              .hasMatch(c.scope!)
++          ? SearchKind.store
++          : SearchKind.group;
++    return c.row == null ||
++            c.label == c.row!.device.id ||
++            RegExp(r'^[0-9 ]+$').hasMatch(widget.search.text.trim())
++        ? SearchKind.deviceId
++        : SearchKind.deviceName;
++  }
++
++  String _recentLabel(String en, String zh, String es) {
++    final lang = bind.mainGetLocalOption(key: 'lang');
++    final code = (lang.isEmpty ? localeName.toString() : lang).toLowerCase();
++    return code.startsWith('zh')
++        ? zh
++        : code.startsWith('es')
++            ? es
++            : en;
++  }
++
++  String _typeLabel(SearchKind kind) => switch (kind) {
++        SearchKind.deviceId =>
++          _recentLabel('Device ID', '设备 ID', 'ID del dispositivo'),
++        SearchKind.deviceName =>
++          _recentLabel('Device name', '设备名', 'Nombre del dispositivo'),
++        SearchKind.store => _recentLabel('Store', '门店', 'Tienda'),
++        SearchKind.group => _recentLabel('Group', '分组', 'Grupo'),
++      };
++
++  String _identity(_Choice c) =>
++      c.key == 'direct' ? 'direct/${c.label.replaceAll(' ', '')}' : c.key;
++  bool _direct(_Choice c) => c.key == 'direct' || c.key.startsWith('direct/');
+   @override
+   void initState() {
+     super.initState();
+@@ -38,7 +96,12 @@ class _SupportSearchFieldState extends State<_SupportSearchField> {
+ 
+   void _focus() {
+     if (widget.focus.hasFocus) {
+-      if (widget.search.text.trim().isNotEmpty) portal.show();
++      _loadHistory();
++      if (recentEnabled && owner.isNotEmpty && widget.directory() == null) {
++        widget.onSearch(widget.search.text);
++      }
++      if (widget.search.text.trim().isNotEmpty || owner.isNotEmpty)
++        portal.show();
+     } else if (!menuOpen) {
+       _close();
+     }
+@@ -52,7 +115,8 @@ class _SupportSearchFieldState extends State<_SupportSearchField> {
+   void _change(String value) {
+     selected = null;
+     widget.onSearch(value);
+-    if (value.trim().isEmpty) {
++    if (value.trim().isEmpty &&
++        (!recentEnabled || gFFI.userModel.userName.isEmpty)) {
+       _close();
+       return;
+     }
+@@ -64,16 +128,18 @@ class _SupportSearchFieldState extends State<_SupportSearchField> {
+     final term = q.toLowerCase();
+     final groups = <String, String>{};
+     if (_useOps) {
+-      final dir = widget.directory();
+-      for (final g in dir?.ops?.shared ?? <OpsGroup>[]) {
++      for (final g in widget.directory()?.ops?.shared ?? <OpsGroup>[]) {
+         if (g.name.toLowerCase().contains(term))
+           groups['shared/${g.id}'] = g.name;
+       }
+-      for (final g in dir?.groups ?? <PersonalGroup>[]) {
++    }
++    if (_useOps || (recentEnabled && gFFI.userModel.isLogin)) {
++      for (final g in widget.directory()?.groups ?? <PersonalGroup>[]) {
+         if (g.name.toLowerCase().contains(term))
+           groups['mine/${g.id}'] = g.name;
+       }
+-    } else
++    }
++    if (!_useOps || recentEnabled)
+       for (final e in entries) {
+         final d = e.device;
+         // Group navigation targets the address-book tree, not history-only peers.
+@@ -84,17 +150,18 @@ class _SupportSearchFieldState extends State<_SupportSearchField> {
+         final label =
+             [if (d.groupName.isNotEmpty) d.groupName, merchant].join(' · ');
+         final store = '$merchant/${d.store}';
+-        if (label.toLowerCase().contains(term)) groups[merchant] = label;
++        if (!_useOps && label.toLowerCase().contains(term))
++          groups[merchant] = label;
+         if ('$label ${d.store}'.toLowerCase().contains(term) ||
+             store.toLowerCase().contains(term)) {
+           groups[store] = '$label › ${d.store}';
+         }
+       }
+-    return [
++    _loadHistory();
++    final candidates = <_Choice>[
+       if (RegExp(r'^[0-9 ]+$').hasMatch(q))
+         (key: 'direct', label: q, row: null, scope: null),
+-      for (final e
+-          in entries.where((e) => e.device.matchesSuggestion(q)).take(8))
++      for (final e in entries.where((e) => e.device.matchesSuggestion(q)))
+         (
+           key: 'peer/${e.device.id}',
+           label: e.device.alias.isNotEmpty
+@@ -108,13 +175,43 @@ class _SupportSearchFieldState extends State<_SupportSearchField> {
+       for (final g in groups.entries)
+         (key: 'group/${g.key}', label: g.value, row: null, scope: g.key)
+     ];
++    final byKey = {for (final c in candidates) _identity(c): c};
++    final recent = <_Choice>[];
++    for (final r in history.items) {
++      var c = byKey.remove(r.key);
++      if (r.key.startsWith('direct/')) {
++        final id = r.key.substring(7);
++        if (directSupportId(id) != null &&
++            id.startsWith(q.replaceAll(' ', ''))) {
++          c = (key: r.key, label: id, row: null, scope: null);
++        }
++      }
++      if (c != null) {
++        recent.add(c);
++      } else if (q.isEmpty) {
++        recent.add((
++          key: 'unavailable/${r.key}',
++          label: r.label,
++          row: null,
++          scope: null
++        ));
++      }
++    }
++    if (q.isEmpty) return recent;
++    return [
++      ...recent,
++      ...byKey.values.where(_direct),
++      ...byKey.values.where((c) => c.row != null).take(8),
++      ...byKey.values.where((c) => c.scope != null)
++    ];
+   }
+ 
+   bool _enabled(_Choice c) =>
+-      (c.key != 'direct' || directSupportId(widget.search.text) != null) &&
++      !c.key.startsWith('unavailable/') &&
++      (!_direct(c) || directSupportId(c.label) != null) &&
+       (!_useOps ||
+           widget.directory()?._restricted(c.row?.device.id ??
+-                  directSupportId(widget.search.text) ??
++                  (_direct(c) ? directSupportId(c.label) : null) ??
+                   '') !=
+               true);
+ 
+@@ -122,7 +219,37 @@ class _SupportSearchFieldState extends State<_SupportSearchField> {
+     final dir = widget.directory();
+     if (dir == null) return;
+     final query = widget.search.text;
++    final displayedOwner = owner;
++    _loadHistory();
++    if (item != null && owner != displayedOwner) return;
++    if (item == null && owner.isNotEmpty && query.trim().isNotEmpty) {
++      final entries = dir._entries(searchIndex: true);
++      final id = supportSearchTarget(
++          query,
++          entries
++              .where((e) => e.device.matchesSuggestion(query))
++              .map((e) => e.device.id));
++      if (id != null) {
++        final choices = _choices(entries);
++        item = choices.firstWhereOrNull((c) =>
++            (_direct(c) && directSupportId(c.label) == id) ||
++            c.row?.device.id == id);
++      }
++    }
+     if (item != null && !_enabled(item)) return;
++    if (item != null && owner.isNotEmpty) {
++      final key = _identity(item);
++      final kind = query.trim().isEmpty
++          ? history.items.firstWhereOrNull((r) => r.key == key)?.kind ??
++              _kind(item)
++          : _kind(item);
++      final label = kind == SearchKind.deviceId
++          ? groupedDeviceId(
++              item.row?.device.id ?? item.label.replaceAll(' ', ''))
++          : item.label;
++      history.remember(RecentSearch(key, label, kind));
++      _save();
++    }
+     _close();
+     if (item?.scope != null) {
+       widget.jump(item!.scope!);
+@@ -132,7 +259,8 @@ class _SupportSearchFieldState extends State<_SupportSearchField> {
+       dir._connect(item!.row!);
+       return;
+     }
+-    dir.submit(query, dir._entries(searchIndex: true));
++    dir.submit(item != null && _direct(item) ? item.label : query,
++        dir._entries(searchIndex: true));
+   }
+ 
+   KeyEventResult _key(FocusNode node, KeyEvent event) {
+@@ -254,8 +382,18 @@ class _SupportSearchFieldState extends State<_SupportSearchField> {
+     final items = _choices(entries);
+     final keys = items.map((c) => c.key).toSet();
+     tileKeys.removeWhere((key, _) => !keys.contains(key));
+-    final devices = items.where((c) => c.row != null);
+-    final groups = items.where((c) => c.scope != null);
++    final recents = {for (final r in history.items) r.key: r};
++    String recentKey(_Choice c) =>
++        _identity(c).replaceFirst(RegExp(r'^unavailable/'), '');
++    final recentItems = items.where((c) => recents.containsKey(recentKey(c)));
++    final remaining = items.where((c) => !recents.containsKey(recentKey(c)));
++    final renderedOwner = owner;
++    bool sameOwner() =>
++        renderedOwner.isNotEmpty &&
++        renderedOwner == gFFI.userModel.userName.value;
++    final empty = widget.search.text.trim().isEmpty;
++    final devices = remaining.where((c) => c.row != null);
++    final groups = remaining.where((c) => c.scope != null);
+     Widget heading(String s) => Padding(
+         padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
+         child: Text(translate(s),
+@@ -270,16 +408,52 @@ class _SupportSearchFieldState extends State<_SupportSearchField> {
+                   child: Column(
+                       crossAxisAlignment: CrossAxisAlignment.stretch,
+                       children: [
+-                        for (final c in items.where((c) => c.key == 'direct'))
+-                          _tile(c, dir),
+-                        heading('Devices'),
+-                        for (final c in devices) _tile(c, dir),
+-                        if (devices.isEmpty) heading('No devices'),
+-                        if (signedIn) heading('Merchants and stores'),
+-                        for (final c in groups) _tile(c, dir),
+-                        if (signedIn && groups.isEmpty)
+-                          heading('No matching groups'),
++                        if (recentItems.isNotEmpty || empty)
++                          heading(_recentLabel('Recent searches', '最近搜索',
++                              'Búsquedas recientes')),
++                        for (final c in recentItems)
++                          Row(children: [
++                            Padding(
++                                padding: const EdgeInsets.only(left: 8),
++                                child: Text(
++                                    _typeLabel(recents[recentKey(c)]!.kind),
++                                    style: const TextStyle(fontSize: 11))),
++                            Expanded(
++                                child: _tile(c, dir,
++                                    recent: recents[recentKey(c)])),
++                            IconButton(
++                                tooltip: translate('Remove'),
++                                icon: const Icon(Icons.close, size: 16),
++                                onPressed: () {
++                                  if (!sameOwner()) return;
++                                  setState(() => history.items.removeWhere(
++                                      (r) => r.key == recentKey(c)));
++                                  _save();
++                                }),
++                          ]),
++                        if (empty && recentItems.isEmpty)
++                          heading(_recentLabel('No recent searches', '暂无最近搜索',
++                              'Sin búsquedas recientes')),
++                        if (!empty) ...[
++                          for (final c in remaining.where(_direct))
++                            _tile(c, dir),
++                          heading('Devices'),
++                          for (final c in devices) _tile(c, dir),
++                          if (devices.isEmpty) heading('No devices'),
++                          if (signedIn) heading('Merchants and stores'),
++                          for (final c in groups) _tile(c, dir),
++                          if (signedIn && groups.isEmpty)
++                            heading('No matching groups'),
++                        ],
+                       ]))),
++          if (empty && history.items.isNotEmpty)
++            TextButton(
++                onPressed: () {
++                  if (!sameOwner()) return;
++                  setState(history.items.clear);
++                  _save();
++                },
++                child: Text(_recentLabel('Clear all', '清空', 'Borrar todo'))),
+           const Divider(height: 1),
+           Padding(
+               padding: const EdgeInsets.all(8),
+@@ -290,7 +464,7 @@ class _SupportSearchFieldState extends State<_SupportSearchField> {
+         ]);
+   }
+ 
+-  Widget _tile(_Choice c, _DirectoryState? dir) {
++  Widget _tile(_Choice c, _DirectoryState? dir, {RecentSearch? recent}) {
+     final d = c.row?.device;
+     final prefix = widget.search.text.trim().replaceAll(' ', '');
+     final shownId = groupedDeviceId(d?.id ?? '');
+@@ -308,7 +482,7 @@ class _SupportSearchFieldState extends State<_SupportSearchField> {
+       if (d?.merchant != null) d!.merchant!,
+       if (d?.store != null) d!.store!,
+     ];
+-    final direct = c.key == 'direct' ? directSupportId(c.label) : null;
++    final direct = _direct(c) ? directSupportId(c.label) : null;
+     final key = tileKeys.putIfAbsent(c.key, () => GlobalKey());
+     final tile = Material(
+         key: key,
+@@ -322,7 +496,7 @@ class _SupportSearchFieldState extends State<_SupportSearchField> {
+                     const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+                 child: d == null
+                     ? Text(
+-                        c.key == 'direct'
++                        _direct(c)
+                             ? '${translate("Direct connect ID")} ${direct == null ? c.label : groupedDeviceId(direct)}'
+                             : c.label,
+                         semanticsLabel: direct == null
+@@ -336,7 +510,8 @@ class _SupportSearchFieldState extends State<_SupportSearchField> {
+                                 crossAxisAlignment: CrossAxisAlignment.start,
+                                 children: [
+                               Text(
+-                                  d.alias.isEmpty && d.name.isEmpty
++                                  recent?.kind == SearchKind.deviceId ||
++                                          (d.alias.isEmpty && d.name.isEmpty)
+                                       ? shownId
+                                       : c.label,
+                                   semanticsLabel:
+diff --git a/flutter/test/steaddesk/recent_search_test.dart b/flutter/test/steaddesk/recent_search_test.dart
+new file mode 100644
+index 0000000..1a4d149
+--- /dev/null
++++ b/flutter/test/steaddesk/recent_search_test.dart
+@@ -0,0 +1,33 @@
++import 'package:flutter_test/flutter_test.dart';
++import 'package:flutter_hbb/steaddesk/recent_search.dart';
++
++void main() {
++  test(
++      'last ten distinct selections retain type, label and order after restart',
++      () {
++    final history = RecentSearchHistory('');
++    for (int i = 0; i < 12; i++) {
++      history.remember(RecentSearch('group/$i', 'Store $i', SearchKind.store));
++    }
++    history.remember(
++        const RecentSearch('group/4', 'Renamed store', SearchKind.store));
++    final restored = RecentSearchHistory(history.encode());
++    expect(restored.items.map((r) => r.key),
++        [4, 11, 10, 9, 8, 7, 6, 5, 3, 2].map((i) => 'group/$i'));
++    expect(restored.items.first.label, 'Renamed store');
++    expect(restored.items.first.kind, SearchKind.store);
++    restored.items.removeAt(0);
++    expect(RecentSearchHistory(restored.encode()).items.length, 9);
++    restored.items.clear();
++    expect(RecentSearchHistory(restored.encode()).items, isEmpty);
++  });
++  test('different support accounts use distinct local preference keys', () {
++    expect(RecentSearchHistory.option('a/b'),
++        isNot(RecentSearchHistory.option('a%2Fb')));
++  });
++  test('damaged preferences recover without blocking the search box', () {
++    for (final value in ['corrupt', '{}', '[["a","b","future"]]']) {
++      expect(RecentSearchHistory(value).items, isEmpty);
++    }
++  });
++}
