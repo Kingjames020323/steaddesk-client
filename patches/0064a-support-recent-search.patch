@@ -1,119 +1,3 @@
-diff --git a/flutter/lib/desktop/pages/file_manager_page.dart b/flutter/lib/desktop/pages/file_manager_page.dart
-index 888bf3a..a01be74 100644
---- a/flutter/lib/desktop/pages/file_manager_page.dart
-+++ b/flutter/lib/desktop/pages/file_manager_page.dart
-@@ -22,6 +22,8 @@ import 'package:flutter_hbb/web/dummy.dart'
-     if (dart.library.html) 'package:flutter_hbb/web/web_unique.dart';
- 
- import '../../consts.dart';
-+import '../../steaddesk/windows_volumes.dart';
-+import '../../steaddesk/merchant_build.dart' show merchantEdition;
- import '../../desktop/widgets/material_mod_popup_menu.dart' as mod_menu;
- import '../../common.dart';
- import '../../models/model.dart';
-diff --git a/flutter/lib/steaddesk/file_transfer.dart b/flutter/lib/steaddesk/file_transfer.dart
-index 97079b4..73d176b 100644
---- a/flutter/lib/steaddesk/file_transfer.dart
-+++ b/flutter/lib/steaddesk/file_transfer.dart
-@@ -282,6 +282,24 @@ class _TransferPaneState extends State<_TransferPane> {
-   late final Worker directoryListener;
-   String filter = '';
-   bool searching = false;
-+  bool get showComputer => isWindows && !merchantEdition && c.isLocal;
-+  bool expanded = false;
-+  List<LocalVolume> volumes = [];
-+  int volumeRequest = 0;
-+  static const computerOption = 'file-transfer-this-pc-expanded';
-+
-+  Future<void> _loadVolumes() async {
-+    final request = ++volumeRequest;
-+    final result = await readWindowsVolumes();
-+    if (mounted && volumeRequest == request) setState(() => volumes = result);
-+  }
-+
-+  void _toggleComputer() {
-+    setState(() => expanded = !expanded);
-+    bind.mainSetLocalOption(key: computerOption, value: expanded ? 'Y' : '');
-+    if (expanded) _loadVolumes();
-+  }
-+
-   bool ascending = true;
-   SortBy sort = SortBy.name;
-   String get colsKey =>
-@@ -307,6 +325,10 @@ class _TransferPaneState extends State<_TransferPane> {
-             (parsed.fold<double>(0, (sum, n) => sum + n!) - 1).abs() < .001
-         ? parsed.cast<double>()
-         : [.37, .16, .16, .31];
-+    if (showComputer) {
-+      expanded = bind.mainGetLocalOption(key: computerOption) == 'Y';
-+      if (expanded) _loadVolumes();
-+    }
-     path.text = c.directory.value.path;
-     directoryListener = ever<FileDirectory>(c.directory, (dir) {
-       if (!pathFocus.hasFocus) path.text = dir.path;
-@@ -493,6 +515,30 @@ class _TransferPaneState extends State<_TransferPane> {
-               () => _open(home)
-             ));
-         }
-+        if (showComputer) {
-+          places.add((
-+            expanded ? Icons.expand_more : Icons.chevron_right,
-+            _ftLabel('This PC', '此电脑'),
-+            _toggleComputer
-+          ));
-+          if (expanded) {
-+            for (final volume in volumes) {
-+              final name = volume.label.isEmpty
-+                  ? _ftLabel('Local Disk', '本地磁盘')
-+                  : volume.label;
-+              final letter = volume.root.substring(0, 2);
-+              final bytes = volume.freeBytes;
-+              final space = bytes == null
-+                  ? ''
-+                  : ' · ${readableFileSize(bytes.toDouble())} ${_ftLabel('free', '可用')}';
-+              places.add((
-+                Icons.storage,
-+                '$name ($letter)$space',
-+                () => _open(volume.root)
-+              ));
-+            }
-+          }
-+        }
-         if (places.isEmpty)
-           places.add(
-               (Icons.home_outlined, translate('Home'), c.goToHomeDirectory));
-@@ -512,7 +558,7 @@ class _TransferPaneState extends State<_TransferPane> {
-                     Expanded(
-                         child: Text(label,
-                             overflow: TextOverflow.ellipsis,
--                            maxLines: 1,
-+                            maxLines: showComputer && expanded ? 3 : 1,
-                             style: const TextStyle(fontSize: 12)))
-                   ]),
-                 )),
-@@ -807,7 +853,10 @@ class _TransferPaneState extends State<_TransferPane> {
-                             contentPadding: EdgeInsets.symmetric(
-                                 horizontal: 5, vertical: 6),
-                             border: OutlineInputBorder()))),
--                _tool(Icons.refresh, translate('Refresh File'), c.refresh),
-+                _tool(Icons.refresh, translate('Refresh File'), () {
-+                  c.refresh();
-+                  if (showComputer && expanded) _loadVolumes();
-+                }),
-                 _tool(Icons.create_new_folder_outlined,
-                     translate('Create Folder'), widget.createFolder),
-                 _tool(
-@@ -828,7 +877,9 @@ class _TransferPaneState extends State<_TransferPane> {
-               Expanded(
-                   child: Obx(() => Row(children: [
-                         if (c.fileScope.value == null) ...[
--                          SizedBox(width: 78, child: _places()),
-+                          SizedBox(
-+                              width: showComputer && expanded ? 138 : 78,
-+                              child: _places()),
-                           const VerticalDivider(width: 1, color: _ftLine),
-                         ],
-                         Expanded(child: _table()),
 diff --git a/flutter/lib/steaddesk/recent_search.dart b/flutter/lib/steaddesk/recent_search.dart
 new file mode 100644
 index 0000000..137ef26
@@ -546,68 +430,14 @@ index dfed035..8b84247 100644
                                        ? shownId
                                        : c.label,
                                    semanticsLabel:
-diff --git a/flutter/lib/steaddesk/windows_volumes.dart b/flutter/lib/steaddesk/windows_volumes.dart
-new file mode 100644
-index 0000000..628ce04
---- /dev/null
-+++ b/flutter/lib/steaddesk/windows_volumes.dart
-@@ -0,0 +1,46 @@
-+import 'dart:ffi';
-+import 'dart:isolate';
-+import 'package:ffi/ffi.dart';
-+import 'package:win32/win32.dart';
-+
-+typedef LocalVolume = ({String root, String label, int? freeBytes});
-+
-+Future<List<LocalVolume>> readWindowsVolumes() => Isolate.run(_enumerate);
-+
-+List<LocalVolume> _enumerate() => using((arena) {
-+      final volumes = <LocalVolume>[];
-+      final oldMode = arena<Uint32>();
-+      final changed = SetThreadErrorMode(
-+              THREAD_ERROR_MODE.SEM_FAILCRITICALERRORS, oldMode) !=
-+          0;
-+      try {
-+        final mask = GetLogicalDrives();
-+        final label = arena<Uint16>(261).cast<Utf16>();
-+        final available = arena<Uint64>();
-+        for (int i = 0; i < 26; i++) {
-+          if ((mask & (1 << i)) == 0) continue;
-+          final root = '${String.fromCharCode(65 + i)}:\\';
-+          final path = root.toNativeUtf16(allocator: arena);
-+          final type = GetDriveType(path);
-+          if (type == DRIVE_NO_ROOT_DIR || type == DRIVE_UNKNOWN) continue;
-+          final named = GetVolumeInformation(
-+                  path, label, 261, nullptr, nullptr, nullptr, nullptr, 0) !=
-+              0;
-+          if (!named && type == DRIVE_CDROM) {
-+            final error = GetLastError();
-+            if (error == WIN32_ERROR.ERROR_NOT_READY ||
-+                error == WIN32_ERROR.ERROR_NO_MEDIA_IN_DRIVE) continue;
-+          }
-+          final free =
-+              GetDiskFreeSpaceEx(path, available, nullptr, nullptr) != 0;
-+          volumes.add((
-+            root: root,
-+            label: named ? label.toDartString() : '',
-+            freeBytes: free ? available.value : null
-+          ));
-+        }
-+      } finally {
-+        if (changed) SetThreadErrorMode(oldMode.value, nullptr);
-+      }
-+      return volumes;
-+    });
 diff --git a/flutter/test/steaddesk/recent_search_test.dart b/flutter/test/steaddesk/recent_search_test.dart
 new file mode 100644
-index 0000000..8ef44c2
+index 0000000..1a4d149
 --- /dev/null
 +++ b/flutter/test/steaddesk/recent_search_test.dart
-@@ -0,0 +1,43 @@
-+import 'dart:io';
+@@ -0,0 +1,33 @@
 +import 'package:flutter_test/flutter_test.dart';
 +import 'package:flutter_hbb/steaddesk/recent_search.dart';
-+import 'package:flutter_hbb/steaddesk/windows_volumes.dart';
 +
 +void main() {
 +  test(
@@ -638,12 +468,4 @@ index 0000000..8ef44c2
 +      expect(RecentSearchHistory(value).items, isEmpty);
 +    }
 +  });
-+  test('Windows lists the runner system volume and available bytes', () async {
-+    final system = Platform.environment['SystemDrive']!.toUpperCase();
-+    final drives = await readWindowsVolumes();
-+    expect(drives.map((v) => v.root).toSet().length, drives.length);
-+    final drive = drives.singleWhere((v) => v.root.substring(0, 2) == system);
-+    expect(await Directory(drive.root).exists(), isTrue);
-+    expect(drive.freeBytes, greaterThanOrEqualTo(0));
-+  }, skip: !Platform.isWindows);
 +}
