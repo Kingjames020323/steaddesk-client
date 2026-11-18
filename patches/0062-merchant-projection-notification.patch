@@ -110,3 +110,23 @@
      <string name="merchant_service_running">El servicio se está ejecutando</string>
      <string name="merchant_transfer">Transferir archivo</string>
      <string name="merchant_screen">Compartir pantalla</string>
+--- a/src/lang/cn.rs
++++ b/src/lang/cn.rs
+@@ -122,6 +122,7 @@
+         ("connecting_status", "正在接入 RustDesk 网络..."),
+         ("Enable service", "允许服务"),
+         ("Start service", "启动服务"),
++        ("Screen sharing is off", "屏幕共享未开启"),
+         ("Service is running", "服务正在运行"),
+         ("Service is not running", "服务未运行"),
+         ("not_ready_status", "未就绪，请检查网络连接"),
+--- a/src/lang/es.rs
++++ b/src/lang/es.rs
+@@ -76,6 +76,7 @@
+         ("connecting_status", "Conexión a la red RustDesk en progreso..."),
+         ("Enable service", "Habilitar Servicio"),
+         ("Start service", "Iniciar Servicio"),
++        ("Screen sharing is off", "La pantalla no se está compartiendo"),
+         ("Service is running", "El servicio se está ejecutando"),
+         ("Service is not running", "El servicio no se está ejecutando"),
+         ("not_ready_status", "No está listo. Comprueba tu conexión"),
