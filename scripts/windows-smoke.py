@@ -2,9 +2,6 @@
 
 from ctypes import windll, wintypes
 import os
-import json
-import ipaddress
-import socket
 import re
 import subprocess
 import sys
@@ -97,35 +94,10 @@ def save_evidence(window, name, visible_controls, public_regions=()):
 exe = Path(sys.argv[1]).resolve()
 output = Path(sys.argv[2])
 output.mkdir(parents=True, exist_ok=True)
-support = os.environ.get("STEADDESK_EDITION") == "support"
-product = "SteadDesk Support" if support else "SteadDesk"
-case_fixture = support and os.environ.get("STEADDESK_SMOKE_CASES") == "true"
-if case_fixture:
-    if os.environ.get("GITHUB_ACTIONS") != "true" or any(
-        not ipaddress.ip_address(record[4][0]).is_loopback
-        for host in ("api.steaddesk.com", "relay.steaddesk.com")
-        for record in socket.getaddrinfo(host, None)
-    ):
-        raise RuntimeError("Case fixture requires the isolated Windows runner")
-    # Read-only offline staff identity. The cached profile confers no admin role.
-    roaming = Path(os.environ["APPDATA"])
-    config = roaming / product / "config" / (product + "_local.toml")
-    support_dir = roaming / "Purslane Tech Pte. Ltd" / product
-    config.parent.mkdir(parents=True, exist_ok=True)
-    support_dir.mkdir(parents=True, exist_ok=True)
-    with config.open("x", encoding="utf-8") as file:
-        file.write("""[options]
-access_token = "offline-fixture-only"
-user_info = '{"name":"fixture-staff"}'
-""")
-    at = "2026-01-01T09:00:00Z"
-    row = dict(id="11111111-1111-4111-8111-111111111111", agent="fixture-staff",
-               device_id="765432109", display_name="Fixture printer", note="", appends=[],
-               status="draft", started_at=at, ended_at=at, created_at=at, updated_at=at)
-    with (support_dir / "support-cases-v1.json").open("x", encoding="utf-8") as file:
-        json.dump({"version": 1, "accounts": {"fixture-staff": [row]}}, file)
 subprocess.Popen([str(exe)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 desktop = Desktop(backend="uia")
+support = os.environ.get("STEADDESK_EDITION") == "support"
+product = "SteadDesk Support" if support else "SteadDesk"
 
 
 def application():
@@ -147,21 +119,6 @@ if not support:
     print("PASS merchant incoming-only home", flush=True)
     sys.exit(0)
 
-
-if case_fixture:
-    window.maximize()
-    press(window, "待补结案 1")
-    candidate = wait_for("fixture case", lambda: next(iter(controls(
-        window, lambda text: text.startswith("Fixture printer"))), None))
-    click_control(candidate)
-    fallback = wait_for("offline quick note fallback", lambda: by_name(window, "需要连接 ops"))
-    phrases = [wait_for("default quick note", lambda label=label: by_name(window, label))
-               for label in ("+ 重启打印机", "+ 重新插网线", "+ 换纸卷", "+ 重打订单")]
-    if by_name(window, "编辑常用备注") or by_name(window, "新增常用备注"):
-        raise RuntimeError("Ordinary staff exposed an admin control")
-    save_evidence(window, "quick-notes-offline-staff", [fallback, *phrases])
-    press(window, "稍后补")
-    print("PASS packaged support default quick notes on isolated Windows", flush=True)
 
 # The support home puts the permission switch in the Local ID dialog. Flutter
 # can merge both lines of the button into one UIA name. Never log/capture it.
