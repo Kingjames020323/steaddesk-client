@@ -1,0 +1,136 @@
+--- a/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MainService.kt
++++ b/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MainService.kt
+@@ -260,6 +260,26 @@
+         if (key == MerchantLanguage.OPTION) refreshNotificationLanguage()
+     }
+ 
++    @Suppress("DEPRECATION")
++    private fun backgroundProjectionAllowed(): Boolean {
++        val ops = getSystemService(Context.APP_OPS_SERVICE) as android.app.AppOpsManager
++        return try {
++            ops.checkOpNoThrow("android:project_media", android.os.Process.myUid(), packageName) ==
++                android.app.AppOpsManager.MODE_ALLOWED
++        } catch (_: RuntimeException) {
++            false
++        }
++    }
++
++    private fun serviceStatusText(): String {
++        if (BuildConfig.MERCHANT_EDITION && !isReady) {
++            return MerchantLanguage.text(this, R.string.merchant_screen_sharing_off)
++        }
++        return merchantText(R.string.merchant_service_running) { translate(DEFAULT_NOTIFY_TEXT) }
++    }
++
++    private var notifiedReady: Boolean? = null
++
+     private fun refreshNotificationLanguage() {
+         if (BuildConfig.MERCHANT_EDITION && MerchantLanguage.language(this) != notificationLanguage) {
+             initNotification()
+@@ -408,7 +428,11 @@
+                 replaceMediaProjection(mediaProjectionManager, it)
+             } ?: let {
+                 Log.d(logTag, "getParcelableExtra intent null, invoke requestMediaProjection")
+-                requestMediaProjection()
++                // A background restart must not prompt when the app-op is unset or denied.
++                if (!BuildConfig.MERCHANT_EDITION || !intent.getBooleanExtra(EXT_INIT_FROM_BOOT, false)
++                    || backgroundProjectionAllowed()) {
++                    requestMediaProjection()
++                }
+             }
+         }
+         return START_NOT_STICKY // don't use sticky (auto restart), the new service (from auto restart) will lose control
+@@ -745,6 +769,13 @@
+     }
+ 
+     fun checkMediaPermission(): Boolean {
++        if (BuildConfig.MERCHANT_EDITION) {
++            Handler(Looper.getMainLooper()).post {
++                if (runningInstance === this && ::notificationBuilder.isInitialized && notifiedReady != isReady) {
++                    createForegroundNotification(refreshOnly = true)
++                }
++            }
++        }
+         Handler(Looper.getMainLooper()).post {
+             MainActivity.flutterMethodChannel?.invokeMethod(
+                 "on_state_changed",
+@@ -890,6 +921,7 @@
+         } else {
+             PendingIntent.getActivity(this, 0, intent, FLAG_UPDATE_CURRENT)
+         }
++        notifiedReady = isReady
+         val notification = notificationBuilder
+             .setOngoing(true)
+             .setSmallIcon(R.mipmap.ic_stat_logo)
+@@ -897,7 +929,7 @@
+             .setAutoCancel(true)
+             .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+             .setContentTitle(getString(R.string.app_name))
+-            .setContentText(merchantText(R.string.merchant_service_running) { translate(DEFAULT_NOTIFY_TEXT) })
++            .setContentText(serviceStatusText())
+             .setOnlyAlertOnce(true)
+             .setContentIntent(pendingIntent)
+             .setColor(ContextCompat.getColor(this, R.color.primary))
+@@ -970,6 +1002,7 @@
+         username: String,
+         peerId: String
+     ) {
++        notifiedReady = isReady
+         val notification = notificationBuilder
+             .setOngoing(false)
+             .setPriority(NotificationCompat.PRIORITY_MAX)
+@@ -989,6 +1022,7 @@
+         peerId: String
+     ) {
+         cancelNotification(clientID)
++        notifiedReady = isReady
+         val notification = notificationBuilder
+             .setOngoing(false)
+             .setPriority(NotificationCompat.PRIORITY_MAX)
+@@ -1004,6 +1038,7 @@
+         username: String,
+         peerId: String
+     ) {
++        notifiedReady = isReady
+         val notification = notificationBuilder
+             .setOngoing(false)
+             .setPriority(NotificationCompat.PRIORITY_MAX)
+@@ -1036,7 +1071,7 @@
+ 
+     private fun setTextNotification(_title: String?, _text: String?) {
+         val title = _title ?: getString(R.string.app_name)
+-        val text = _text ?: merchantText(R.string.merchant_service_running) { translate(DEFAULT_NOTIFY_TEXT) }
++        val text = _text ?: serviceStatusText()
+         val notification = notificationBuilder
+             .clearActions()
+             .setStyle(null)
+--- a/flutter/android/app/src/main/res/values/merchant_language.xml
++++ b/flutter/android/app/src/main/res/values/merchant_language.xml
+@@ -2,6 +2,7 @@
+     <string name="steaddesk_input" translatable="false">SteadDesk Input</string>
+     <string name="merchant_channel">SteadDesk service</string>
+     <string name="merchant_channel_description">Notifications about the SteadDesk remote access service</string>
++    <string name="merchant_screen_sharing_off">Screen sharing is off</string>
+     <string name="merchant_service_running">Service is running</string>
+     <string name="merchant_transfer">Transfer file</string>
+     <string name="merchant_screen">Share screen</string>
+--- a/flutter/android/app/src/steaddeskMerchant/res/values-zh/merchant_language.xml
++++ b/flutter/android/app/src/steaddeskMerchant/res/values-zh/merchant_language.xml
+@@ -2,6 +2,7 @@
+     <string name="app_name">SteadDesk</string>
+     <string name="merchant_self_heal">允许 SteadDesk 唤醒配套的 Agent 应用</string>
+     <string name="accessibility_service_description">通过 SteadDesk 共享屏幕后，允许其他设备使用模拟触控操作此设备</string>
++    <string name="merchant_screen_sharing_off">屏幕共享未开启</string>
+     <string name="merchant_service_running">服务正在运行</string>
+     <string name="merchant_transfer">传输文件</string>
+     <string name="merchant_screen">共享屏幕</string>
+--- a/flutter/android/app/src/steaddeskMerchant/res/values-es/merchant_language.xml
++++ b/flutter/android/app/src/steaddeskMerchant/res/values-es/merchant_language.xml
+@@ -2,6 +2,7 @@
+     <string name="app_name">SteadDesk</string>
+     <string name="merchant_self_heal">Permitir que SteadDesk reactive la aplicación Agent asociada</string>
+     <string name="accessibility_service_description">Permite que otros dispositivos controlen este teléfono mediante gestos táctiles simulados cuando se comparte la pantalla con SteadDesk</string>
++    <string name="merchant_screen_sharing_off">La pantalla no se está compartiendo</string>
+     <string name="merchant_service_running">El servicio se está ejecutando</string>
+     <string name="merchant_transfer">Transferir archivo</string>
+     <string name="merchant_screen">Compartir pantalla</string>
