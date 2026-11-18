@@ -20,10 +20,10 @@ public class AppCaller extends Instrumentation {
         try {
             ContentResolver resolver = getTargetContext().getContentResolver();
             String prefix = "content://com.steaddesk.remote.staging/";
-            for (String operation : new String[] {"query", "write"}) {
+            for (String operation : new String[] {"status", "identity", "write"}) {
                 try {
-                    if (operation.equals("query")) {
-                        resolver.query(Uri.parse(prefix + "status"), null, null, null, null);
+                    if (!operation.equals("write")) {
+                        resolver.query(Uri.parse(prefix + operation), null, null, null, null);
                     } else {
                         resolver.openFileDescriptor(Uri.parse(prefix + "permanent-password"), "w");
                     }

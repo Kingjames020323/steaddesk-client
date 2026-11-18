@@ -147,9 +147,33 @@ public class StagingPasswordProvider extends ContentProvider {
         return StagingPasswords.isSet(getContext().getDir("flutter", Context.MODE_PRIVATE).getAbsolutePath());
     }
 
+    String publicIdentity() {
+        return StagingPasswords.identity(getContext().getDir("flutter", Context.MODE_PRIVATE).getAbsolutePath());
+    }
+
+    private Cursor identityCursor() {
+        String value = publicIdentity();
+        if (value == null || !value.matches("[0-9]{9,10}:[A-Za-z0-9+/]{43}="))
+            throw new IllegalStateException("identity unavailable");
+        String[] parts = value.split(":", 2);
+        byte[] key = android.util.Base64.decode(parts[1], android.util.Base64.NO_WRAP);
+        try {
+            byte[] digest = java.security.MessageDigest.getInstance("SHA-256").digest(key);
+            StringBuilder fingerprint = new StringBuilder(64);
+            for (byte b : digest) fingerprint.append(String.format(java.util.Locale.ROOT, "%02x", b));
+            MatrixCursor cursor = new MatrixCursor(new String[]{"device_id", "public_key", "fingerprint"}, 1);
+            cursor.addRow(new String[]{parts[0], parts[1], fingerprint.toString()});
+            return cursor;
+        } catch (java.security.NoSuchAlgorithmException e) {
+            throw new IllegalStateException("digest unavailable");
+        }
+    }
+
     @Override public Cursor query(Uri uri, String[] projection, String selection,
                                   String[] selectionArgs, String sortOrder) {
         requireShell();
+        if (Uri.parse(BASE + "identity").equals(uri) && projection == null &&
+                selection == null && selectionArgs == null && sortOrder == null) return identityCursor();
         if (!STATUS.equals(uri) || selection != null || selectionArgs != null || sortOrder != null ||
                 (projection != null && !(projection.length == 1 && COLUMN.equals(projection[0])))) {
             throw new IllegalArgumentException("endpoint");
