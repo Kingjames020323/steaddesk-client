@@ -803,6 +803,7 @@ jobs:
         edition: [merchant, support]
     env:
       STEADDESK_EDITION: ${{ matrix.edition }}
+      STEADDESK_SMOKE_CASES: ${{ (inputs.steaddesk_cases || (github.ref_type == 'branch' && inputs.steaddesk_ops_integration)) && 'true' || 'false' }}
     needs: windows
     runs-on: windows-2022
     steps:
