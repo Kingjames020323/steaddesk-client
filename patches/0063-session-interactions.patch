@@ -1,0 +1,962 @@
+diff --git a/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/InputService.kt b/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/InputService.kt
+index 7718c91..70f0d34 100644
+--- a/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/InputService.kt
++++ b/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/InputService.kt
+@@ -495,15 +495,20 @@ class InputService : AccessibilityService() {
+         }
+     }
+ 
++    fun requestPowerMenu(count: Int) {
++        if (count !in 1..5) return
++        Handler(Looper.getMainLooper()).post {
++            if (ctx === this && !MerchantRecovery.userPaused(this) && performGlobalAction(GLOBAL_ACTION_POWER_DIALOG)) {
++                android.widget.Toast.makeText(this, R.string.sd_power_menu_opened, android.widget.Toast.LENGTH_SHORT).show()
++            }
++        }
++    }
++
+     private fun tryHandlePowerKeyEvent(event: KeyEventAndroid): Boolean {
+         if (event.keyCode == KeyEventAndroid.KEYCODE_POWER) {
+             // Perform power dialog action when action is up
+             if (event.action == KeyEventAndroid.ACTION_UP) {
+-                if (!MerchantRecovery.userPaused(this) && performGlobalAction(GLOBAL_ACTION_POWER_DIALOG)) {
+-                    android.os.Handler(android.os.Looper.getMainLooper()).post {
+-                        android.widget.Toast.makeText(this, R.string.sd_power_menu_opened, android.widget.Toast.LENGTH_SHORT).show()
+-                    }
+-                }
++                requestPowerMenu(1)
+             }
+             return true
+         }
+diff --git a/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MainService.kt b/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MainService.kt
+index a9aaae2..9820315 100644
+--- a/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MainService.kt
++++ b/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MainService.kt
+@@ -122,6 +122,10 @@ class MainService : Service() {
+     @Keep
+     fun rustSetByName(name: String, arg1: String, arg2: String) {
+         when (name) {
++            "steaddesk_power_menu" -> {
++                val count = arg1.toIntOrNull() ?: return
++                if (count > 0) InputService.ctx?.requestPowerMenu(count.coerceAtMost(5))
++            }
+             "add_connection" -> {
+                 try {
+                     val jsonObject = JSONObject(arg1)
+diff --git a/flutter/lib/desktop/widgets/remote_toolbar.dart b/flutter/lib/desktop/widgets/remote_toolbar.dart
+index 035305c..74cd9e7 100644
+--- a/flutter/lib/desktop/widgets/remote_toolbar.dart
++++ b/flutter/lib/desktop/widgets/remote_toolbar.dart
+@@ -31,10 +31,11 @@ import 'package:flutter_hbb/common/widgets/custom_scale_base.dart';
+ import '../../steaddesk/dialogs.dart' show steadUsesChinese;
+ import '../../steaddesk/history_host_api.dart';
+ import '../../steaddesk/quality_badge.dart';
+-import '../../steaddesk/merchant_build.dart' show casesEnabled, opsHealthEnabled, supportPowerMenuEnabled;
++import '../../steaddesk/merchant_build.dart' show casesEnabled, opsHealthEnabled, merchantEdition, supportPowerMenuEnabled;
+ import '../../steaddesk/ops_health_host.dart';
+ import '../../steaddesk/power_menu.dart';
+-import '../../steaddesk/ops_health.dart' show OpsHealthHttp;
++import '../../steaddesk/session_rail.dart';
++import '../../steaddesk/ops_health.dart' show OpsHealthHttp, HealthFailure;
+ import '../../steaddesk/toolbar/actions.dart' show toolbarSessionRoute;
+ import 'package:flutter_hbb/steaddesk/toolbar_api.dart';
+ 
+diff --git a/flutter/lib/steaddesk/cases/history_host.dart b/flutter/lib/steaddesk/cases/history_host.dart
+index 899bb5d..157f563 100644
+--- a/flutter/lib/steaddesk/cases/history_host.dart
++++ b/flutter/lib/steaddesk/cases/history_host.dart
+@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
+ import 'package:flutter/services.dart';
+ import 'package:window_manager/window_manager.dart';
+ 
++import '../../common.dart' show translate;
+ import 'case_session.dart';
+ import 'history_ui.dart';
+ 
+@@ -201,6 +202,7 @@ class _CaseHistoryHostState extends State<CaseHistoryHost> with WindowListener {
+           ? FocusScope(
+               node: drawerFocus,
+               child: CaseHistoryDrawer(
++                  translate: translate,
+                   key: ValueKey(id),
+                   data: data,
+                   onClose: _close,
+diff --git a/flutter/lib/steaddesk/cases/history_ui.dart b/flutter/lib/steaddesk/cases/history_ui.dart
+index c1cb44d..8367ca6 100644
+--- a/flutter/lib/steaddesk/cases/history_ui.dart
++++ b/flutter/lib/steaddesk/cases/history_ui.dart
+@@ -132,15 +132,19 @@ class _CaseHistorySidebarState extends State<CaseHistorySidebar> {
+ }
+ 
+ /// Mount beside the session sidebar, above the existing remote canvas in its Stack.
++String _english(String key) => key;
++
+ class CaseHistoryDrawer extends StatefulWidget {
+   const CaseHistoryDrawer(
+       {super.key,
+       required this.data,
+       required this.onClose,
+       required this.onEditDevice,
++      this.translate = _english,
+       required this.onAppend,
+       this.clock});
+   final Map<String, dynamic> data;
++  final String Function(String) translate;
+   final VoidCallback onClose, onEditDevice;
+   final Future<void> Function(String scope, String id, String text) onAppend;
+   final DateTime Function()? clock;
+@@ -273,6 +277,7 @@ class _CaseHistoryDrawerState extends State<CaseHistoryDrawer> {
+                 return _Entry(
+                     key: ValueKey('$scope/${row['id']}'),
+                     row: row,
++                    translate: widget.translate,
+                     showDevice: scope == 'store',
+                     onAppend: (text) =>
+                         widget.onAppend(scope, row['id'], text));
+@@ -342,9 +347,11 @@ class _Entry extends StatefulWidget {
+   const _Entry(
+       {super.key,
+       required this.row,
++      required this.translate,
+       required this.showDevice,
+       required this.onAppend});
+   final Map row;
++  final String Function(String) translate;
+   final bool showDevice;
+   final Future<void> Function(String text) onAppend;
+   @override
+@@ -353,7 +360,7 @@ class _Entry extends StatefulWidget {
+ 
+ class _EntryState extends State<_Entry> {
+   final addition = TextEditingController();
+-  bool writing = false, saving = false;
++  bool writing = false, saving = false, expanded = false;
+   String? error;
+   @override
+   void dispose() {
+@@ -408,18 +415,25 @@ class _EntryState extends State<_Entry> {
+             if (widget.showDevice)
+               Text(row['display_name'] ?? row['device_id'], style: _caption),
+             const SizedBox(height: 6),
+-            Wrap(spacing: 10, children: [
+-              Text(caseCategoryLabels[row['category']] ?? '未填写', style: _label),
+-              Text(caseResultLabels[result] ?? '未填写',
+-                  style: _text.copyWith(color: resultColor))
+-            ]),
+-            if (note.isNotEmpty)
+-              Padding(
+-                  padding: const EdgeInsets.only(top: 4),
+-                  child: Text(note,
+-                      maxLines: 2,
+-                      overflow: TextOverflow.ellipsis,
+-                      style: _text)),
++            LayoutBuilder(builder: (context, bounds) {
++              final heading = TextSpan(style: _text, children: [
++                TextSpan(text: caseCategoryLabels[row['category']] ?? '未填写', style: _label),
++                const TextSpan(text: ' · '),
++                TextSpan(text: caseResultLabels[result] ?? '未填写', style: _text.copyWith(color: resultColor)),
++                if (note.trim().isNotEmpty) TextSpan(text: ' · $note'),
++              ]);
++              final painter = TextPainter(text: heading, textDirection: Directionality.of(context),
++                  textScaler: MediaQuery.textScalerOf(context), maxLines: 1, ellipsis: '…')
++                ..layout(maxWidth: bounds.maxWidth);
++              final toggle = note.trim().isNotEmpty && painter.didExceedMaxLines;
++              painter.dispose();
++              return Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
++                Expanded(child: Text.rich(heading, maxLines: expanded || !toggle ? null : 1,
++                    overflow: expanded || !toggle ? TextOverflow.visible : TextOverflow.ellipsis)),
++                if (toggle) TextButton(style: _linkStyle, onPressed: () => setState(() => expanded = !expanded),
++                  child: Text(widget.translate(expanded ? 'Collapse note' : 'Expand note'))),
++              ]);
++            }),
+             for (final append in row['appends'] ?? const [])
+               Container(
+                   margin: const EdgeInsets.only(top: 6),
+diff --git a/flutter/lib/steaddesk/power_menu.dart b/flutter/lib/steaddesk/power_menu.dart
+index 56e7576..5cd50f9 100644
+--- a/flutter/lib/steaddesk/power_menu.dart
++++ b/flutter/lib/steaddesk/power_menu.dart
+@@ -1,53 +1,117 @@
++import 'dart:async';
+ import 'package:flutter/material.dart';
+ 
+-class PowerMenuButton extends StatelessWidget {
++const powerBurstDelay = Duration(milliseconds: 600);
++const powerNoticeDuration = Duration(milliseconds: 1500);
++
++class PowerMenuButton extends StatefulWidget {
+   const PowerMenuButton(
+       {super.key,
+       required this.visible,
+       required this.enabled,
+       required this.activeConnection,
+-      required this.send});
++      required this.send,
++      required this.tooltip});
+   final bool visible, enabled;
++  final String tooltip;
+   final String Function() activeConnection;
+-  final Future<void> Function(String connection) send;
+-
+-  @override
+-  Widget build(BuildContext context) {
+-    if (!visible) return const SizedBox.shrink();
+-    return Expanded(
+-        child: IconButton(
+-      tooltip: '电源菜单',
+-      padding: EdgeInsets.zero,
+-      constraints: const BoxConstraints(),
+-      iconSize: 18,
+-      color: const Color(0xff0a6fa8),
+-      icon: const FittedBox(child: Icon(Icons.power_settings_new)),
+-      onPressed: !enabled
+-          ? null
+-          : () async {
+-              final connection = activeConnection();
+-              if (connection.isEmpty || connection == '0') return;
+-              final confirmed = await showDialog<bool>(
+-                context: context,
+-                builder: (dialog) => AlertDialog(
+-                  title: const Text('电源菜单'),
+-                  content: const Text('将在对方屏幕上打开电源菜单，菜单里有关机和重启'),
+-                  actions: [
+-                    TextButton(
+-                        onPressed: () => Navigator.pop(dialog, false),
+-                        child: const Text('取消')),
+-                    TextButton(
+-                        onPressed: () => Navigator.pop(dialog, true),
+-                        child: const Text('打开')),
+-                  ],
+-                ),
+-              );
+-              if (confirmed == true &&
+-                  context.mounted &&
+-                  activeConnection() == connection) {
+-                await send(connection);
+-              }
+-            },
+-    ));
++  final Future<void> Function(String connection, int count) send;
++  @override
++  State<PowerMenuButton> createState() => _PowerMenuButtonState();
++}
++
++class _PowerMenuButtonState extends State<PowerMenuButton> {
++  Timer? timer;
++  String connection = '';
++  int count = 0;
++  void cancel() {
++    timer?.cancel();
++    count = 0;
++    connection = '';
++  }
++
++  void press() {
++    final active = widget.activeConnection();
++    if (active.isEmpty || active == '0') {
++      cancel();
++      return;
++    }
++    if (connection != active) cancel();
++    connection = active;
++    if (count < 5) count++;
++    timer?.cancel();
++    timer = Timer(powerBurstDelay, () {
++      final n = count;
++      cancel();
++      if (widget.visible &&
++          widget.enabled &&
++          widget.activeConnection() == active) {
++        unawaited(widget.send(active, n));
++      }
++    });
++  }
++
++  @override
++  void didUpdateWidget(PowerMenuButton old) {
++    super.didUpdateWidget(old);
++    if (!widget.visible || !widget.enabled) cancel();
++  }
++
++  @override
++  void dispose() {
++    cancel();
++    super.dispose();
++  }
++
++  @override
++  Widget build(BuildContext context) => !widget.visible
++      ? const SizedBox.shrink()
++      : Expanded(
++          child: IconButton(
++              tooltip: widget.tooltip,
++              padding: EdgeInsets.zero,
++              constraints: const BoxConstraints(),
++              iconSize: 18,
++              color: const Color(0xff0a6fa8),
++              icon: const FittedBox(child: Icon(Icons.power_settings_new)),
++              onPressed: widget.enabled ? press : null));
++}
++
++class PowerNotice extends StatefulWidget {
++  const PowerNotice(this.text, {super.key, required this.onDismiss});
++  final VoidCallback onDismiss;
++  final String text;
++  @override
++  State<PowerNotice> createState() => _PowerNoticeState();
++}
++
++class _PowerNoticeState extends State<PowerNotice> {
++  late final Timer timer;
++  @override
++  void initState() {
++    super.initState();
++    timer = Timer(powerNoticeDuration, () => widget.onDismiss());
++  }
++
++  @override
++  void dispose() {
++    timer.cancel();
++    super.dispose();
+   }
++
++  @override
++  Widget build(BuildContext context) => IgnorePointer(
++      child: ExcludeFocus(
++          child: Align(
++              alignment: Alignment.topCenter,
++              child: Padding(
++                  padding: const EdgeInsets.all(10),
++                  child: Material(
++                      color: const Color(0xff173849),
++                      borderRadius: BorderRadius.circular(6),
++                      child: Padding(
++                          padding: const EdgeInsets.all(8),
++                          child: Text(widget.text,
++                              style:
++                                  const TextStyle(color: Colors.white))))))));
+ }
+diff --git a/flutter/lib/steaddesk/session_rail.dart b/flutter/lib/steaddesk/session_rail.dart
+new file mode 100644
+index 0000000..d3cac59
+--- /dev/null
++++ b/flutter/lib/steaddesk/session_rail.dart
+@@ -0,0 +1,96 @@
++import 'dart:async';
++
++import 'package:flutter/material.dart';
++
++/// Keeps the canvas at its collapsed width throughout a hover preview.
++class SessionRail extends StatefulWidget {
++  const SessionRail(
++      {super.key,
++      required this.pinned,
++      required this.collapsedWidth,
++      required this.expandedWidth,
++      required this.panel,
++      required this.canvas});
++  final bool pinned;
++  final double collapsedWidth, expandedWidth;
++  final Widget Function(bool expanded) panel;
++  final Widget canvas;
++
++  @override
++  State<SessionRail> createState() => _SessionRailState();
++}
++
++class _SessionRailState extends State<SessionRail> {
++  Timer? timer;
++  bool hovering = false, inside = false, editing = false;
++
++  final scope = FocusScopeNode();
++
++  @override
++  void initState() {
++    super.initState();
++    FocusManager.instance.addListener(handleFocus);
++  }
++
++  void handleFocus() {
++    final active = FocusManager.instance.primaryFocus;
++    final next = scope.hasFocus &&
++        active?.context?.findAncestorStateOfType<EditableTextState>() != null;
++    if (editing == next) return;
++    editing = next;
++    scheduleCollapse();
++  }
++
++  void scheduleCollapse() {
++    timer?.cancel();
++    if (inside || editing || widget.pinned || !hovering) return;
++    timer = Timer(const Duration(milliseconds: 1500), () {
++      if (mounted) setState(() => hovering = false);
++    });
++  }
++
++  @override
++  void didUpdateWidget(SessionRail old) {
++    super.didUpdateWidget(old);
++    if (old.pinned != widget.pinned ||
++        old.collapsedWidth != widget.collapsedWidth) {
++      timer?.cancel();
++      hovering = false;
++    }
++  }
++
++  @override
++  void dispose() {
++    timer?.cancel();
++    FocusManager.instance.removeListener(handleFocus);
++    scope.dispose();
++    super.dispose();
++  }
++
++  @override
++  Widget build(BuildContext context) {
++    final expanded = widget.pinned || hovering;
++    return Stack(fit: StackFit.expand, children: [
++      Positioned.fill(
++          left: widget.pinned ? widget.expandedWidth : widget.collapsedWidth,
++          child: widget.canvas),
++      Positioned(
++          top: 0,
++          left: 0,
++          bottom: 0,
++          width: expanded ? widget.expandedWidth : widget.collapsedWidth,
++          child: MouseRegion(
++              onEnter: (_) {
++                inside = true;
++                timer?.cancel();
++                if (!widget.pinned && !hovering)
++                  setState(() => hovering = true);
++              },
++              onExit: (_) {
++                inside = false;
++                scheduleCollapse();
++              },
++              child: FocusScope(node: scope, child: widget.panel(expanded)))),
++    ]);
++  }
++}
+diff --git a/flutter/lib/steaddesk/session_surface.dart b/flutter/lib/steaddesk/session_surface.dart
+index ad06082..42ea102 100644
+--- a/flutter/lib/steaddesk/session_surface.dart
++++ b/flutter/lib/steaddesk/session_surface.dart
+@@ -41,6 +41,21 @@ class SessionSurface extends StatefulWidget {
+ class _SessionSurfaceState extends State<SessionSurface> {
+   static const panelKey = 'steaddesk-session-panel';
+   late _PanelMode panel;
++  String? powerNotice, noticeConnection;
++  int noticeSerial = 0;
++  void showPowerReceipt(int count) {
++    final message = count == 1 ? translate('Opened the remote power menu') :
++        '${translate("Power key sent")} ×$count · ${translate("Remote repeated presses are unsupported on this device")}';
++
++    setState(() {
++      noticeConnection = bind.sessionGetConnSessionId(sessionId: widget.ffi.sessionId);
++      noticeSerial++;
++      powerNotice = message;
++      powerHistory.insert(0, '${TimeOfDay.now().format(context)} · ${translate("Power menu")} ×$count');
++      if (powerHistory.length > 10) powerHistory.removeLast();
++    });
++  }
++
+   final powerHistory = <String>[];
+   @override
+   void initState() {
+@@ -83,14 +98,18 @@ class _SessionSurfaceState extends State<SessionSurface> {
+                                 RoundedRectangleBorder(
+                                     borderRadius: BorderRadius.circular(6))))),
+                     child: _SessionHeader(session: widget, toolbar: toolbar))),
+-            Expanded(
+-                child: Row(children: [
+-              if (widget.ready || recovering || history != null)
+-                IgnorePointer(
+-                    ignoring: grabbed,
+-                    child: _DevicePanel(
+-                        ffi: ffi, mode: panel, change: changePanel, history: history, actions: powerHistory.isEmpty ? actions : Column(children: [if (actions != null) actions, ...powerHistory.map((line) => Text(line))]))),
+-              Expanded(child: LayoutBuilder(builder: (context, bounds) {
++            Expanded(child: Builder(builder: (context) {
++              final hasPanel = widget.ready || recovering || history != null;
++              final useHover = isWindows && !merchantEdition;
++              Widget devicePanel(_PanelMode mode, {bool preview = false}) =>
++                  IgnorePointer(ignoring: grabbed, child: _DevicePanel(
++                    ffi: ffi, mode: mode,
++                    pinPreview: preview,
++                    change: changePanel, history: history,
++                    actions: powerHistory.isEmpty ? actions : Column(children: [
++                      if (actions != null) actions,
++                      ...powerHistory.map((line) => Text(line))])));
++              final canvas = LayoutBuilder(builder: (context, bounds) {
+                 final barHeight =
+                     android ? math.min(36.0, bounds.maxHeight / 3) : 0.0;
+                 return Stack(fit: StackFit.expand, children: [
+@@ -118,11 +137,10 @@ class _SessionSurfaceState extends State<SessionSurface> {
+                               height: barHeight,
+                               child: IgnorePointer(
+                                   ignoring: grabbed,
+-                                  child: _AndroidKeys(ffi: ffi, sent: () => setState(() {
+-                                    powerHistory.insert(0, '${TimeOfDay.now().format(context)} 已发送电源菜单请求');
+-                                    if (powerHistory.length > 10) powerHistory.removeLast();
+-                                  }))));
++                                  child: _AndroidKeys(ffi: ffi, sent: showPowerReceipt)));
+                         }),
++                  if (powerNotice != null && android && noticeConnection == bind.sessionGetConnSessionId(sessionId: ffi.sessionId)) PowerNotice(powerNotice!, key: ValueKey(noticeSerial),
++                      onDismiss: () => setState(() => powerNotice = null)),
+                   if (recovering)
+                     Positioned.fill(
+                         left: drawer == null ? 0 : math.min(420.0, bounds.maxWidth * .55),
+@@ -134,8 +152,16 @@ class _SessionSurfaceState extends State<SessionSurface> {
+                             : math.min(420.0, bounds.maxWidth),
+                         child: drawer),
+                 ]);
+-              })),
+-            ]))
++              });
++              if (!hasPanel) return canvas;
++              if (!useHover) return Row(children: [devicePanel(panel), Expanded(child: canvas)]);
++              final pinned = panel == _PanelMode.expanded;
++              return SessionRail(pinned: pinned,
++                expandedWidth: math.min(history == null ? 194.0 : 252.0, MediaQuery.sizeOf(context).width * .25) + 20,
++                collapsedWidth: panel == _PanelMode.hidden ? 18 : 64,
++                panel: (expanded) => devicePanel(expanded ? _PanelMode.expanded : panel,
++                    preview: expanded && !pinned), canvas: canvas);
++            }))
+           ]));
+     });
+     Widget withToolbar(Widget? history, Widget? drawer) {
+@@ -490,7 +516,7 @@ class _RecordingTimeState extends State<_RecordingTime> {
+ }
+ 
+ // The peer receives its ordinary input event even when ops is unavailable.
+-Future<void> _recordPowerRequest(String peer, String session, String connection) async {
++Future<void> _recordPowerRequest(String peer, String session, String connection, int count) async {
+   OpsHealthHttp? api;
+   try {
+     final token = bind.mainGetLocalOption(key: 'access_token');
+@@ -500,7 +526,14 @@ Future<void> _recordPowerRequest(String peer, String session, String connection)
+     final path = toolbarSessionRoute(peer: peer, session: session,
+         connection: connection, cases: false, caseId: null);
+     api = OpsHealthHttp(origin, token);
+-    await api.request('POST', '$path/power-menu-requested', {});
++    final route = '$path/power-menu-requested';
++    try {
++      await api.request('POST', route, {'count': count});
++    } on HealthFailure catch (error) {
++      // sd.5 rejects unknown receipt fields before writing the audit entry.
++      if (error.status != 400) rethrow;
++      await api.request('POST', route, {});
++    }
+   } catch (_) {
+     // Audit delivery is best effort. Do not retry or replay the input event.
+   } finally {
+@@ -510,7 +543,7 @@ Future<void> _recordPowerRequest(String peer, String session, String connection)
+ 
+ class _AndroidKeys extends StatelessWidget {
+   final FFI ffi;
+-  final VoidCallback sent;
++  final ValueChanged<int> sent;
+   const _AndroidKeys({required this.ffi, required this.sent});
+   @override
+   Widget build(BuildContext context) {
+@@ -538,19 +571,25 @@ class _AndroidKeys extends StatelessWidget {
+               input.onMobileVolumeDown),
+           key('Volume up', Icons.volume_up_outlined, input.onMobileVolumeUp),
+           PowerMenuButton(
+-              visible: supportPowerMenuEnabled && model.isPeerAndroid,
++              visible: isWindows && supportPowerMenuEnabled && model.isPeerAndroid,
++              tooltip: translate('Power menu'),
+               enabled: enabled,
+               activeConnection: () {
+                 if (!model.isPeerAndroid || !model.keyboard || model.viewOnly ||
+                     model.reconnectInputLocked) return '';
+                 return bind.sessionGetConnSessionId(sessionId: ffi.sessionId);
+               },
+-              send: (connection) async {
++              send: (connection, count) async {
+                 final peer = input.id;
+                 final session = ffi.sessionId.toString();
+-                await input.onMobilePower();
+-                if (context.mounted) sent();
+-                unawaited(_recordPowerRequest(peer, session, connection));
++                if (model.pi.platformAdditions['steaddesk_counted_power_menu'] == true) {
++                  await bind.sessionRequestPowerMenu(sessionId: ffi.sessionId, count: count);
++                } else {
++                  // Previous merchants support one menu through the established transport.
++                  await input.onMobilePower();
++                }
++                if (context.mounted && bind.sessionGetConnSessionId(sessionId: ffi.sessionId) == connection) sent(count);
++                unawaited(_recordPowerRequest(peer, session, connection, count));
+               }),
+         ]));
+   }
+@@ -561,9 +600,10 @@ class _DevicePanel extends StatelessWidget {
+   final _PanelMode mode;
+   final Widget? history;
+   final Widget? actions;
++  final bool pinPreview;
+   final ValueChanged<_PanelMode> change;
+   const _DevicePanel(
+-      {required this.ffi, required this.mode, required this.change, this.history, this.actions});
++      {required this.ffi, required this.mode, required this.change, this.pinPreview = false, this.history, this.actions});
+ 
+   Future<void> menu(BuildContext context, Offset point) async {
+     final box = Overlay.of(context).context.findRenderObject() as RenderBox;
+@@ -694,11 +734,11 @@ class _DevicePanel extends StatelessWidget {
+                                                         FontWeight.w600))),
+                                         IconButton(
+                                             tooltip:
+-                                                translate('Collapse panel'),
++                                                translate(pinPreview ? 'Pin panel' : 'Collapse panel'),
+                                             icon:
+                                                 const Icon(Icons.chevron_left),
+                                             onPressed: () =>
+-                                                change(_PanelMode.compact))
++                                                change(pinPreview ? _PanelMode.expanded : _PanelMode.compact))
+                                       ]),
+                                       const Divider(height: 1),
+                                       if (pi.platform.isNotEmpty)
+diff --git a/flutter/test/steaddesk/history_ui_test.dart b/flutter/test/steaddesk/history_ui_test.dart
+index 3301017..f077d2b 100644
+--- a/flutter/test/steaddesk/history_ui_test.dart
++++ b/flutter/test/steaddesk/history_ui_test.dart
+@@ -265,7 +265,14 @@ void main() {
+     await t.tap(find.text('复制处理步骤').first);
+     await t.pump();
+     expect(copied, _longNote);
+-    expect(t.widget<Text>(find.text(_longNote).first).maxLines, 2);
++    final inline = find.textContaining('打印机 · 已解决 · $_longNote');
++    expect(t.widget<Text>(inline.first).maxLines, 1);
++    await t.tap(find.text('Expand note').first);
++    await t.pump();
++    expect(t.widget<Text>(inline.first).maxLines, isNull);
++    await t.tap(find.text('Collapse note').first);
++    await t.pump();
++    expect(t.widget<Text>(inline.first).maxLines, 1);
+     await t.tap(find.text('本门店'));
+     await t.pumpAndSettle();
+     expect(find.text('示例后厨平板'), findsOneWidget);
+@@ -287,11 +294,11 @@ void main() {
+       ['store', 'sample-1', '追加复核']
+     ]);
+     expect(find.textContaining('追加复核'), findsOneWidget);
+-    expect(find.text('刷新后厨测试菜单后恢复。'), findsOneWidget);
++    expect(find.textContaining('刷新后厨测试菜单后恢复。'), findsOneWidget);
+     await t.tap(find.text('只看未解决'));
+     await t.pumpAndSettle();
+     expect(find.text('示例后厨平板'), findsNothing);
+-    expect(find.text('未解决'), findsOneWidget);
++    expect(find.textContaining('打印机 · 未解决 · $_longNote'), findsOneWidget);
+     await t.pumpWidget(const SizedBox());
+   });
+ 
+diff --git a/flutter/test/steaddesk/power_menu_test.dart b/flutter/test/steaddesk/power_menu_test.dart
+new file mode 100644
+index 0000000..2c096be
+--- /dev/null
++++ b/flutter/test/steaddesk/power_menu_test.dart
+@@ -0,0 +1,70 @@
++import 'package:flutter/material.dart';
++import 'package:flutter_test/flutter_test.dart';
++import 'package:flutter_hbb/steaddesk/power_menu.dart';
++
++void main() {
++  testWidgets(
++      'burst waits after the last tap and keeps the original connection',
++      (t) async {
++    var connection = 'first';
++    final sent = <int>[];
++    Widget screen(bool android) => MaterialApp(
++            home: Scaffold(
++                body: Row(children: [
++          PowerMenuButton(
++              visible: android,
++              enabled: true,
++              tooltip: 'Power menu',
++              activeConnection: () => connection,
++              send: (_, count) async => sent.add(count))
++        ])));
++    final button = find.byTooltip('Power menu');
++    await t.pumpWidget(screen(false));
++    expect(button, findsNothing);
++    await t.pumpWidget(screen(true));
++    await t.tap(button);
++    await t.pump(const Duration(milliseconds: 599));
++    expect(sent, isEmpty);
++    await t.pump(const Duration(milliseconds: 1));
++    expect(sent, [1]);
++    await t.tap(button);
++    await t.pump(const Duration(milliseconds: 550));
++    await t.tap(button);
++    await t.pump(const Duration(milliseconds: 599));
++    expect(sent, [1]);
++    await t.pump(const Duration(milliseconds: 1));
++    expect(sent, [1, 2]);
++    for (var i = 0; i < 7; i++) {
++      await t.tap(button);
++    }
++    await t.pump(powerBurstDelay);
++    expect(sent, [1, 2, 5]);
++    await t.tap(button);
++    connection = 'replacement';
++    await t.pump(powerBurstDelay);
++    expect(sent, [1, 2, 5]);
++    await t.tap(button);
++    await t.pumpWidget(screen(false));
++    await t.pump(powerBurstDelay);
++    expect(sent, [1, 2, 5]);
++  });
++
++  testWidgets('power notice passes clicks through to the canvas', (t) async {
++    var taps = 0;
++    var shown = true;
++    await t.pumpWidget(MaterialApp(
++        home: StatefulBuilder(
++            builder: (_, update) => Stack(fit: StackFit.expand, children: [
++                  GestureDetector(
++                      behavior: HitTestBehavior.opaque, onTap: () => taps++),
++                  if (shown)
++                    PowerNotice('Sent',
++                        onDismiss: () => update(() => shown = false)),
++                ]))));
++    await t.pump(const Duration(milliseconds: 1499));
++    await t.tapAt(t.getCenter(find.text('Sent')));
++    await t.pump(const Duration(milliseconds: 1));
++    expect(find.text('Sent'), findsNothing);
++    expect(taps, 1);
++  });
++}
+diff --git a/flutter/test/steaddesk/session_rail_test.dart b/flutter/test/steaddesk/session_rail_test.dart
+new file mode 100644
+index 0000000..b69eafd
+--- /dev/null
++++ b/flutter/test/steaddesk/session_rail_test.dart
+@@ -0,0 +1,65 @@
++import 'package:flutter/gestures.dart';
++import 'package:flutter/material.dart';
++import 'package:flutter_test/flutter_test.dart';
++import 'package:flutter_hbb/steaddesk/session_rail.dart';
++
++void main() {
++  testWidgets(
++      'hover floats above canvas, re-entry cancels close, focus keeps notes open',
++      (t) async {
++    const canvasKey = Key('canvas');
++    bool pinned = false;
++    await t.pumpWidget(MaterialApp(
++        home: Scaffold(
++            body: StatefulBuilder(
++                builder: (context, state) => SessionRail(
++                    pinned: pinned,
++                    collapsedWidth: 44,
++                    expandedWidth: 240,
++                    panel: (expanded) => Column(children: [
++                          IconButton(
++                              icon: Icon(expanded
++                                  ? Icons.chevron_left
++                                  : Icons.chevron_right),
++                              onPressed: () => state(() => pinned = !pinned)),
++                          if (expanded) const TextField(),
++                        ]),
++                    canvas: GestureDetector(
++                        key: canvasKey,
++                        behavior: HitTestBehavior.opaque,
++                        onTap: () =>
++                            FocusManager.instance.primaryFocus?.unfocus()))))));
++    final canvas = find.byKey(canvasKey);
++    final before = t.getRect(canvas);
++    final mouse = await t.createGesture(kind: PointerDeviceKind.mouse);
++    await mouse.addPointer(location: const Offset(500, 120));
++    await mouse.moveTo(const Offset(20, 20));
++    await t.pump();
++    expect(t.getRect(canvas), before);
++    expect(find.byType(TextField), findsOneWidget);
++    await mouse.moveTo(const Offset(400, 20));
++    await t.pump(const Duration(milliseconds: 1400));
++    await mouse.moveTo(const Offset(100, 40));
++    await t.pump();
++    await t.pump(const Duration(milliseconds: 200));
++    expect(find.byType(TextField), findsOneWidget);
++    await t.tap(find.byType(TextField));
++    await t.pump();
++    await mouse.moveTo(const Offset(500, 20));
++    await t.pump(const Duration(seconds: 2));
++    expect(find.byType(TextField), findsOneWidget);
++    await t.tapAt(const Offset(500, 120));
++    await t.pump();
++    await t.pump(const Duration(milliseconds: 1500));
++    expect(find.byType(TextField), findsNothing);
++    await mouse.moveTo(const Offset(20, 20));
++    await t.pump();
++    await t.tap(find.byIcon(Icons.chevron_left));
++    await t.pump();
++    expect(t.getRect(canvas).left, 240);
++    await mouse.moveTo(const Offset(500, 20));
++    await t.pump(const Duration(seconds: 2));
++    expect(find.byType(TextField), findsOneWidget);
++    await mouse.removePointer();
++  });
++}
+diff --git a/flutter/test/steaddesk_power_menu_test.dart b/flutter/test/steaddesk_power_menu_test.dart
+deleted file mode 100644
+index 924529c..0000000
+--- a/flutter/test/steaddesk_power_menu_test.dart
++++ /dev/null
+@@ -1,38 +0,0 @@
+-import 'package:flutter/material.dart';
+-import 'package:flutter_test/flutter_test.dart';
+-import 'package:flutter_hbb/steaddesk/power_menu.dart';
+-
+-void main() {
+-  testWidgets('only a confirmed request for the same connection is sent',
+-      (tester) async {
+-    var connection = 'first';
+-    final sent = <String>[];
+-    Widget screen(bool android) => MaterialApp(
+-            home: Scaffold(
+-                body: Row(children: [
+-          PowerMenuButton(
+-              visible: android,
+-              enabled: true,
+-              activeConnection: () => connection,
+-              send: (id) async {
+-                sent.add(id);
+-              }),
+-        ])));
+-    await tester.pumpWidget(screen(false));
+-    expect(find.byTooltip('电源菜单'), findsNothing);
+-    await tester.pumpWidget(screen(true));
+-    Future<void> choose(String label, {String? changeTo}) async {
+-      await tester.tap(find.byTooltip('电源菜单'));
+-      await tester.pumpAndSettle();
+-      if (changeTo != null) connection = changeTo;
+-      await tester.tap(find.text(label));
+-      await tester.pumpAndSettle();
+-    }
+-
+-    await choose('取消');
+-    await choose('打开', changeTo: 'second');
+-    expect(sent, isEmpty);
+-    await choose('打开');
+-    expect(sent, ['second']);
+-  });
+-}
+diff --git a/libs/base/protos/message.proto b/libs/base/protos/message.proto
+index 991e8a3..97fae61 100644
+--- a/libs/base/protos/message.proto
++++ b/libs/base/protos/message.proto
+@@ -867,6 +867,8 @@ message Misc {
+     // is rebuilt, and held again, the next time it is shown, before any connection names it
+     // by id again, so the shape just selected is always there to give.
+     uint64 request_cursor_data = 39;
++    // SteadDesk merchant fallback opens one menu for the entire click burst.
++    uint32 steaddesk_power_menu_count = 14001;
+   }
+ }
+ 
+diff --git a/src/flutter_ffi.rs b/src/flutter_ffi.rs
+index 6a38995..adb4f80 100644
+--- a/src/flutter_ffi.rs
++++ b/src/flutter_ffi.rs
+@@ -358,6 +358,12 @@ pub fn session_reconnect(session_id: SessionID, force_relay: bool) {
+     session_on_waiting_for_image_dialog_show(session_id);
+ }
+ 
++pub fn session_request_power_menu(session_id: SessionID, count: u32) {
++    if let Some(session) = sessions::get_session_by_session_id(&session_id) {
++        session.request_power_menu(count);
++    }
++}
++
+ pub fn session_toggle_option(session_id: SessionID, value: String) {
+     if let Some(session) = sessions::get_session_by_session_id(&session_id) {
+         log::warn!("toggle option {}", &value);
+diff --git a/src/lang/cn.rs b/src/lang/cn.rs
+index 2c16d6a..b2119f4 100644
+--- a/src/lang/cn.rs
++++ b/src/lang/cn.rs
+@@ -1,6 +1,12 @@
+ lazy_static::lazy_static! {
+ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
+     [
++        ("Pin panel", "固定展开"),
++        ("Opened the remote power menu", "已打开对方的电源菜单"),
++        ("Power key sent", "已发送电源键"),
++        ("Remote repeated presses are unsupported on this device", "这台设备不支持远程连按"),
++        ("Expand note", "展开"),
++        ("Collapse note", "收起"),
+         ("Support opened the power menu", "客服打开了电源菜单"),
+         ("zero one two three four five six seven eight nine", "零 一 二 三 四 五 六 七 八 九"),
+         ("Contact name", "联系人姓名"),
+diff --git a/src/lang/es.rs b/src/lang/es.rs
+index 0624388..f9a6c33 100644
+--- a/src/lang/es.rs
++++ b/src/lang/es.rs
+@@ -1,6 +1,13 @@
+ lazy_static::lazy_static! {
+ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
+     [
++        ("Power menu", "Menú de encendido"),
++        ("Pin panel", "Fijar panel"),
++        ("Opened the remote power menu", "Se abrió el menú de encendido remoto"),
++        ("Power key sent", "Pulsaciones enviadas"),
++        ("Remote repeated presses are unsupported on this device", "Este dispositivo no admite pulsaciones remotas sucesivas"),
++        ("Expand note", "Expandir"),
++        ("Collapse note", "Contraer"),
+         ("Support opened the power menu", "Soporte abrió el menú de encendido"),
+         ("zero one two three four five six seven eight nine", "cero uno dos tres cuatro cinco seis siete ocho nueve"),
+         ("Contact name", "Nombre de contacto"),
+diff --git a/src/server/connection.rs b/src/server/connection.rs
+index 9480b25..6adf1a4 100644
+--- a/src/server/connection.rs
++++ b/src/server/connection.rs
+@@ -2055,6 +2055,10 @@ impl Connection {
+         {
+             pi.hostname = DEVICE_NAME.lock().unwrap().clone();
+             pi.platform = "Android".into();
++            #[cfg(steaddesk_merchant)]
++            if self.is_remote() {
++                pi.platform_additions = json!({"steaddesk_counted_power_menu": true}).to_string();
++            }
+             if self.file_transfer.is_some() && !hbb_common::config::SUPPORT_EDITION {
+                 let scope = crate::common::android_scope();
+                 let mut locations = json!({
+@@ -3971,6 +3975,19 @@ impl Connection {
+                     _ => {}
+                 },
+                 Some(message::Union::Misc(misc)) => match misc.union {
++                    #[cfg(all(target_os = "android", steaddesk_merchant))]
++                    Some(misc::Union::SteaddeskPowerMenuCount(count)) => {
++                        if count > 0 && self.authed_conn_type() == Some(AuthConnType::Remote)
++                            && self.peer_keyboard_enabled()
++                        {
++                            let value = count.min(5).to_string();
++                            if let Err(error) = scrap::android::call_main_service_set_by_name(
++                                "steaddesk_power_menu", Some(&value), None,
++                            ) {
++                                log::debug!("power menu unavailable: {}", error);
++                            }
++                        }
++                    }
+                     Some(misc::Union::SwitchDisplay(s)) => {
+                         self.handle_switch_display(s).await;
+                     }
+diff --git a/src/ui_session_interface.rs b/src/ui_session_interface.rs
+index 7bc91aa..a1d3789 100644
+--- a/src/ui_session_interface.rs
++++ b/src/ui_session_interface.rs
+@@ -400,6 +400,14 @@ impl<T: InvokeUiSession> Session<T> {
+         }
+     }
+ 
++    pub fn request_power_menu(&self, count: u32) {
++        let mut misc = Misc::new();
++        misc.set_steaddesk_power_menu_count(count.clamp(1, 5));
++        let mut message = Message::new();
++        message.set_misc(misc);
++        self.send(Data::Message(message));
++    }
++
+     pub fn toggle_privacy_mode(&self, impl_key: String, on: bool) {
+         let mut misc = Misc::new();
+         misc.set_toggle_privacy_mode(TogglePrivacyMode {
