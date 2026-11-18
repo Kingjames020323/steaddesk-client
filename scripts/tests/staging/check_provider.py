@@ -76,6 +76,9 @@ def wait_for_file(path):
 def checks():
     switch_adbd(False)
     expect_status(False)
+    assert shell("content", "query", "--uri", STATUS.rsplit("/", 1)[0] + "/identity").strip() == (
+        "Row: 0 device_id=123456789, public_key=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=, "
+        "fingerprint=66687aadf862bd776c8fc18b8e9f8e20089714856ee233b3902a591d0d5f2925")
     denied = shell("am", "instrument", "-w", INSTRUMENT)
     assert "INSTRUMENTATION_CODE: -1" in denied and "failure=" not in denied, denied
     print("PASS ordinary application UID rejected by both provider entry points", flush=True)

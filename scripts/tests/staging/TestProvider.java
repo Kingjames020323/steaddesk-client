@@ -8,6 +8,8 @@ import java.util.Arrays;
 
 /** Replace only the native settings call. Record a fixture label and count, never the bytes. */
 public class TestProvider extends StagingPasswordProvider {
+    @Override String publicIdentity() { return "123456789:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="; }
+
     private File file(String name) {
         return new File(getContext().getFilesDir(), name);
     }

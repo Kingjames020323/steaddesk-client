@@ -1,0 +1,43 @@
+--- a/libs/hbb_common/src/config.rs
++++ b/libs/hbb_common/src/config.rs
+@@ -1173,6 +1173,16 @@
+         config.key_pair
+     }
+ 
++    /// Return the locally configured identity without exporting the secret half.
++    pub fn staging_public_identity() -> Option<(String, Vec<u8>)> {
++        let cfg = CONFIG.read().ok()?;
++        if !(9..=10).contains(&cfg.id.len()) || !cfg.id.bytes().all(|c| c.is_ascii_digit())
++            || cfg.key_pair.1.len() != 32 {
++            return None;
++        }
++        Some((cfg.id.clone(), cfg.key_pair.1.clone()))
++    }
++
+     pub fn get_cached_pk() -> Option<Vec<u8>> {
+         KEY_PAIR.lock().unwrap().clone().map(|k| k.1)
+     }
+--- a/src/flutter_ffi.rs
++++ b/src/flutter_ffi.rs
+@@ -3024,6 +3024,21 @@
+     }
+ 
+     #[no_mangle]
++    pub extern "system" fn Java_com_steaddesk_remote_staging_StagingPasswords_identity(
++        mut env: JNIEnv, _class: JClass, dir: JString,
++    ) -> jni::sys::jstring {
++        use hbb_common::base64::{engine::general_purpose::STANDARD, Engine};
++        if prepare(&mut env, &dir) {
++            if let Some((id, public)) = config::Config::staging_public_identity() {
++                if let Ok(s) = env.new_string(format!("{}:{}", id, STANDARD.encode(public))) {
++                    return s.into_raw();
++                }
++            }
++        }
++        std::ptr::null_mut()
++    }
++
++    #[no_mangle]
+     pub extern "system" fn Java_com_steaddesk_remote_staging_StagingPasswords_isSet(
+         mut env: JNIEnv,
+         _class: JClass,
