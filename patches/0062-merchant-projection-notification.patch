@@ -1,20 +1,9 @@
 --- a/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MainService.kt
 +++ b/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MainService.kt
-@@ -260,6 +260,26 @@
+@@ -260,6 +260,15 @@
          if (key == MerchantLanguage.OPTION) refreshNotificationLanguage()
      }
  
-+    @Suppress("DEPRECATION")
-+    private fun backgroundProjectionAllowed(): Boolean {
-+        val ops = getSystemService(Context.APP_OPS_SERVICE) as android.app.AppOpsManager
-+        return try {
-+            ops.checkOpNoThrow("android:project_media", android.os.Process.myUid(), packageName) ==
-+                android.app.AppOpsManager.MODE_ALLOWED
-+        } catch (_: RuntimeException) {
-+            false
-+        }
-+    }
-+
 +    private fun serviceStatusText(): String {
 +        if (BuildConfig.MERCHANT_EDITION && !isReady) {
 +            return MerchantLanguage.text(this, R.string.merchant_screen_sharing_off)
@@ -27,19 +16,6 @@
      private fun refreshNotificationLanguage() {
          if (BuildConfig.MERCHANT_EDITION && MerchantLanguage.language(this) != notificationLanguage) {
              initNotification()
-@@ -408,7 +428,11 @@
-                 replaceMediaProjection(mediaProjectionManager, it)
-             } ?: let {
-                 Log.d(logTag, "getParcelableExtra intent null, invoke requestMediaProjection")
--                requestMediaProjection()
-+                // A background restart must not prompt when the app-op is unset or denied.
-+                if (!BuildConfig.MERCHANT_EDITION || !intent.getBooleanExtra(EXT_INIT_FROM_BOOT, false)
-+                    || backgroundProjectionAllowed()) {
-+                    requestMediaProjection()
-+                }
-             }
-         }
-         return START_NOT_STICKY // don't use sticky (auto restart), the new service (from auto restart) will lose control
 @@ -745,6 +769,13 @@
      }
  
