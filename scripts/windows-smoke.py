@@ -14,7 +14,7 @@ from windows_profile import PresetLabels
 from PIL import Image, ImageStat
 from pywinauto import Desktop
 from pywinauto.keyboard import send_keys
-from pywinauto.mouse import click
+from pywinauto.mouse import click, move
 
 
 def wait_for(description, probe, timeout=35):
@@ -105,6 +105,10 @@ if recent_fixture:
     config.parent.mkdir(parents=True, exist_ok=True)
     account = "offline-smoke"
     history = [["direct/765432109", "765 432 109", "deviceId"]]
+    directory_fixture = os.environ.get("STEADDESK_OPS_GROUPS", "").lower() not in ("true","1")
+    if directory_fixture:
+        from windows_directory_fixture import seed
+        seed(account, product)
     with config.open("x", encoding="utf-8") as handle:
         handle.write("[options]\n")
         for key, value in {
@@ -169,6 +173,64 @@ send_keys("^a{BACKSPACE}")
 main_labels = {"Devices", "Device", "Status", "Model", "Actions", "SUNMI", "Windows"}
 save_evidence(window, "main", controls(window, main_labels.__contains__))
 print("PASS support directory, numeric search and incoming permission dialog", flush=True)
+
+def fixture_row(online):
+    tail = "one" if online else "two"
+    grouped = "987 654 32" + ("1" if online else "2")
+    candidates = controls(window, lambda v: "nine eight seven six five four three two " + tail in v or grouped in v)
+    return candidates[0] if candidates else None
+
+
+def row_point(online):
+    row = wait_for("synthetic device row", lambda: fixture_row(online))
+    return row.rectangle().mid_point()
+
+
+def capture_directory(name, extra=()):
+    # The header strip (local device ID) and bottom status are excluded. This
+    # block contains only the synthetic directory and, when opened, its card.
+    row = wait_for("directory fixture", lambda: fixture_row(True))
+    frame = window.rectangle()
+    top = wait_for("Device heading", lambda: by_name(window, "Status")).rectangle().top
+    bottom = min(frame.height() - 48, max(top - frame.top + 130, row.rectangle().bottom - frame.top + 90))
+    region = (8, top - frame.top, frame.width() - 8, bottom)
+    save_evidence(window, name, [row, *extra], [region])
+
+
+if recent_fixture and directory_fixture:
+    window.maximize()
+    wait_for("synthetic online report", lambda: by_name(window, "Online") if
+             len(controls(window, lambda name: name == "Online" or "\nOnline" in name)) > 1 else None)
+    frame = window.rectangle()
+    move(coords=(frame.left+10, frame.top+10))
+    capture_directory("directory-default")
+    for online, expected_action, filename in ((True, "Connect", "online"), (False, "Details", "offline")):
+        point = row_point(online)
+        move(coords=(point.x, point.y))
+        action = wait_for("hover " + expected_action, lambda: by_name(window, expected_action))
+        capture_directory("directory-hover-" + filename, [action])
+    move(coords=(frame.left+10, frame.top+10))
+    # Tab to a row; traverse using only keyboard input. The selected row
+    # exposes its own action button even when the mouse is parked outside.
+    for _ in range(80):
+        send_keys("{TAB}")
+        if by_name(window, "Connect") or by_name(window, "Details"):
+            break
+    else:
+        raise RuntimeError("No device row acquired keyboard focus")
+    if by_name(window, "Details"):
+        send_keys("{UP}")
+    wait_for("keyboard online action", lambda: by_name(window, "Connect"))
+    send_keys("{DOWN}")
+    selected = wait_for("keyboard offline action", lambda: by_name(window, "Details"))
+    capture_directory("directory-keyboard-selected", [selected])
+    # Restore the window, then set a narrow logical width without DPI assumptions.
+    window.restore()
+    scale = windll.user32.GetDpiForWindow(wintypes.HWND(window.handle)) / 96
+    windll.user32.SetWindowPos(window.handle, 0, 0, 0, round(980*scale), round(660*scale), 0x16)
+    wait_for("model hidden at narrow width", lambda: True if by_name(window, "Model") is None else None)
+    capture_directory("directory-narrow")
+    window.maximize()
 
 settings = by_name(window, "Settings")
 if settings:

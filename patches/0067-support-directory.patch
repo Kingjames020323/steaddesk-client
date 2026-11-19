@@ -55,10 +55,10 @@ index 417405b..45efea9 100644
  
 diff --git a/flutter/lib/steaddesk/directory_row.dart b/flutter/lib/steaddesk/directory_row.dart
 new file mode 100644
-index 0000000..37b33aa
+index 0000000..78dd8e2
 --- /dev/null
 +++ b/flutter/lib/steaddesk/directory_row.dart
-@@ -0,0 +1,173 @@
+@@ -0,0 +1,183 @@
 +import 'package:flutter/material.dart';
 +import 'package:flutter/services.dart';
 +import 'device_id_widgets.dart';
@@ -107,7 +107,17 @@ index 0000000..37b33aa
 +  State<DirectoryRow> createState() => _DirectoryRowState();
 +}
 +
++class _DirectoryFocusNode extends FocusNode {}
++
 +class _DirectoryRowState extends State<DirectoryRow> {
++  final node = _DirectoryFocusNode();
++
++  @override
++  void dispose() {
++    node.dispose();
++    super.dispose();
++  }
++
 +  bool hovered = false, focused = false;
 +
 +  KeyEventResult _key(FocusNode node, KeyEvent event) {
@@ -121,7 +131,7 @@ index 0000000..37b33aa
 +      final list = Scrollable.maybeOf(context);
 +      final rows = node.enclosingScope!.traversalDescendants
 +          .where((candidate) =>
-+              candidate.debugLabel == 'support-device-row' &&
++              candidate is _DirectoryFocusNode &&
 +              candidate.context != null &&
 +              Scrollable.maybeOf(candidate.context!) == list)
 +          .toList()
@@ -172,7 +182,7 @@ index 0000000..37b33aa
 +    // J26 will supply confirmed operator presence. Online state alone cannot
 +    // establish that another operator is controlling this device.
 +    return Focus(
-+        debugLabel: 'support-device-row',
++        focusNode: node,
 +        onFocusChange: (v) => setState(() => focused = v),
 +        onKeyEvent: _key,
 +        child: MouseRegion(
@@ -366,10 +376,10 @@ index 57b8f99..df7abbf 100644
      });
 diff --git a/flutter/test/steaddesk/directory_row_test.dart b/flutter/test/steaddesk/directory_row_test.dart
 new file mode 100644
-index 0000000..0fbabbd
+index 0000000..5f63d5b
 --- /dev/null
 +++ b/flutter/test/steaddesk/directory_row_test.dart
-@@ -0,0 +1,139 @@
+@@ -0,0 +1,137 @@
 +import 'dart:io';
 +import 'dart:ui' as ui;
 +import 'package:flutter/gestures.dart';
@@ -483,11 +493,9 @@ index 0000000..0fbabbd
 +    expect(action, 'details 987654322');
 +    await mouse.moveTo(Offset.zero);
 +    await t.pumpAndSettle();
-+    final firstRow = t.element(find.byType(DirectoryRow).first);
-+    final firstFocus = FocusScope.of(firstRow)
-+        .traversalDescendants
-+        .firstWhere((n) => n.debugLabel == 'support-device-row');
-+    firstFocus.requestFocus();
++    final firstRow = find.byType(DirectoryRow).first;
++    final focus = t.widget<Focus>(find.descendant(of: firstRow, matching: find.byType(Focus)).first);
++    focus.focusNode!.requestFocus();
 +    await t.pumpAndSettle();
 +    await t.sendKeyEvent(LogicalKeyboardKey.arrowDown);
 +    await t.pumpAndSettle();
