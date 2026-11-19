@@ -2723,11 +2723,12 @@ index 675581c..2636cbf 100644
      await emit('established', 0, 'two');
 diff --git a/flutter/test/steaddesk/remote_role_test.dart b/flutter/test/steaddesk/remote_role_test.dart
 new file mode 100644
-index 0000000..fb103c3
+index 0000000..9d91685
 --- /dev/null
 +++ b/flutter/test/steaddesk/remote_role_test.dart
-@@ -0,0 +1,526 @@
+@@ -0,0 +1,530 @@
 +import 'dart:async';
++import 'dart:convert';
 +
 +import 'dart:io';
 +
@@ -3058,14 +3059,18 @@ index 0000000..fb103c3
 +    final http = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
 +    final origin = Uri.parse('http://127.0.0.1:${http.port}');
 +    final a = OpsHealthHttp(origin, 'test'), b = OpsHealthHttp(origin, 'test');
-+    final responses = <HttpResponse>[];
++    final responses = <Completer<String>>[];
 +    http.listen((r) async {
++      final nextEvent = Completer<String>();
++      responses.add(nextEvent);
 +      final response = r.response;
-+      responses.add(response);
 +      response.bufferOutput = false;
 +      response.headers.contentType = ContentType('text', 'event-stream');
-+      response.write(': online\n\n');
-+      await response.flush();
++      Stream<List<int>> frames() async* {
++        yield utf8.encode(': online\n\n');
++        yield utf8.encode(await nextEvent.future);
++      }
++      await response.addStream(frames());
 +    });
 +    final helloA = Completer<void>(),
 +        helloB = Completer<void>(),
@@ -3082,8 +3087,7 @@ index 0000000..fb103c3
 +    expect(responses, hasLength(1));
 +    await one.cancel();
 +    a.close();
-+    responses.single.write('event: remote.session.changed\ndata: {}\n\n');
-+    await responses.single.flush();
++    responses.single.complete('event: remote.session.changed\ndata: {}\n\n');
 +    await published.future.timeout(const Duration(seconds: 2));
 +    await two.cancel();
 +    b.close();
@@ -3255,11 +3259,12 @@ index 0000000..fb103c3
 +}
 diff --git a/flutter/test/steaddesk/role_event_relay_test.dart b/flutter/test/steaddesk/role_event_relay_test.dart
 new file mode 100644
-index 0000000..69f5d5b
+index 0000000..b29f415
 --- /dev/null
 +++ b/flutter/test/steaddesk/role_event_relay_test.dart
-@@ -0,0 +1,83 @@
+@@ -0,0 +1,88 @@
 +import 'dart:async';
++import 'dart:convert';
 +import 'dart:io';
 +import 'package:flutter_test/flutter_test.dart';
 +import 'package:flutter_hbb/steaddesk/ops_health.dart';
@@ -3271,13 +3276,18 @@ index 0000000..69f5d5b
 +      () async {
 +    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
 +    final uri = Uri.parse('http://127.0.0.1:${server.port}');
-+    final responses = <HttpResponse>[];
++    final responses = <Completer<String>>[];
 +    server.listen((req) async {
-+      responses.add(req.response);
-+      req.response.bufferOutput = false;
-+      req.response.headers.contentType = ContentType('text', 'event-stream');
-+      req.response.write(': stream\n\n');
-+      await req.response.flush();
++      final nextEvent = Completer<String>();
++      responses.add(nextEvent);
++      final response = req.response;
++      response.bufferOutput = false;
++      response.headers.contentType = ContentType('text', 'event-stream');
++      Stream<List<int>> frames() async* {
++        yield utf8.encode(': stream\n\n');
++        yield utf8.encode(await nextEvent.future);
++      }
++      await response.addStream(frames());
 +    });
 +    final first = Completer<void>(),
 +        second = Completer<void>(),
@@ -3309,8 +3319,7 @@ index 0000000..69f5d5b
 +      expect(await host.handle(1, 'close', params), 'ok');
 +      expect(await host.handle(1, 'renew', params), 'gone');
 +      expect(await host.handle(2, 'renew', params), 'ok');
-+      responses.single.write('event: remote.session.changed\ndata: {}\n\n');
-+      await responses.single.flush();
++      responses.single.complete('event: remote.session.changed\ndata: {}\n\n');
 +      await changed.future.timeout(const Duration(seconds: 3));
 +      expect(await host.handle(3, 'open', {...params, 'identity': 'wrong'}),
 +          'denied');
