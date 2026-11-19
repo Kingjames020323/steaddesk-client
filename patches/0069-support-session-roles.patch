@@ -1,0 +1,3763 @@
+diff --git a/flutter/lib/common.dart b/flutter/lib/common.dart
+index 2f8bf82..020ccdb 100644
+--- a/flutter/lib/common.dart
++++ b/flutter/lib/common.dart
+@@ -1,4 +1,7 @@
+ import 'steaddesk/device_id.dart';
++import 'steaddesk/remote_role.dart' show RemoteJoinCancelled;
++import 'steaddesk/role_binding.dart';
++import 'steaddesk/role_launch.dart';
+ import 'dart:async';
+ import 'dart:convert';
+ import 'dart:math';
+@@ -2267,11 +2270,12 @@ bool handleUriLink({List<String>? cmdArgs, Uri? uri, String? uriString}) {
+     switch (type) {
+       case UriLinkType.remoteDesktop:
+         Future.delayed(Duration.zero, () {
+-          rustDeskWinManager.newRemoteDesktop(id!,
++          connectMainDesktop(id!,
++              context: globalKey.currentContext ?? Get.context,
++              isFileTransfer: false, isViewCamera: false, isTcpTunneling: false,
++              isTerminal: false, isRDP: false, password: password,
+               metricSeed: SupportMetrics.begin(id, clicked: false),
+-              password: password,
+-              switchUuid: switchUuid,
+-              forceRelay: forceRelay);
++              switchUuid: switchUuid, forceRelay: forceRelay);
+         });
+         break;
+       case UriLinkType.fileTransfer:
+@@ -2446,14 +2450,18 @@ List<String>? urlLinkToCmdArgs(Uri uri) {
+   return null;
+ }
+ 
++final _remoteLaunch = RemoteLaunchGate();
++
+ connectMainDesktop(String id,
+-    {required bool isFileTransfer,
++    {required BuildContext? context,
++    required bool isFileTransfer,
+     required bool isViewCamera,
+     required bool isTerminal,
+     required bool isTcpTunneling,
+     required bool isRDP,
+     Map<String, dynamic>? metricSeed,
+     String? helpAttempt,
++    String? switchUuid,
+     bool? forceRelay,
+     String? password,
+     String? connToken,
+@@ -2483,12 +2491,30 @@ connectMainDesktop(String id,
+         connToken: connToken,
+         forceRelay: forceRelay);
+   } else {
+-    await rustDeskWinManager.newRemoteDesktop(id,
++    Future<void> open(Map<String, dynamic>? roleSeed) async {
++      await rustDeskWinManager.newRemoteDesktop(id,
++        roleSeed: roleSeed,
++        switchUuid: switchUuid,
+         metricSeed: metricSeed,
+         helpAttempt: helpAttempt,
+         password: password,
+         isSharedPassword: isSharedPassword,
+         forceRelay: forceRelay);
++    }
++
++    if (isWindows && !merchantEdition) {
++      try {
++        await _remoteLaunch.run(id,
++            activateExisting: () => rustDeskWinManager.activateExistingRemoteTab(id, helpAttempt),
++            prepare: () => RoleBinding.prepare(context, id), open: open);
++      } on RemoteJoinCancelled {
++        return;
++      } catch (_) {
++        showToast('无法核对远程会话，请稍后再试。');
++      }
++    } else {
++      await open(null);
++    }
+   }
+ }
+ 
+@@ -2537,6 +2563,7 @@ connect(BuildContext context, String id,
+     if (desktopType == DesktopType.main) {
+       await connectMainDesktop(
+         id,
++        context: context,
+         metricSeed: metricSeed,
+         helpAttempt: helpAttempt,
+         isFileTransfer: isFileTransfer,
+diff --git a/flutter/lib/common/widgets/dialog.dart b/flutter/lib/common/widgets/dialog.dart
+index e761dc5..cc830bd 100644
+--- a/flutter/lib/common/widgets/dialog.dart
++++ b/flutter/lib/common/widgets/dialog.dart
+@@ -1157,7 +1157,7 @@ void showWaitUacDialog(
+ 
+ // Another username && password dialog?
+ void showRequestElevationDialog(
+-    SessionID sessionId, OverlayDialogManager dialogManager) {
++    SessionID sessionId, OverlayDialogManager dialogManager, {bool Function()? canOperate}) {
+   RxString groupValue = ''.obs;
+   RxString errUser = ''.obs;
+   RxString errPwd = ''.obs;
+@@ -1284,6 +1284,7 @@ void showRequestElevationDialog(
+   dialogManager.show(tag: '$sessionId-request-elevation',
+       (setState, close, context) {
+     void submit() {
++      if (canOperate?.call() == false) { close(); return; }
+       if (groupValue.value == 'logon') {
+         if (userController.text.isEmpty) {
+           errUser.value = translate('Empty Username');
+@@ -1400,7 +1401,7 @@ void showWaitAcceptDialog(SessionID sessionId, String type, String title,
+ }
+ 
+ void showRestartRemoteDevice(PeerInfo pi, String id, SessionID sessionId,
+-    OverlayDialogManager dialogManager) async {
++    OverlayDialogManager dialogManager, {bool Function()? canOperate}) async {
+   final res = await dialogManager
+       .show<bool>((setState, close, context) => CustomAlertDialog(
+             title: Row(children: [
+@@ -1427,7 +1428,7 @@ void showRestartRemoteDevice(PeerInfo pi, String id, SessionID sessionId,
+             onCancel: close,
+             onSubmit: () => close(true),
+           ));
+-  if (res == true) bind.sessionRestartRemoteDevice(sessionId: sessionId);
++  if (res == true && canOperate?.call() != false) bind.sessionRestartRemoteDevice(sessionId: sessionId);
+ }
+ 
+ showSetOSPassword(
+diff --git a/flutter/lib/common/widgets/toolbar.dart b/flutter/lib/common/widgets/toolbar.dart
+index 61d4960..0f64929 100644
+--- a/flutter/lib/common/widgets/toolbar.dart
++++ b/flutter/lib/common/widgets/toolbar.dart
+@@ -352,7 +352,7 @@ List<TTextMenu> toolbarControls(BuildContext context, String id, FFI ffi) {
+       TTextMenu(
+           child: Text(translate('Request Elevation')),
+           onPressed: () =>
+-              showRequestElevationDialog(sessionId, ffi.dialogManager)),
++              showRequestElevationDialog(sessionId, ffi.dialogManager, canOperate: () => ffi.remoteRole?.viewOnly != true)),
+     );
+   }
+   // osPassword
+@@ -387,7 +387,7 @@ List<TTextMenu> toolbarControls(BuildContext context, String id, FFI ffi) {
+         onPressed: () async {
+           Future<void> sendClipboardKeystrokes() async {
+             ClipboardData? data = await Clipboard.getData(Clipboard.kTextPlain);
+-            if (data != null && data.text != null) {
++            if (ffi.remoteRole?.viewOnly != true && data != null && data.text != null) {
+               bind.sessionInputString(
+                   sessionId: sessionId, value: data.text ?? "");
+             }
+@@ -455,6 +455,7 @@ List<TTextMenu> toolbarControls(BuildContext context, String id, FFI ffi) {
+       bool isViewCamera = false,
+       bool isTcpTunneling = false,
+       bool isTerminal = false}) {
++    if (ffi.remoteRole?.viewOnly == true) return;
+     final connToken = bind.sessionGetConnToken(sessionId: ffi.sessionId);
+     connect(context, id,
+         isFileTransfer: isFileTransfer,
+@@ -535,7 +536,7 @@ List<TTextMenu> toolbarControls(BuildContext context, String id, FFI ffi) {
+       TTextMenu(
+           child: Text(translate('Restart remote device')),
+           onPressed: () =>
+-              showRestartRemoteDevice(pi, id, sessionId, ffi.dialogManager)),
++              showRestartRemoteDevice(pi, id, sessionId, ffi.dialogManager, canOperate: () => ffi.remoteRole?.viewOnly != true)),
+     );
+   }
+   // insertLock
+@@ -647,6 +648,20 @@ List<TTextMenu> toolbarControls(BuildContext context, String id, FFI ffi) {
+       onPressed: () => onCopyFingerprint(FingerprintState.find(id).value),
+     ));
+   }
++  if (ffi.remoteRole != null) {
++    return v.map((entry) {
++      if (entry.divider || entry.action == SessionAction.screenshot) return entry;
++      final callback = entry.onPressed;
++      final blocked = ffi.remoteRole?.viewOnly == true;
++      return TTextMenu(
++          action: entry.action,
++          child: blocked ? Tooltip(message: '只看模式', child: entry.child) : entry.child,
++          trailingIcon: blocked ? null : entry.trailingIcon,
++          onPressed: blocked || callback == null ? null : () {
++            if (ffi.remoteRole?.viewOnly != true) callback();
++          });
++    }).toList();
++  }
+   return v;
+ }
+ 
+diff --git a/flutter/lib/desktop/pages/desktop_home_page.dart b/flutter/lib/desktop/pages/desktop_home_page.dart
+index 87b21bd..62b2398 100644
+--- a/flutter/lib/desktop/pages/desktop_home_page.dart
++++ b/flutter/lib/desktop/pages/desktop_home_page.dart
+@@ -1,3 +1,5 @@
++import '../../steaddesk/role_binding.dart';
++import '../../steaddesk/role_event_relay.dart';
+ import 'dart:async';
+ import 'dart:io';
+ import 'dart:convert';
+@@ -786,6 +788,11 @@ class _DesktopHomePageState extends State<DesktopHomePage>
+     }
+ 
+     rustDeskWinManager.setMethodHandler((call, fromWindowId) async {
++      if (call.method == roleFeedMethod) {
++        if (!rustDeskWinManager.remoteCaseWindowIds.contains(fromWindowId)) return 'gone';
++        final message = call.arguments as Map;
++        return RoleBinding.host.handle(fromWindowId, message['action'] as String, message);
++      }
+       // Handle case events before the upstream debug logger (may contain notes).
+       if (casesEnabled && call.method == 'steaddesk.case.lifecycle') {
+         return await CaseSession.route(call.arguments as String, caseEnded);
+@@ -838,6 +845,7 @@ class _DesktopHomePageState extends State<DesktopHomePage>
+       } else if (call.method == kWindowConnect) {
+         await connectMainDesktop(
+           call.arguments['id'],
++          context: globalKey.currentContext ?? Get.context,
+           isFileTransfer: call.arguments['isFileTransfer'],
+           isViewCamera: call.arguments['isViewCamera'],
+           isTerminal: call.arguments['isTerminal'],
+diff --git a/flutter/lib/desktop/pages/remote_page.dart b/flutter/lib/desktop/pages/remote_page.dart
+index 854be93..03d752b 100644
+--- a/flutter/lib/desktop/pages/remote_page.dart
++++ b/flutter/lib/desktop/pages/remote_page.dart
+@@ -43,6 +43,7 @@ class RemotePage extends StatefulWidget {
+     required this.toolbarState,
+     this.sessionId,
+     this.metricSeed,
++    this.roleSeed,
+     this.helpAttempt,
+     this.tabWindowId,
+     this.password,
+@@ -59,6 +60,7 @@ class RemotePage extends StatefulWidget {
+   final String id;
+   final SessionID? sessionId;
+   final Map<String, dynamic>? metricSeed;
++  final Map<String, dynamic>? roleSeed;
+   final String? helpAttempt;
+   final int? tabWindowId;
+   final int? display;
+@@ -75,7 +77,7 @@ class RemotePage extends StatefulWidget {
+ 
+   FFI? get mountedFfi {
+     final state = _lastState.value as _RemotePageState?;
+-    return state != null && state.mounted ? state._ffi : null;
++    return state != null && state.mounted && !state._roleRejected ? state._ffi : null;
+   }
+ 
+   void releaseMacOSInputForTabTransfer() {
+@@ -102,6 +104,7 @@ class _RemotePageState extends State<RemotePage>
+   Timer? _timer;
+   String keyboardMode = "legacy";
+   bool _isWindowBlur = false;
++  bool _roleRejected = false;
+   // Known macOS remote-input trade-offs (kept simple intentionally):
+   // 1. Dialogs rely on FocusNode loss plus middleBlocked, not mirrored dialog
+   //    state. Reproduce: activate remote input, open a dialog, then type.
+@@ -162,6 +165,18 @@ class _RemotePageState extends State<RemotePage>
+     super.initState();
+     _ffi = FFI(widget.sessionId);
+     _ffi.helpAttempt = widget.helpAttempt;
++    // Bind the registry decision before the native connection or input starts.
++    final roleSeed = widget.roleSeed;
++    if (roleSeed != null) {
++      try {
++        _ffi.attachRemoteRole(widget.id, roleSeed);
++      } catch (_) {
++        // The user can sign out between registration and engine startup.
++        // Never create a native session under a different identity.
++        _roleRejected = true;
++        return;
++      }
++    }
+     // Only a newly mounted connection owns the measurement. An existing tab
+     // is selected without mounting its duplicate, and a moved tab resumes
+     // its source measurement through the cached-session handoff.
+@@ -194,6 +209,10 @@ class _RemotePageState extends State<RemotePage>
+       display: widget.display,
+       displays: widget.displays,
+     );
++    if (_ffi.roleStartupFailed) {
++      _roleRejected = true;
++      return;
++    }
+     WidgetsBinding.instance.addPostFrameCallback((_) {
+       SystemChrome.setEnabledSystemUIMode(SystemUiMode.manual, overlays: []);
+       _ffi.dialogManager
+@@ -666,6 +685,12 @@ class _RemotePageState extends State<RemotePage>
+ 
+   @override
+   Future<void> dispose() async {
++    if (_roleRejected) {
++      _rawKeyFocusNode.dispose();
++      super.dispose();
++      if (_ffi.roleStartupFailed) await Get.delete<FFI>(tag: widget.id);
++      return;
++    }
+     final closeSession = closeSessionOnDispose.remove(widget.id) ?? true;
+ 
+     // https://github.com/flutter/flutter/issues/64935
+@@ -903,6 +928,12 @@ class _RemotePageState extends State<RemotePage>
+   @override
+   Widget build(BuildContext context) {
+     super.build(context);
++    if (_roleRejected) {
++      return Center(child: TextButton(
++        onPressed: () => widget.tabController?.closeBy(widget.id),
++        child: const Text('账号或远程会话已变化，请关闭后重新连接。'),
++      ));
++    }
+     return WillPopScope(
+         onWillPop: () async {
+           clientClose(sessionId, _ffi);
+diff --git a/flutter/lib/desktop/pages/remote_tab_page.dart b/flutter/lib/desktop/pages/remote_tab_page.dart
+index e511357..b519965 100644
+--- a/flutter/lib/desktop/pages/remote_tab_page.dart
++++ b/flutter/lib/desktop/pages/remote_tab_page.dart
+@@ -1,3 +1,5 @@
++import '../../steaddesk/role_binding.dart';
++import '../../steaddesk/role_event_relay.dart';
+ import 'dart:convert';
+ import 'dart:async';
+ import 'dart:ui' as ui;
+@@ -72,8 +74,10 @@ class _ConnectionTabPageState extends State<ConnectionTabPage> {
+       tabController.onSelected = (id) {
+         final remotePage = tabController.widget(id);
+         if (remotePage is RemotePage) {
+-          final ffi = remotePage.ffi;
+-          bind.setCurSessionId(sessionId: ffi.sessionId);
++          final ffi = remotePage.mountedFfi;
++          if (ffi != null && ffi.remoteRole?.viewOnly != true) {
++            bind.setCurSessionId(sessionId: ffi.sessionId);
++          }
+         }
+         WindowController.fromWindowId(params['windowId'])
+             .setTitle(getWindowNameWithId(id));
+@@ -97,6 +101,7 @@ class _ConnectionTabPageState extends State<ConnectionTabPage> {
+           key: ValueKey(peerId),
+           id: peerId!,
+           metricSeed: params['metric_seed'],
++          roleSeed: params['remote_role'],
+           helpAttempt: params['help_attempt'],
+           sessionId: sessionId == null ? null : SessionID(sessionId),
+           tabWindowId: tabWindowId,
+@@ -254,7 +259,8 @@ class _ConnectionTabPageState extends State<ConnectionTabPage> {
+     final remotePage = tabController.state.value.tabs
+         .firstWhere((tab) => tab.key == key)
+         .page as RemotePage;
+-    final ffi = remotePage.ffi;
++    final ffi = remotePage.mountedFfi;
++    if (ffi == null) return const SizedBox.shrink();
+     final pi = ffi.ffiModel.pi;
+     final perms = ffi.ffiModel.permissions;
+     final sessionId = ffi.sessionId;
+@@ -274,7 +280,7 @@ class _ConnectionTabPageState extends State<ConnectionTabPage> {
+       ),
+     ]);
+ 
+-    if (tabController.state.value.tabs.length > 1) {
++    if (ffi.remoteRole == null && tabController.state.value.tabs.length > 1) {
+       final splitAction = MenuEntryButton<String>(
+         childBuilder: (TextStyle? style) => Text(
+           translate('Move tab to new window'),
+@@ -292,7 +298,7 @@ class _ConnectionTabPageState extends State<ConnectionTabPage> {
+       menu.insert(1, splitAction);
+     }
+ 
+-    if (perms['restart'] != false &&
++    if (ffi.remoteRole?.viewOnly != true && perms['restart'] != false &&
+         (pi.platform == kPeerPlatformLinux ||
+             pi.platform == kPeerPlatformWindows ||
+             pi.platform == kPeerPlatformMacOS)) {
+@@ -302,7 +308,8 @@ class _ConnectionTabPageState extends State<ConnectionTabPage> {
+           style: style,
+         ),
+         proc: () => showRestartRemoteDevice(
+-            pi, peerId ?? '', sessionId, ffi.dialogManager),
++            pi, peerId ?? '', sessionId, ffi.dialogManager,
++            canOperate: () => ffi.remoteRole?.viewOnly != true),
+         padding: padding,
+         dismissOnClicked: true,
+         dismissCallback: cancelFunc,
+@@ -311,10 +318,12 @@ class _ConnectionTabPageState extends State<ConnectionTabPage> {
+ 
+     if (perms['keyboard'] != false && !ffi.ffiModel.viewOnly) {
+       menu.add(RemoteMenuEntry.insertLock(sessionId, padding,
++          canOperate: () => ffi.remoteRole?.viewOnly != true,
+           dismissFunc: cancelFunc));
+ 
+       if (pi.platform == kPeerPlatformLinux || pi.sasEnabled) {
+         menu.add(RemoteMenuEntry.insertCtrlAltDel(sessionId, padding,
++          canOperate: () => ffi.remoteRole?.viewOnly != true,
+             dismissFunc: cancelFunc));
+       }
+     }
+@@ -427,6 +436,16 @@ class _ConnectionTabPageState extends State<ConnectionTabPage> {
+       RemoteCountState.find().value = tabController.length;
+ 
+   Future<dynamic> _remoteMethodHandler(call, fromWindowId) async {
++    if (call.method == roleFeedEvent) {
++      if (fromWindowId != kMainWindowId) return false;
++      final message = call.arguments as Map;
++      return RoleBinding.events.receive(message['subscription'] as String, message['event'] as String);
++    }
++    if (call.method == 'steaddesk.role.canSplit') {
++      if (fromWindowId != kMainWindowId) return false;
++      final page = tabController.widget(call.arguments as String);
++      return page is RemotePage && page.roleSeed == null && page.mountedFfi?.remoteRole == null;
++    }
+     if (call.method == 'steaddesk.help.attach' && fromWindowId == kMainWindowId) {
+       final args = jsonDecode(call.arguments);
+       final page = tabController.widget(args['id']);
+@@ -544,6 +563,7 @@ class _ConnectionTabPageState extends State<ConnectionTabPage> {
+           key: ValueKey(id),
+           id: id,
+           metricSeed: args['metric_seed'],
++          roleSeed: args['remote_role'],
+           helpAttempt: args['help_attempt'],
+           sessionId: sessionId == null ? null : SessionID(sessionId),
+           tabWindowId: tabWindowId,
+diff --git a/flutter/lib/desktop/widgets/remote_toolbar.dart b/flutter/lib/desktop/widgets/remote_toolbar.dart
+index 74cd9e7..d5e1bfd 100644
+--- a/flutter/lib/desktop/widgets/remote_toolbar.dart
++++ b/flutter/lib/desktop/widgets/remote_toolbar.dart
+@@ -1,4 +1,5 @@
+ import '../../steaddesk/device_id_widgets.dart';
++import '../../steaddesk/role_header.dart';
+ import 'dart:convert';
+ import 'dart:async';
+ import 'dart:math' as math;
+@@ -408,6 +409,7 @@ class RemoteMenuEntry {
+   static MenuEntryButton<String> insertLock(
+     SessionID sessionId,
+     EdgeInsets? padding, {
++    bool Function()? canOperate,
+     DismissFunc? dismissFunc,
+     DismissCallback? dismissCallback,
+   }) {
+@@ -417,6 +419,7 @@ class RemoteMenuEntry {
+         style: style,
+       ),
+       proc: () {
++        if (canOperate?.call() == false) return;
+         bind.sessionLockScreen(sessionId: sessionId);
+         if (dismissFunc != null) {
+           dismissFunc();
+@@ -431,6 +434,7 @@ class RemoteMenuEntry {
+   static insertCtrlAltDel(
+     SessionID sessionId,
+     EdgeInsets? padding, {
++    bool Function()? canOperate,
+     DismissFunc? dismissFunc,
+     DismissCallback? dismissCallback,
+   }) {
+@@ -440,6 +444,7 @@ class RemoteMenuEntry {
+         style: style,
+       ),
+       proc: () {
++        if (canOperate?.call() == false) return;
+         bind.sessionCtrlAltDel(sessionId: sessionId);
+         if (dismissFunc != null) {
+           dismissFunc();
+@@ -2738,12 +2743,12 @@ class _KeyboardMenu extends StatelessWidget {
+ 
+   viewMode() {
+     final ffiModel = ffi.ffiModel;
+-    final enabled = versionCmp(pi.version, '1.2.0') >= 0 && ffiModel.keyboard;
++    final enabled = versionCmp(pi.version, '1.2.0') >= 0 && ffiModel.keyboard && ffi.remoteRole?.viewOnly != true;
+     return CkbMenuButton(
+         value: ffiModel.viewOnly,
+         onChanged: enabled
+             ? (value) async {
+-                if (value == null) return;
++                if (value == null || ffi.remoteRole?.viewOnly == true) return;
+                 await bind.sessionToggleOption(
+                     sessionId: ffi.sessionId, value: kOptionToggleViewOnly);
+                 final viewOnly = await bind.sessionGetToggleOption(
+@@ -2755,7 +2760,7 @@ class _KeyboardMenu extends StatelessWidget {
+               }
+             : null,
+         ffi: ffi,
+-        child: Text(translate('View Mode')));
++        child: Text(ffi.remoteRole?.viewOnly == true ? '只看模式' : translate('View Mode')));
+   }
+ 
+   showMyCursor() {
+diff --git a/flutter/lib/models/input_model.dart b/flutter/lib/models/input_model.dart
+index ca3b0b4..4a0f62e 100644
+--- a/flutter/lib/models/input_model.dart
++++ b/flutter/lib/models/input_model.dart
+@@ -1,3 +1,4 @@
++import '../steaddesk/role_input.dart';
+ import 'dart:async';
+ import 'dart:convert';
+ import 'dart:io';
+@@ -504,7 +505,7 @@ class InputModel {
+ 
+   bool osInputCurrent(int ticket) {
+     final ffi = parent.target;
+-    if (ffi == null || ffi.closed) return false;
++    if (ffi == null || ffi.closed || _roleLocked) return false;
+     if (ffi.ffiModel.recovery == null) return true;
+     return _reconnectInput.isCurrent(ticket) && ffi.ffiModel.osInputAuthenticated &&
+         !ffi.ffiModel.reconnectInputLocked;
+@@ -542,7 +543,37 @@ class InputModel {
+     );
+   }
+ 
+-  bool get reconnectInputLocked => _reconnectInput.blocked;
++  final _rolePresses = RolePressedInputs();
++  final _promotion = RoleInputPromotion();
++  bool get _roleLocked => _promotion.waiting || _rolePresses.releasing || parent.target?.remoteRole?.viewOnly == true;
++  bool get reconnectInputLocked => _reconnectInput.blocked || _roleLocked;
++
++  Future<void> releaseRoleInput() async {
++    _promotion.waiting = false;
++    final clipboardFenced = bind.mainSetPeerOptionSync(
++        id: sessionId.toString(), key: 'steaddesk-session-clipboard-viewer', value: 'Y');
++    _releaseCheck?.cancel();
++    _flingTimer?.cancel();
++    _stopFling = true;
++    _fling = false;
++    _heldPointers.clear();
++    _panZoomStarted = false;
++    _lastButtons = 0;
++    toReleaseKeys.reset();
++    toReleaseRawKeys.reset();
++    resetModifiers();
++    // Rust's per-window grab owner releases keys held by the native hook.
++    if (!isInputSourceFlutter) bind.sessionEnterOrLeave(sessionId: sessionId, enter: false);
++    if (relativeMouseMode.value) _relativeMouse.setRelativeMouseMode(false);
++    await _rolePresses.release();
++    if (!clipboardFenced) throw StateError('会话剪贴板未锁定。');
++  }
++
++  void restoreRoleInput() {
++    if (parent.target?.remoteRole?.viewOnly != false) return;
++    _promotion.waiting = true;
++    _tryRestoreInput();
++  }
+   bool get keyboardPerm => !reconnectInputLocked && parent.target!.ffiModel.keyboard;
+ 
+   void setReconnectInputLocked(bool locked) {
+@@ -573,6 +604,23 @@ class InputModel {
+   }
+ 
+   void _tryRestoreInput() {
++    if (_promotion.waiting) {
++      final ffi = parent.target;
++      if (ffi == null || ffi.closed || ffi.remoteRole?.viewOnly != false ||
++          _reconnectInput.disconnected || !_wantsInput) return;
++      final held = isWindows && !isWeb ? windowsPhysicalInputDown()
++          : HardwareKeyboard.instance.physicalKeysPressed.isNotEmpty;
++      if (!_promotion.acquire(wantsInput: _wantsInput, held: held)) {
++        _releaseCheck?.cancel();
++        _releaseCheck = Timer(const Duration(milliseconds: 60), _tryRestoreInput);
++        return;
++      }
++      if (!_reconnectInput.blocked) {
++        _applyEnterOrLeave(true);
++        return;
++      }
++    }
++    if (_roleLocked) return;
+     if (_reconnectInput.disconnected || !_reconnectInput.blocked || !_wantsInput && isDesktop) return;
+     final flutterHeld = HardwareKeyboard.instance.physicalKeysPressed.isNotEmpty;
+     final bool held;
+@@ -851,6 +899,7 @@ class InputModel {
+   }
+ 
+   KeyEventResult handleRawKeyEvent(RawKeyEvent e) {
++    if (_roleLocked) return KeyEventResult.handled;
+     if (!_reconnectInput.acceptKey(e.physicalKey.usbHidUsage,
+         up: e is RawKeyUpEvent, repeat: e is RawKeyDownEvent && e.repeat)) {
+       return KeyEventResult.handled;
+@@ -940,6 +989,7 @@ class InputModel {
+   }
+ 
+   KeyEventResult handleKeyEvent(KeyEvent e) {
++    if (_roleLocked) return KeyEventResult.handled;
+     if (!_reconnectInput.acceptKey(e.physicalKey.usbHidUsage,
+         up: e is KeyUpEvent, repeat: e is KeyRepeatEvent)) {
+       return KeyEventResult.handled;
+@@ -1052,6 +1102,10 @@ class InputModel {
+       String character, int usbHid, bool down, bool iosCapsLock) {
+     if (reconnectInputLocked) return;
+     final lockModes = _buildLockModes(iosCapsLock);
++    if (parent.target?.remoteRole != null) {
++      _rolePresses.track('hid:$usbHid', down, () => bind.sessionHandleFlutterKeyEvent(
++          sessionId: sessionId, character: character, usbHid: usbHid, lockModes: lockModes, downOrUp: false));
++    }
+     bind.sessionHandleFlutterKeyEvent(
+         sessionId: sessionId,
+         character: character,
+@@ -1098,8 +1152,13 @@ class InputModel {
+   /// Send raw Key Event
+   void inputRawKey(String name, int platformCode, int positionCode, bool down,
+       bool iosCapsLock) {
+-    final lockModes = _buildLockModes(iosCapsLock);
+     if (reconnectInputLocked) return;
++    final lockModes = _buildLockModes(iosCapsLock);
++    if (parent.target?.remoteRole != null) {
++      _rolePresses.track('raw:$platformCode/$positionCode', down, () => bind.sessionHandleFlutterRawKeyEvent(
++          sessionId: sessionId, name: name, platformCode: platformCode, positionCode: positionCode,
++          lockModes: lockModes, downOrUp: false));
++    }
+     bind.sessionHandleFlutterRawKeyEvent(
+         sessionId: sessionId,
+         name: name,
+@@ -1155,6 +1214,11 @@ class InputModel {
+     if (reconnectInputLocked) return;
+     if (!keyboardPerm) return;
+     if (isViewCamera) return;
++    if (parent.target?.remoteRole != null && press == false) {
++      _rolePresses.track('key:$name', down == true, () => bind.sessionInputKey(
++          sessionId: sessionId, name: name, down: false, press: false,
++          alt: false, ctrl: false, shift: false, command: false));
++    }
+     bind.sessionInputKey(
+         sessionId: sessionId,
+         name: name,
+@@ -1241,6 +1305,12 @@ class InputModel {
+ 
+   /// Modify the given modifier map [evt] based on current modifier key status.
+   Map<String, dynamic> modify(Map<String, dynamic> evt) {
++    final button = evt['buttons'], type = evt['type'];
++    if (parent.target?.remoteRole != null && button is String && button.isNotEmpty &&
++        (type == 'up' || type == 'down')) {
++      _rolePresses.track('mouse:$button', type == 'down', () => bind.sessionSendMouse(
++          sessionId: sessionId, msg: jsonEncode({'type': 'up', 'buttons': button})));
++    }
+     if (ctrl) evt['ctrl'] = 'true';
+     if (shift) evt['shift'] = 'true';
+     if (alt) evt['alt'] = 'true';
+@@ -1280,6 +1350,7 @@ class InputModel {
+   }
+ 
+   void _applyEnterOrLeave(bool enter) {
++    if (enter && _roleLocked) return;
+     toReleaseKeys.release(handleKeyEvent);
+     toReleaseRawKeys.release(handleRawKeyEvent);
+     _pointerMovedAfterEnter = false;
+@@ -1359,10 +1430,11 @@ class InputModel {
+   }
+ 
+   void toggleRelativeMouseMode() {
+-    _relativeMouse.toggleRelativeMouseMode();
++    if (!_roleLocked) _relativeMouse.toggleRelativeMouseMode();
+   }
+ 
+   bool setRelativeMouseMode(bool enabled) {
++    if (enabled && _roleLocked) return false;
+     return _relativeMouse.setRelativeMouseMode(enabled);
+   }
+ 
+@@ -1557,7 +1629,7 @@ class InputModel {
+     }
+ 
+     _flingTimer = Timer(Duration(milliseconds: delay), () {
+-      if (_stopFling) {
++      if (_stopFling || _roleLocked) {
+         _fling = false;
+         return;
+       }
+@@ -1945,6 +2017,12 @@ class InputModel {
+ 
+     final evt = PointerEventToRust(kind, type, evtValue).toJson();
+     if (isViewCamera) return;
++    if (parent.target?.remoteRole != null &&
++        (type == kMouseEventTypePanStart || type == kMouseEventTypePanEnd)) {
++      _rolePresses.track('touch:$kind', type == kMouseEventTypePanStart,
++          () => bind.sessionSendPointer(sessionId: sessionId, msg: jsonEncode(
++              PointerEventToRust(kind, kMouseEventTypePanEnd, evtValue).toJson())));
++    }
+     bind.sessionSendPointer(
+         sessionId: sessionId, msg: json.encode(modify(evt)));
+   }
+diff --git a/flutter/lib/models/model.dart b/flutter/lib/models/model.dart
+index b28cae2..3d37059 100644
+--- a/flutter/lib/models/model.dart
++++ b/flutter/lib/models/model.dart
+@@ -1,5 +1,7 @@
+ import 'dart:async';
+ import '../steaddesk/device_sessions.dart';
++import '../steaddesk/remote_role.dart';
++import '../steaddesk/role_binding.dart';
+ import '../steaddesk/metrics_api.dart';
+ import '../steaddesk/session_quality.dart';
+ import '../steaddesk/session_reconnect.dart';
+@@ -246,7 +248,8 @@ class FfiModel with ChangeNotifier {
+   bool get isPeerLinux => _pi.platform == kPeerPlatformLinux;
+   bool get isPeerWindows => _pi.platform == kPeerPlatformWindows;
+ 
+-  bool get viewOnly => _viewOnly;
++  bool get viewOnly => _viewOnly || parent.target?.remoteRole?.viewOnly == true;
++  void remoteRoleChanged() => notifyListeners();
+   bool get showMyCursor => _showMyCursor;
+ 
+   set inputBlocked(v) {
+@@ -325,7 +328,8 @@ class FfiModel with ChangeNotifier {
+     notifyListeners();
+   }
+ 
+-  bool get keyboard => !reconnectInputLocked && _permissions['keyboard'] != false;
++  bool get keyboard => !reconnectInputLocked &&
++      parent.target?.remoteRole?.viewOnly != true && _permissions['keyboard'] != false;
+ 
+   clear() {
+     _pi = PeerInfo();
+@@ -416,6 +420,7 @@ class FfiModel with ChangeNotifier {
+         if (evt['title'] == 'Connection Error' || evt['title'] == 'Login Error' ||
+             evt['type'] == 'restarting' || evt['type'] == 'restarting-show') {
+           parent.target?.sessionQuality?.disconnected();
++          parent.target?.roleDisconnected();
+         }
+         parent.target?.metrics?.message(evt['type'], evt['title'], evt['text']);
+         handleMsgBox(evt, sessionId, peerId);
+@@ -1516,9 +1521,12 @@ class FfiModel with ChangeNotifier {
+     if (isWindows && !merchantEdition && !isCache && connType == ConnType.defaultConn) {
+       final connection = bind.sessionGetConnSessionId(sessionId: sessionId);
+       if (connection.isNotEmpty) {
+-        if (casesEnabled) {
++        final ffi = parent.target;
++        if (ffi?.remoteRole != null) {
++          unawaited(ffi!.roleAuthenticated(connection, peerId, _pi.hostname, _pi.platform));
++        } else if (casesEnabled) {
+           CaseSession.established(
+-              connection, peerId, _pi.hostname, _pi.platform, parent.target?.helpAttempt);
++              connection, peerId, _pi.hostname, _pi.platform, ffi?.helpAttempt);
+         }
+         DeviceSessions.established(peerId, connection, _pi.version);
+       }
+@@ -4179,6 +4187,117 @@ enum ConnType {
+ class FFI {
+   MetricSession? metrics;
+   String? helpAttempt;
++  RemoteRole? remoteRole;
++  String? _roleConnection;
++  int _roleGeneration = 0;
++  bool _roleInterrupted = false;
++  bool _roleAuthenticating = false;
++  Future<void>? _roleEnding;
++  bool? _nativeRoleViewer;
++  bool roleStartupFailed = false;
++
++  bool _setNativeRoleFence(bool viewer) => bind.mainSetPeerOptionSync(
++      id: sessionId.toString(), key: 'steaddesk-session-clipboard-viewer',
++      value: viewer ? 'Y' : 'N');
++
++  void attachRemoteRole(String peer, Map<String, dynamic> seed) {
++    if (seed['device_id'] != peer) throw const FormatException('设备与登记不匹配。');
++    final role = RoleBinding.attach(seed, inputModel.releaseRoleInput);
++    remoteRole = role;
++    role.addListener(_onRemoteRole);
++    role.start();
++  }
++
++  Map<String,dynamic> _caseRole(RemoteRole role) => {
++    'viewer': role.viewOnly,
++    'ever_operated': role.everOperated,
++    'toolbar_session_id': role.toolbarSessionId,
++    'handover_notes': role.handoverNotes,
++  };
++
++  void _onRemoteRole() {
++    if (closed) return;
++    final role = remoteRole;
++    final wasViewer = _nativeRoleViewer;
++    if (wasViewer != null && role != null && wasViewer != role.viewOnly) {
++      if (!_setNativeRoleFence(role.viewOnly)) {
++        _endRemoteRole();
++        unawaited(bind.sessionClose(sessionId: sessionId));
++        return;
++      }
++      _nativeRoleViewer = role.viewOnly;
++      if (wasViewer && !role.viewOnly) inputModel.restoreRoleInput();
++    }
++    final connection = _roleConnection;
++    if (casesEnabled && role != null && connection != null) {
++      CaseSession.roleChanged(connection, _caseRole(role));
++    }
++    ffiModel.remoteRoleChanged();
++  }
++
++  void _endRemoteRole() {
++    final role = remoteRole;
++    if (role == null || _roleEnding != null) return;
++    if (_nativeRoleViewer != null) _setNativeRoleFence(true);
++    _nativeRoleViewer = null;
++    final connection = _roleConnection;
++    if (casesEnabled && connection != null) {
++      CaseSession.roleChanged(connection, _caseRole(role));
++    }
++    role.removeListener(_onRemoteRole);
++    _roleGeneration++;
++    _roleConnection = null;
++    _roleEnding = role.end();
++  }
++
++  void roleDisconnected() {
++    final role = remoteRole;
++    if (role == null || _roleInterrupted || closed) return;
++    _roleGeneration++;
++    _roleAuthenticating = false;
++    _roleInterrupted = true;
++    final connection = _roleConnection;
++    _roleConnection = null;
++    if (casesEnabled && connection != null) {
++      unawaited(CaseSession.interrupted(connection));
++    }
++    unawaited(role.suspend());
++  }
++
++  Future<void> roleAuthenticated(String connection, String peer,
++      String hostname, String platform) async {
++    final role = remoteRole;
++    if (role == null || closed || _roleAuthenticating ||
++        _roleConnection == connection && !_roleInterrupted) return;
++    final generation = _roleGeneration;
++    _roleAuthenticating = true;
++    try {
++      if (_roleInterrupted) {
++        final oldId = role.toolbarSessionId;
++        _roleInterrupted = false;
++        await role.reconnect();
++        if (role.toolbarSessionId == oldId) {
++          if (generation == _roleGeneration) _roleInterrupted = true;
++          return;
++        }
++      } else {
++        // The first registration already returned the authoritative role.
++        // A lost connected heartbeat must not discard that registration.
++        unawaited(role.connected().catchError((Object _) {}));
++      }
++      if (closed || generation != _roleGeneration || _roleInterrupted) return;
++      _roleConnection = connection;
++      if (casesEnabled) {
++        CaseSession.established(connection, peer, hostname, platform,
++            helpAttempt, _caseRole(role));
++      }
++    } catch (_) {
++      if (!closed && generation == _roleGeneration) _roleInterrupted = true;
++    } finally {
++      if (generation == _roleGeneration) _roleAuthenticating = false;
++    }
++  }
++
+   SessionQuality? sessionQuality;
+   bool _awaitingMetricTransfer = false;
+   DateTime? _firstFrameDuringTransfer;
+@@ -4361,6 +4480,22 @@ class FFI {
+       }
+       ffiModel.pi.currentDisplay = display;
+     }
++    // The transient native clipboard sender is keyed by the live window
++    // UUID. Set it after sessionAddSync and before sessionStart can emit data.
++    final role = remoteRole;
++    if (role != null) {
++      if (!_setNativeRoleFence(role.viewOnly)) {
++        roleStartupFailed = true;
++        _endRemoteRole();
++        sessionQuality?.dispose();
++        sessionQuality = null;
++        unawaited(metrics?.finish(end: 'connection_failed'));
++        metrics = null;
++        unawaited(bind.sessionClose(sessionId: sessionId));
++        return;
++      }
++      _nativeRoleViewer = role.viewOnly;
++    }
+     if (isDesktop && connType == ConnType.defaultConn) {
+       textureModel.updateCurrentDisplay(display ?? 0);
+     }
+@@ -4465,6 +4600,7 @@ class FFI {
+       () async {
+         if (message is EventToUI_Event) {
+           if (message.field0 == "close") {
++            _endRemoteRole();
+             closed = true;
+             ffiModel.recovery?.close();
+             sessionQuality?.disconnected();
+@@ -4591,6 +4727,7 @@ class FFI {
+     quality?.dispose();
+     sessionQuality = null;
+     final end = closed ? null : 'closed_by_agent';
++    _endRemoteRole();
+     closed = true;
+     policy?.close();
+     final owner = metrics;
+@@ -4653,6 +4790,8 @@ class FFI {
+         await bind.sessionClose(sessionId: sessionId);
+       }
+     }
++    final endingRole = _roleEnding;
++    if (endingRole != null) await endingRole;
+     debugPrint('model $id closed');
+     id = '';
+   }
+diff --git a/flutter/lib/steaddesk/cases/case_inbox.dart b/flutter/lib/steaddesk/cases/case_inbox.dart
+index feb3183..24c3bbb 100644
+--- a/flutter/lib/steaddesk/cases/case_inbox.dart
++++ b/flutter/lib/steaddesk/cases/case_inbox.dart
+@@ -22,10 +22,11 @@ class CaseInbox extends ChangeNotifier {
+   Future<bool> ended(Map<String, dynamic> event) async {
+     final account = event['agent'] as String;
+     final id = event['id'] as String;
+-    final record = Map<String, dynamic>.of(event)..remove('interrupted');
++    final record = Map<String, dynamic>.of(event)..remove('interrupted')
++      ..remove('suppress_prompt');
+     final inserted = await store.addDraft(account, record);
+     if (inserted) {
+-      if (event['interrupted'] != true) {
++      if (event['interrupted'] != true && event['suppress_prompt'] != true) {
+         _prompts.add((account: account, id: id));
+       }
+       notifyListeners();
+diff --git a/flutter/lib/steaddesk/cases/case_session.dart b/flutter/lib/steaddesk/cases/case_session.dart
+index 4dd1f74..65e4a03 100644
+--- a/flutter/lib/steaddesk/cases/case_session.dart
++++ b/flutter/lib/steaddesk/cases/case_session.dart
+@@ -72,7 +72,7 @@ class CaseSession {
+             ? id
+             : device.name;
+     return {
+-      'id': _uuid.v4(),
++      'id': event['role']?['toolbar_session_id'] ?? _uuid.v4(),
+       'device_id': id,
+       'device_name': name,
+       'display_name': name,
+@@ -97,21 +97,27 @@ class CaseSession {
+ 
+   static void established(
+       String connection, String peerId, String hostname, String platform,
+-      [String? helpAttempt]) {
++      [String? helpAttempt, CaseData? role]) {
+     unawaited(_send(connection, 'established', {
+       'device_id': peerId,
+       'hostname': hostname,
+       'platform': platform,
++      if (role != null) 'role': role,
+       if (helpAttempt != null) 'help_attempt': helpAttempt
+     }));
+   }
+ 
++  static Future<void> roleChanged(String connection, CaseData role) =>
++      _send(connection, 'role', {'role': role});
++
+   static void message(
+       String connection, String type, String title, String text) {
+     final kind = caseEndKind(type, title, text);
+     if (kind != null) unawaited(_send(connection, kind));
+   }
+ 
++  static Future<void> interrupted(String connection) => _send(connection, 'interrupted');
++
+   static Future<void> closed(String connection) => _send(connection, 'closed');
+ 
+   static Future<void> _send(String connection, String kind,
+@@ -125,7 +131,7 @@ class CaseSession {
+       ...?data
+     };
+     await _sender.ordered(connection, () async {
+-      final ending = kind != 'established';
++      final ending = kind != 'established' && kind != 'role';
+       if (ending) event['pending_notes'] = _sender.pending(connection);
+       final ack = await _invoke('steaddesk.case.lifecycle', jsonEncode(event));
+       if (ack == true && ending) _sender.forget(connection);
+diff --git a/flutter/lib/steaddesk/cases/case_session_ledger.dart b/flutter/lib/steaddesk/cases/case_session_ledger.dart
+index 7b492aa..aa75dd2 100644
+--- a/flutter/lib/steaddesk/cases/case_session_ledger.dart
++++ b/flutter/lib/steaddesk/cases/case_session_ledger.dart
+@@ -31,8 +31,45 @@ String? caseEndKind(String type, String title, String text) {
+   return 'interrupted';
+ }
+ 
++// Only a managed window contributes roles. Keep receipts separate from the
++// editor buffer: a delayed last keystroke must not erase an acknowledged handover.
++class _CaseRole {
++  _CaseRole(this.toolbarId);
++  final String toolbarId;
++  bool viewer = true;
++  bool everOperated = false;
++  final receipts = <String, String>{};
++
++  void update(CaseData role) {
++    if (role['toolbar_session_id'] != toolbarId ||
++        role['viewer'] is! bool ||
++        role['ever_operated'] is! bool) return;
++    viewer = role['viewer'] as bool;
++    everOperated |= role['ever_operated'] == true || !viewer;
++    final rows = role['handover_notes'];
++    if (rows is List) {
++      for (final receipt in rows) {
++        _remember(receipt);
++      }
++    }
++  }
++
++  void _remember(dynamic receipt) {
++    if (receipt is! Map) return;
++    final id = receipt['audit_id'];
++    final text = receipt['text'];
++    if ((id is int || id is String) &&
++        id.toString().isNotEmpty &&
++        text is String &&
++        text.trim().isNotEmpty) {
++      receipts.putIfAbsent(id.toString(), () => text);
++    }
++  }
++}
++
+ class CaseSessionLedger {
+   final CaseData? Function(CaseData event) snapshot;
++  final _roles = <String, _CaseRole>{};
+   final _active = <String, CaseData>{};
+   final Future<void> Function(String? connection)? collectPendingNotes;
+   final _noteAt = <String, DateTime>{};
+@@ -107,9 +144,19 @@ class CaseSessionLedger {
+           ...?snapshot(event),
+           'started_at': at.toIso8601String()
+         };
++        final role = event['role'];
++        if (role is CaseData && role['toolbar_session_id'] is String) {
++          _roles[connection] = _CaseRole(role['toolbar_session_id'] as String)
++            ..update(role);
++        }
+       }
+       return true;
+     }
++    if (event['kind'] == 'role') {
++      final role = event['role'];
++      if (role is CaseData) _roles[connection]?.update(role);
++      return true;
++    }
+     if (current?['id'] != null && collectPendingNotes != null) {
+       await collectPendingNotes!(connection);
+     }
+@@ -125,16 +172,28 @@ class CaseSessionLedger {
+     _endedAt[connection] = at;
+     _active.remove(connection);
+     _noteAt.remove(connection);
+-    if (kind == 'discard' ||
++    final role = _roles.remove(connection);
++    final preserveHistory = role?.viewer == true && role!.everOperated;
++    if ((role != null && !role.everOperated) ||
++        kind == 'discard' ||
+         current == null ||
+         current['agent'] == null ||
+         (current['help_id'] == null &&
++            !preserveHistory &&
+             at.difference(DateTime.parse(current['started_at'])) <
+                 const Duration(seconds: 30))) {
+       return false;
+     }
+     _unacknowledged[key] = {
+       ...current,
++      if (preserveHistory) 'suppress_prompt': true,
++      if (role != null && role.receipts.isNotEmpty)
++        'note': [
++          if (current['note'] is String &&
++              (current['note'] as String).isNotEmpty)
++            current['note'],
++          ...role.receipts.values,
++        ].join('\n'),
+       'ended_at': at.toIso8601String(),
+       'interrupted': kind == 'interrupted'
+     };
+diff --git a/flutter/lib/steaddesk/cases/case_session_off.dart b/flutter/lib/steaddesk/cases/case_session_off.dart
+index ad87288..64c8500 100644
+--- a/flutter/lib/steaddesk/cases/case_session_off.dart
++++ b/flutter/lib/steaddesk/cases/case_session_off.dart
+@@ -8,9 +8,13 @@ class CaseSession {
+       Future<bool> Function(Map<String, dynamic>) ended) async {}
+   static void established(
+       String connection, String peerId, String hostname, String platform,
+-      [String? helpAttempt]) {}
++      [String? helpAttempt, Map<String, dynamic>? role]) {}
++  static Future<void> roleChanged(
++      String connection, Map<String, dynamic> role) async {}
+   static void message(
+       String connection, String type, String title, String text) {}
++  static Future<void> interrupted(String connection) async {}
++
+   static Future<void> closed(String connection) async {}
+   static Future<bool> updateNote(
+           String connection, String caseId, String note) async =>
+diff --git a/flutter/lib/steaddesk/ops_health.dart b/flutter/lib/steaddesk/ops_health.dart
+index 742c4f0..f655a7c 100644
+--- a/flutter/lib/steaddesk/ops_health.dart
++++ b/flutter/lib/steaddesk/ops_health.dart
+@@ -84,8 +84,36 @@ class OpsHealthHttp implements HealthApi {
+     return jsonDecode(utf8.decode(bytes)) as Map<String, dynamic>;
+   }
+ 
++  static final _streams = <(Uri, String, bool), _OpsEventFeed>{};
++  final _eventStops = <void Function()>{};
++  bool _closed = false;
++
+   @override
+-  Stream<String> changes() async* {
++  Stream<String> changes() => Stream.multi((sink) {
++        if (_closed) {
++          sink.close();
++          return;
++        }
++        final key = (_base, _token, todayEvents);
++        final feed = _streams.putIfAbsent(
++            key,
++            () => _OpsEventFeed(
++                    OpsHealthHttp(_base, _token, todayEvents: todayEvents),
++                    (old) {
++                  if (identical(_streams[key], old)) _streams.remove(key);
++                }));
++        late void Function() stop;
++        stop = () {
++          _eventStops.remove(stop);
++          feed.remove(sink);
++          sink.close();
++        };
++        _eventStops.add(stop);
++        sink.onCancel = stop;
++        feed.listen(sink, () => _eventStops.remove(stop));
++      });
++
++  Stream<String> _readEvents() async* {
+     final response = await _open('GET', 'events', events: true);
+     if (response.headers.contentType?.mimeType != 'text/event-stream') {
+       await response.listen((_) {}).cancel();
+@@ -101,7 +129,58 @@ class OpsHealthHttp implements HealthApi {
+   }
+ 
+   @override
+-  void close() => _http.close(force: true);
++  void close() {
++    _closed = true;
++    for (final stop in _eventStops.toList()) {
++      stop();
++    }
++    _http.close(force: true);
++  }
++}
++
++// One transport for matching credentials, origin and event filter within the
++// Dart engine. Closing one tab must not tear down the other tabs' stream.
++class _OpsEventFeed {
++  _OpsEventFeed(this.http, this.forgotten);
++  final OpsHealthHttp http;
++  final void Function(_OpsEventFeed) forgotten;
++  final sinks = <MultiStreamController<String>, void Function()>{};
++  StreamSubscription<String>? _upstream;
++  bool _online = false, _closed = false;
++  void listen(MultiStreamController<String> sink, void Function() detached) {
++    sinks[sink] = detached;
++    if (_online) sink.add('connected');
++    _upstream ??= http._readEvents().listen((event) {
++      if (event == 'connected') _online = true;
++      for (final sub in sinks.keys.toList()) {
++        sub.add(event);
++      }
++    }, onError: (Object e) {
++      for (final sub in sinks.keys.toList()) {
++        sub.addError(e);
++      }
++    }, onDone: _close);
++  }
++
++  void remove(MultiStreamController<String> sink) {
++    sinks.remove(sink);
++    if (sinks.isEmpty) _close();
++  }
++
++  void _close() {
++    if (_closed) return;
++    _closed = true;
++    forgotten(this);
++    final cancelled = _upstream?.cancel();
++    http.close();
++    unawaited(cancelled?.catchError((Object _) {}));
++    final listeners = Map.of(sinks);
++    sinks.clear();
++    for (final entry in listeners.entries) {
++      entry.value();
++      entry.key.close();
++    }
++  }
+ }
+ 
+ class DeviceHealth {
+diff --git a/flutter/lib/steaddesk/remote_role.dart b/flutter/lib/steaddesk/remote_role.dart
+new file mode 100644
+index 0000000..ec60ba0
+--- /dev/null
++++ b/flutter/lib/steaddesk/remote_role.dart
+@@ -0,0 +1,595 @@
++import 'dart:async';
++import 'dart:io';
++
++import 'package:flutter/foundation.dart';
++import 'package:uuid/uuid.dart';
++
++import 'ops_health.dart';
++
++typedef _Json = Map<String, dynamic>;
++
++class RemoteJoinCancelled implements Exception {
++  const RemoteJoinCancelled();
++}
++
++class _Snapshot {
++  _Snapshot(this.json, String device) {
++    if (json['device_id'] != device ||
++        json['version'] is! int ||
++        version < 0 ||
++        json['heartbeat_seconds'] is! int ||
++        heartbeat < 1 ||
++        heartbeat > 60 ||
++        json['sessions'] is! List ||
++        json['fixed_actions_available'] is! bool ||
++        json['predecessor_unconfirmed'] is! bool) {
++      throw const FormatException('会话快照无效。');
++    }
++    for (final row in json['sessions'] as List) {
++      if (row is! Map ||
++          row['session_id'] is! String ||
++          !Uuid.isValidUUID(fromString: row['session_id']) ||
++          row['operator_username'] is! String ||
++          (row['operator_username'] as String).trim().isEmpty ||
++          !{'connected', 'connecting'}.contains(row['state']) ||
++          names.containsKey(row['session_id'])) {
++        throw const FormatException('会话成员无效。');
++      }
++      names[row['session_id']] = row['operator_username'];
++      if (row['state'] == 'connected') connected.add(row['session_id']);
++    }
++    if (json['operator_session_id'] != null &&
++        !names.containsKey(json['operator_session_id'])) {
++      throw const FormatException('快照中的操作者无效。');
++    }
++  }
++
++  final _Json json;
++  final names = <String, String>{};
++  final connected = <String>{};
++  int get version => json['version'];
++  int get heartbeat => json['heartbeat_seconds'];
++  String? get operatorId => json['operator_session_id'];
++}
++
++class RemoteRole extends ChangeNotifier {
++  RemoteRole.fromSeed(
++    Map<String, dynamic> seed, {
++    required HealthApi api,
++    required Future<void> Function() releaseInput,
++    bool Function()? isCurrent,
++  })  : _api = api,
++        _release = releaseInput,
++        _isCurrent = isCurrent ?? _always,
++        device = seed['device_id'],
++        _id = seed['session_id'],
++        _staffPeer = seed['staff_peer_id'],
++        _instance = seed['client_instance_id'],
++        _toolbarId = seed['toolbar_session_id'],
++        _snapshot = _Snapshot(
++            Map<String, dynamic>.from(seed['snapshot']), seed['device_id']) {
++    _knownNames.addAll(_snapshot.names);
++    _everOperated = _snapshot.operatorId == _id;
++  }
++
++  static bool _always() => true;
++  static const _uuid = Uuid();
++  static const _deadline = Duration(seconds: 3);
++  static final _peer = RegExp(r'^[0-9]{9,10}$');
++  static String _route(String device) => 'remote/devices/$device';
++  static Future<_Json> _call(HealthApi api, String method, String path,
++          [_Json? body]) =>
++      api.request(method, path, body).timeout(_deadline);
++
++  static bool _unavailable(Object e) =>
++      e is SocketException ||
++      e is TimeoutException ||
++      e is HandshakeException ||
++      e is HttpException ||
++      (e is HealthFailure &&
++          const {404, 408, 502, 503, 504}.contains(e.status));
++
++  // Once another operator is known, an unavailable API cannot grant control.
++  static Future<Map<String, dynamic>?> prepare({
++    required HealthApi api,
++    required String device,
++    String staffPeer = '',
++    Future<String> Function()? resolveStaffPeer,
++    required Future<bool> Function(String operatorName) confirm,
++  }) async {
++    if (!_peer.hasMatch(device)) return null;
++    late final _Json raw;
++    try {
++      raw = await _call(api, 'GET', '${_route(device)}/sessions');
++    } catch (e) {
++      if (_unavailable(e)) return null;
++      rethrow;
++    }
++    final before = _Snapshot(raw, device);
++    final owner = before.names[before.operatorId];
++    if (owner != null && !await confirm(owner)) {
++      throw const RemoteJoinCancelled();
++    }
++    final peer =
++        resolveStaffPeer == null ? staffPeer : await resolveStaffPeer();
++    return _register(api, device, peer, _uuid.v4(),
++        allowLegacy: owner == null &&
++            before.names.isEmpty &&
++            before.json['predecessor_unconfirmed'] == false);
++  }
++
++  static Future<_Json?> _register(
++      HealthApi api, String device, String peer, String instance,
++      {bool allowLegacy = false}) async {
++    if (!_peer.hasMatch(peer)) throw const FormatException('客服设备号无效。');
++    final id = _uuid.v4(), toolbar = _uuid.v4();
++    final body = <String, dynamic>{
++      'session_id': id,
++      'client_instance_id': instance,
++      'staff_peer_id': peer,
++      'toolbar_session_id': toolbar,
++      'protocol_version': 1,
++    };
++    final path = '${_route(device)}/sessions';
++    late _Json json;
++    try {
++      try {
++        json = await _call(api, 'POST', path, body);
++      } on HealthFailure catch (e) {
++        if (e.status != 400) rethrow;
++        // S1 rejects unknown fields. Keep the same session UUID on the S1 form.
++        json = await _call(
++            api, 'POST', path, {...body}..remove('toolbar_session_id'));
++      }
++    } catch (e) {
++      if (!_unavailable(e)) rethrow;
++      // A transport failure can lose the response after COMMIT. Recover only
++      // our own UUID, and never send a second POST to guess its outcome.
++      try {
++        json = await _call(api, 'GET', path);
++      } catch (probeError) {
++        if (allowLegacy && _unavailable(probeError)) return null;
++        rethrow;
++      }
++      final current = _Snapshot(json, device);
++      if (!current.names.containsKey(id)) {
++        if (allowLegacy &&
++            current.names.isEmpty &&
++            current.json['predecessor_unconfirmed'] == false) return null;
++        rethrow;
++      }
++    }
++    final snapshot = _Snapshot(json, device);
++    if (!snapshot.names.containsKey(id)) throw const FormatException('会话未登记。');
++    return {...body, 'device_id': device, 'snapshot': json};
++  }
++
++  final HealthApi _api;
++  final Future<void> Function() _release;
++  final bool Function() _isCurrent;
++  final String device, _staffPeer, _instance;
++  String _id, _toolbarId;
++  _Snapshot _snapshot;
++  final _knownNames = <String, String>{};
++  bool _started = false, _dead = false, _suspended = false, _acting = false;
++  bool _everOperated = false, _linked = false, _transferring = false;
++  int? _holdVersion;
++  int _generation = 0;
++  int _transportRound = 0, _renewingRound = 0;
++  bool _refreshing = false, _refreshAgain = false, _beating = false;
++  Timer? _heartbeat, _poll, _sseRetry;
++  StreamSubscription<String>? _events;
++  Future<void>? _ending, _retiring, _renewing;
++  _Json? _handoverNote;
++
++  String get sessionId => _id;
++  String get toolbarSessionId => _toolbarId;
++  bool get everOperated => _everOperated;
++  bool get viewOnly =>
++      _dead ||
++      _suspended ||
++      _holdVersion != null ||
++      _transferring ||
++      !_isCurrent() ||
++      _snapshot.operatorId != _id;
++  bool get busy => _dead || _acting || _suspended;
++  bool get multipleSessions =>
++      _snapshot.json['fixed_actions_available'] == false;
++  String? get operatorName => _snapshot.names[_snapshot.operatorId];
++  Map<String, String> get watchers =>
++      Map.unmodifiable(Map.of(_snapshot.names)..remove(_snapshot.operatorId));
++  bool get canClaim =>
++      !busy &&
++      _isCurrent() &&
++      _snapshot.operatorId == null &&
++      _snapshot.connected.contains(_id);
++  bool get _uncertain => _snapshot.json['predecessor_unconfirmed'] == true;
++  String get claimLabel => _uncertain ? '仍要接管' : '接管';
++  String get claimPrompt {
++    final name = _knownNames[_snapshot.json['predecessor_session_id']] ??
++        (_snapshot.json['predecessor_username'] as String?) ??
++        '上一位客服';
++    return _uncertain ? '$name失去联系，可能仍在操作。确认要接管吗？' : '$name已离开，要接管吗？';
++  }
++
++  // An authoritative receipt also recovers a lost handover response. Ignore
++  // receipts belonging only to another window of the same signed-in account.
++  List<Map<String, dynamic>> get handoverNotes {
++    final notes = <int, Map<String, dynamic>>{};
++    final immediate = _handoverNote;
++    if (immediate != null) notes[immediate['audit_id'] as int] = immediate;
++    final rows = _snapshot.json['handover_receipts'];
++    if (rows is List) {
++      for (final row in rows) {
++        if (row is! Map ||
++            (row['from_session'] != _id && row['to_session'] != _id)) continue;
++        final id = row['audit_id'],
++            from = row['from_name'],
++            to = row['to_name'];
++        final at = DateTime.tryParse(row['at']?.toString() ?? '')?.toLocal();
++        if (id is! int ||
++            id <= 0 ||
++            from is! String ||
++            to is! String ||
++            at == null) continue;
++        notes[id] = _receiptNote(id, at, from, to);
++      }
++    }
++    final ids = notes.keys.toList()..sort();
++    return [for (final id in ids) notes[id]!];
++  }
++
++  static _Json _receiptNote(int id, DateTime local, String from, String to) {
++    String two(int n) => n.toString().padLeft(2, '0');
++    return {
++      'audit_id': id,
++      'text': '[${two(local.hour)}:${two(local.minute)}] $from 将操作权转交给 $to'
++    };
++  }
++
++  String get _path => _route(device);
++  bool _valid(int gen) =>
++      !_dead && !_suspended && gen == _generation && _isCurrent();
++
++  void start() {
++    if (_started || _dead) return;
++    _started = true;
++    _schedule();
++    _listen();
++  }
++
++  void _schedule() {
++    _heartbeat?.cancel();
++    _heartbeat = Timer.periodic(Duration(seconds: _snapshot.heartbeat), (_) {
++      unawaited(_beat().catchError((Object _) {}));
++    });
++  }
++
++  void _fallbackPoll() {
++    _poll ??= Timer.periodic(const Duration(seconds: 3), (_) => _safeRefresh());
++  }
++
++  void _safeRefresh() => unawaited(refresh().catchError((Object _) {}));
++  void _listen() {
++    if (_dead || _suspended) return;
++    _fallbackPoll();
++    final gen = _generation;
++    final subscription = _api.changes().listen((event) {
++      if (!_valid(gen)) return;
++      if (event == 'connected') {
++        _poll?.cancel();
++        _poll = null;
++      }
++      if (event == 'remote.session.changed' || event == 'connected') {
++        _safeRefresh();
++      }
++    }, onError: (Object error) {
++      if (!_valid(gen)) return;
++      _fallbackPoll();
++      if (error is HealthFailure &&
++          (error.status == 401 || error.status == 403)) {
++        unawaited(_revoke());
++      }
++    }, onDone: () {
++      if (!_valid(gen)) return;
++      _fallbackPoll();
++      _sseRetry = Timer(const Duration(seconds: 5), _listen);
++    });
++    _events = subscription;
++  }
++
++  Future<void> _lock() async {
++    if (_dead ||
++        _suspended ||
++        _holdVersion != null ||
++        _snapshot.operatorId != _id) return;
++    // Invoke release synchronously while the old role can still send UP.
++    // Set the fence before awaiting its completion or sending any write.
++    late Future<void> pending;
++    try {
++      pending = _release();
++    } finally {
++      _holdVersion = _snapshot.version;
++      notifyListeners();
++    }
++    await pending;
++  }
++
++  Future<void> _revoke() async {
++    if (_dead || _suspended) return;
++    await _lock();
++    if (_dead) return;
++    _suspended = true;
++    _generation++;
++    _stop();
++    notifyListeners();
++  }
++
++  Future<void> _apply(_Json json, int gen) async {
++    if (!_valid(gen)) return;
++    final next = _Snapshot(json, device);
++    if (next.version < _snapshot.version) return;
++    if (!next.names.containsKey(_id)) {
++      await _revoke();
++      return;
++    }
++    if (!viewOnly && next.operatorId != _id) await _lock();
++    if (!_valid(gen) || next.version < _snapshot.version) return;
++    final cadence = next.heartbeat != _snapshot.heartbeat;
++    _snapshot = next;
++    _knownNames.addAll(next.names);
++    if (_holdVersion != null && next.version > _holdVersion!) {
++      _holdVersion = null;
++    }
++    if (!viewOnly) _everOperated = true;
++    if (_started && cadence) _schedule();
++    notifyListeners();
++  }
++
++  Future<void> _error(Object error, int gen) async {
++    if (!_valid(gen)) return;
++    if (error is HealthFailure &&
++        (error.status == 401 || error.status == 403)) {
++      await _revoke();
++    }
++  }
++
++  Future<void> refresh() async {
++    if (_refreshing) {
++      _refreshAgain = true;
++      return;
++    }
++    if (_dead || _suspended) return;
++    final gen = _generation;
++    if (!_isCurrent()) {
++      await _revoke();
++      return;
++    }
++    _refreshing = true;
++    try {
++      do {
++        _refreshAgain = false;
++        await _apply(await _call(_api, 'GET', '$_path/sessions'), gen);
++      } while (_refreshAgain && _valid(gen));
++    } catch (e) {
++      await _error(e, gen);
++      rethrow;
++    } finally {
++      _refreshing = false;
++    }
++  }
++
++  Future<void> connected() async {
++    _linked = true;
++    await _beat();
++  }
++
++  Future<void> _beat() async {
++    if (_beating || _dead || _suspended) return;
++    if (!_isCurrent()) {
++      await _revoke();
++      return;
++    }
++    final gen = _generation;
++    _beating = true;
++    try {
++      await _apply(
++          await _call(_api, 'POST', '$_path/sessions/$_id/heartbeat', {
++            if (_linked) 'state': 'connected',
++          }),
++          gen);
++    } on HealthFailure catch (e) {
++      if (e.status == 409 && _valid(gen)) {
++        await _lock();
++        await refresh();
++      } else {
++        await _error(e, gen);
++        rethrow;
++      }
++    } finally {
++      _beating = false;
++    }
++  }
++
++  Future<void> handOver(String target) async {
++    if (viewOnly ||
++        busy ||
++        !_snapshot.connected.contains(target) ||
++        target == _id) return;
++    final gen = _generation, version = _snapshot.version;
++    final from = _snapshot.names[_id]!, to = _snapshot.names[target]!;
++    _acting = true;
++    try {
++      final released = _lock();
++      _transferring = true;
++      await released;
++      if (!_valid(gen)) return;
++      final result = await _call(_api, 'POST', '$_path/handover', {
++        'from_session': _id,
++        'to_session': target,
++        'expected_version': version
++      });
++      if (!_valid(gen)) return;
++      final audit = result['audit_id'];
++      if (audit is int &&
++          audit > 0 &&
++          result['operator_session_id'] == target) {
++        _handoverNote = _receiptNote(audit, DateTime.now(), from, to);
++      }
++      await _apply(result, gen);
++    } catch (e) {
++      if (_valid(gen)) {
++        await _error(e, gen);
++        try {
++          await refresh();
++        } catch (_) {}
++      }
++      if (e is! HealthFailure || e.status != 409) rethrow;
++    } finally {
++      _transferring = false;
++      _acting = false;
++      if (!_dead) notifyListeners();
++    }
++  }
++
++  Future<void> claim() async {
++    if (!canClaim) return;
++    final gen = _generation;
++    _acting = true;
++    notifyListeners();
++    try {
++      await _apply(
++          await _call(_api, 'POST', '$_path/claim',
++              {'session_id': _id, 'expected_version': _snapshot.version}),
++          gen);
++    } on HealthFailure catch (e) {
++      if (e.status == 409 && _valid(gen)) {
++        await refresh();
++      } else {
++        await _error(e, gen);
++        rethrow;
++      }
++    } finally {
++      _acting = false;
++      if (!_dead) notifyListeners();
++    }
++  }
++
++  void _stop() {
++    _heartbeat?.cancel();
++    _poll?.cancel();
++    _sseRetry?.cancel();
++    _heartbeat = null;
++    _poll = null;
++    _sseRetry = null;
++    unawaited(_events?.cancel());
++    _events = null;
++  }
++
++  Future<void> _endId(String id) async {
++    if (!_isCurrent()) return;
++    try {
++      await _call(_api, 'POST', '$_path/sessions/$id/end', {});
++    } catch (_) {
++      // The server settles the lease even if the last request is lost.
++    }
++  }
++
++  Future<void> suspend() {
++    // This native disconnect also invalidates a registration already in flight
++    // after retirement of the previous UUID. Its late receipt must be ended.
++    _transportRound++;
++    return _retiring ??= _suspend();
++  }
++
++  Future<void> _suspend() async {
++    if (_dead || _suspended) return;
++    final release = _lock();
++    _generation++;
++    _suspended = true;
++    _stop();
++    notifyListeners();
++    try {
++      await release;
++    } finally {
++      await _endId(_id);
++    }
++  }
++
++  Future<void> reconnect() {
++    if (_dead) return Future.error(const RemoteJoinCancelled());
++    final round = _transportRound;
++    final pending = _renewing;
++    if (pending != null) {
++      if (_renewingRound == round) return pending;
++      // Only one registration in flight. The old round retires its own UUID
++      // before the newly authenticated transport requests another.
++      return pending.catchError((Object _) {}).then((_) {
++        if (_dead || round != _transportRound)
++          throw const RemoteJoinCancelled();
++        return reconnect();
++      });
++    }
++    _renewingRound = round;
++    return _renewing = _reconnect(round).whenComplete(() => _renewing = null);
++  }
++
++  Future<void> _reconnect(int round) async {
++    await (_retiring ??= _suspend());
++    if (_dead || round != _transportRound || !_isCurrent())
++      throw const RemoteJoinCancelled();
++    final gen = _generation;
++    final seed = (await _register(_api, device, _staffPeer, _instance))!;
++    if (_dead ||
++        gen != _generation ||
++        round != _transportRound ||
++        !_isCurrent()) {
++      await _endId(seed['session_id']);
++      throw const RemoteJoinCancelled();
++    }
++    _id = seed['session_id'];
++    _toolbarId = seed['toolbar_session_id'];
++    _snapshot = _Snapshot(seed['snapshot'], device);
++    _knownNames.addAll(_snapshot.names);
++    _suspended = false;
++    _holdVersion = null;
++    _retiring = null;
++    _linked = true;
++    _everOperated = !viewOnly;
++    _handoverNote = null;
++    _started = false;
++    start();
++    notifyListeners();
++    try {
++      await connected();
++    } catch (error) {
++      // Registration already returned the role. Keep its case round and
++      // periodically retry "connected" on a lost initial heartbeat.
++      if (!_unavailable(error)) rethrow;
++    }
++  }
++
++  Future<void> end() => _ending ??= _end();
++  Future<void> _end() async {
++    final alreadyRetiring = _retiring;
++    _dead = true;
++    _generation++;
++    _stop();
++    notifyListeners();
++    try {
++      if (alreadyRetiring != null) {
++        await alreadyRetiring;
++      } else {
++        await _endId(_id);
++      }
++      final registering = _renewing;
++      if (registering != null) {
++        try {
++          await registering;
++        } catch (_) {/* the round was closed */}
++      }
++    } finally {
++      _api.close();
++    }
++  }
++}
+diff --git a/flutter/lib/steaddesk/role_binding.dart b/flutter/lib/steaddesk/role_binding.dart
+new file mode 100644
+index 0000000..f1e04f0
+--- /dev/null
++++ b/flutter/lib/steaddesk/role_binding.dart
+@@ -0,0 +1,136 @@
++import 'dart:async';
++import 'dart:convert';
++
++import 'package:crypto/crypto.dart';
++import 'package:desktop_multi_window/desktop_multi_window.dart';
++import '../consts.dart' show kMainWindowId;
++import 'role_event_relay.dart';
++import 'package:flutter/material.dart';
++
++import '../models/platform_model.dart' show bind;
++import 'ops_groups.dart' show opsEndpoint;
++import 'ops_health.dart';
++import 'remote_role.dart';
++
++String _token() => bind.mainGetLocalOption(key: 'access_token');
++String _identity(String token) => sha256.convert(utf8.encode(token)).toString();
++
++/// Keep credentials local to each Flutter engine. Authenticate only against
++/// the configured ops origin and never put the bearer in a window message.
++class RoleBinding extends OpsHealthHttp {
++  final String token;
++  final Uri origin;
++  RoleBinding(this.origin, this.token) : super(origin, token);
++
++  bool get current => token.isNotEmpty && token == _token();
++
++  Future<void> _check() async {
++    if (!current ||
++        opsEndpoint(Uri.parse(await bind.mainGetApiServer())) != origin ||
++        !current) {
++      throw const HealthFailure(401);
++    }
++  }
++
++  @override
++  Future<Map<String, dynamic>> request(String method, String route,
++      [Map<String, dynamic>? body]) async {
++    await _check();
++    return super.request(method, route, body);
++  }
++
++  static final events = RoleEventClient((message) =>
++      DesktopMultiWindow.invokeMethod(kMainWindowId, roleFeedMethod, message));
++  static final host = RoleEventHost(
++    auth: (origin, identity) async {
++      final configured = opsEndpoint(Uri.parse(await bind.mainGetApiServer()));
++      final t = _token();
++      return configured.toString() == origin &&
++          t.isNotEmpty &&
++          _identity(t) == identity;
++    },
++    open: (origin, identity) {
++      final t = _token();
++      if (t.isEmpty || _identity(t) != identity) throw const HealthFailure(401);
++      return OpsHealthHttp(Uri.parse(origin), t);
++    },
++    deliver: (window, subscription, event) async =>
++        await DesktopMultiWindow.invokeMethod(window, roleFeedEvent,
++            {'subscription': subscription, 'event': event}) ==
++        true,
++  );
++
++  @override
++  Stream<String> changes() async* {
++    await _check();
++    yield* events.listen(origin.toString(), _identity(token));
++  }
++
++  static Future<Map<String, dynamic>?> prepare(
++      BuildContext? context, String device) async {
++    final token = _token();
++    if (token.isEmpty || !RegExp(r'^[0-9]{9,10}$').hasMatch(device))
++      return null;
++    final Uri origin;
++    try {
++      origin = opsEndpoint(Uri.parse(
++          await bind.mainGetApiServer().timeout(const Duration(seconds: 2))));
++    } on TimeoutException {
++      return null;
++    } on ArgumentError {
++      return null;
++    } on FormatException {
++      return null;
++    }
++    final api = RoleBinding(origin, token);
++    try {
++      final seed = await RemoteRole.prepare(
++          api: api,
++          device: device,
++          resolveStaffPeer: () => bind.mainGetMyId(),
++          confirm: (name) async {
++            if (context == null || !context.mounted || !api.current)
++              return false;
++            return await showDialog<bool>(
++                  context: context,
++                  builder: (dialog) => AlertDialog(
++                    content:
++                        Text('${name}正在远程这台设备。仍要连接将只能观看，${name}可以把操作权转交给你。'),
++                    actions: [
++                      TextButton(
++                          onPressed: () => Navigator.pop(dialog, false),
++                          child: const Text('取消')),
++                      TextButton(
++                          onPressed: () => Navigator.pop(dialog, true),
++                          child: const Text('仍要连接（只看）')),
++                    ],
++                  ),
++                ) ==
++                true;
++          });
++      if (seed == null) return null;
++      if (!api.current) throw const HealthFailure(401);
++      return {
++        ...seed,
++        'origin': origin.toString(),
++        'identity': _identity(token)
++      };
++    } finally {
++      api.close();
++    }
++  }
++
++  static RemoteRole attach(
++      Map<String, dynamic> seed, Future<void> Function() release) {
++    final token = _token();
++    final uri = opsEndpoint(Uri.parse(seed['origin'] as String));
++    final api = RoleBinding(uri, token);
++    final identity = seed['identity'];
++    if (token.isEmpty || identity != _identity(token)) {
++      api.close();
++      throw const HealthFailure(401);
++    }
++    return RemoteRole.fromSeed(seed,
++        api: api, releaseInput: release, isCurrent: () => api.current);
++  }
++}
+diff --git a/flutter/lib/steaddesk/role_event_relay.dart b/flutter/lib/steaddesk/role_event_relay.dart
+new file mode 100644
+index 0000000..d5024cb
+--- /dev/null
++++ b/flutter/lib/steaddesk/role_event_relay.dart
+@@ -0,0 +1,158 @@
++import 'dart:async';
++import 'package:uuid/uuid.dart';
++import 'ops_health.dart';
++
++const roleFeedMethod = 'steaddesk.role.feed';
++const roleFeedEvent = 'steaddesk.role.hint';
++
++/// The main engine attaches subscribers to its existing identity-scoped SSE
++/// pool. Window IDs come from the native IPC envelope, never from the payload.
++class RoleEventHost {
++  final Future<bool> Function(String, String) auth;
++  final HealthApi Function(String, String) open;
++  final Future<bool> Function(int, String, String) deliver;
++  final Duration lease;
++  final _subscriptions = <(int, String), _HostSubscription>{};
++  RoleEventHost(
++      {required this.auth,
++      required this.open,
++      required this.deliver,
++      this.lease = const Duration(seconds: 18)});
++
++  Future<String> handle(int window, String action, Map message) async {
++    final id = message['subscription'],
++        origin = message['origin'],
++        identity = message['identity'];
++    if (window <= 0 ||
++        id is! String ||
++        id.isEmpty ||
++        id.length > 64 ||
++        origin is! String ||
++        identity is! String) return 'denied';
++    final key = (window, id);
++    void drop(_HostSubscription entry) {
++      if (identical(_subscriptions[key], entry)) _subscriptions.remove(key);
++      entry.close();
++    }
++
++    final previous = _subscriptions[key];
++    if (action == 'close') {
++      if (previous != null) drop(previous);
++      return 'ok';
++    }
++    if (action != 'open' && action != 'renew') return 'denied';
++    if (previous != null &&
++        (previous.origin != origin || previous.identity != identity))
++      return 'denied';
++    if (!await auth(origin, identity)) {
++      if (previous != null) drop(previous);
++      return 'denied';
++    }
++    if (previous != null && identical(_subscriptions[key], previous)) {
++      previous.renew(lease, () => drop(previous));
++      return 'ok';
++    }
++    if (action == 'renew') return 'gone';
++
++    final entry = _HostSubscription(origin, identity, open(origin, identity));
++    _subscriptions[key] = entry;
++    entry.renew(lease, () => drop(entry));
++    Future<void> send(String event) async {
++      if (!identical(_subscriptions[key], entry)) return;
++      try {
++        if (!await auth(origin, identity)) event = 'denied';
++        if (!identical(_subscriptions[key], entry)) return;
++        final alive = await deliver(window, id, event)
++            .timeout(const Duration(seconds: 3));
++        if (!alive || event == 'gone' || event == 'denied') drop(entry);
++      } catch (_) {
++        drop(entry);
++      }
++    }
++
++    entry.stream = entry.api.changes().listen((event) {
++      if (event == 'connected' || event == 'remote.session.changed')
++        unawaited(send(event));
++    },
++        onError: (Object e) => unawaited(send(
++            e is HealthFailure && (e.status == 401 || e.status == 403)
++                ? 'denied'
++                : 'gone')),
++        onDone: () => unawaited(send('gone')));
++    return 'ok';
++  }
++
++  void dispose() {
++    for (final sub in _subscriptions.values) {
++      sub.close();
++    }
++    _subscriptions.clear();
++  }
++}
++
++class _HostSubscription {
++  final String origin, identity;
++  final HealthApi api;
++  Timer? expiry;
++  StreamSubscription<String>? stream;
++  _HostSubscription(this.origin, this.identity, this.api);
++  void renew(Duration lease, void Function() expired) {
++    expiry?.cancel();
++    expiry = Timer(lease, expired);
++  }
++
++  void close() {
++    expiry?.cancel();
++    unawaited(stream?.cancel());
++    stream = null;
++    api.close();
++  }
++}
++
++/// Each child sends only a fingerprint and subscription nonce. If the main
++/// engine vanishes, the control stream closes and 3-second GET polling resumes.
++class RoleEventClient {
++  final Future<dynamic> Function(Map<String, String>) call;
++  final Duration renewEvery;
++  final _sinks = <String, StreamController<String>>{};
++  RoleEventClient(this.call, {this.renewEvery = const Duration(seconds: 6)});
++
++  bool receive(String id, String event) {
++    final sink = _sinks[id];
++    if (sink == null || sink.isClosed) return false;
++    if (event == 'denied') sink.addError(const HealthFailure(401));
++    if (event == 'denied' || event == 'gone') {
++      unawaited(sink.close());
++    } else if (event == 'connected' || event == 'remote.session.changed') {
++      sink.add(event);
++    }
++    return true;
++  }
++
++  Stream<String> listen(String origin, String identity) {
++    final id = const Uuid().v4();
++    final args = {'subscription': id, 'origin': origin, 'identity': identity};
++    late StreamController<String> sink;
++    Timer? timer;
++    Future<void> exchange(String action) async {
++      try {
++        final reply = await call({...args, 'action': action})
++            .timeout(const Duration(seconds: 3));
++        if (reply != 'ok') receive(id, reply == 'denied' ? 'denied' : 'gone');
++      } catch (_) {
++        receive(id, 'gone');
++      }
++    }
++
++    sink = StreamController<String>(onListen: () {
++      _sinks[id] = sink;
++      unawaited(exchange('open'));
++      timer = Timer.periodic(renewEvery, (_) => unawaited(exchange('renew')));
++    }, onCancel: () {
++      timer?.cancel();
++      _sinks.remove(id);
++      unawaited(exchange('close'));
++    });
++    return sink.stream;
++  }
++}
+diff --git a/flutter/lib/steaddesk/role_header.dart b/flutter/lib/steaddesk/role_header.dart
+new file mode 100644
+index 0000000..24db5bf
+--- /dev/null
++++ b/flutter/lib/steaddesk/role_header.dart
+@@ -0,0 +1,96 @@
++import 'package:flutter/material.dart';
++import 'remote_role.dart';
++
++class RoleHeader extends StatelessWidget {
++  final RemoteRole role;
++  const RoleHeader(this.role, {super.key});
++
++  Future<void> _submit(
++      BuildContext context, Future<void> Function() action) async {
++    try {
++      await action();
++    } catch (_) {
++      if (context.mounted) {
++        ScaffoldMessenger.maybeOf(context)?.showSnackBar(
++            const SnackBar(content: Text('操作权变更未确认，请核对最新会话状态。')));
++      }
++    }
++  }
++
++  Future<void> _confirmClaim(BuildContext context) async {
++    final prompt = role.claimPrompt;
++    final label = role.claimLabel;
++    final accepted = await showDialog<bool>(
++        context: context,
++        builder: (dialog) => AlertDialog(content: Text(prompt), actions: [
++              TextButton(
++                  onPressed: () => Navigator.pop(dialog, false),
++                  child: const Text('取消')),
++              TextButton(
++                  onPressed: () => Navigator.pop(dialog, true),
++                  child: Text(label)),
++            ]));
++    if (accepted == true &&
++        context.mounted &&
++        !role.busy &&
++        role.canClaim &&
++        role.claimPrompt == prompt) {
++      await _submit(context, role.claim);
++    }
++  }
++
++  @override
++  Widget build(BuildContext context) => AnimatedBuilder(
++      animation: role,
++      builder: (context, _) {
++        final viewers = role.watchers;
++        Widget label(String text) => Tooltip(
++            message: text,
++            child: ConstrainedBox(
++                constraints: BoxConstraints(
++                    maxWidth: (MediaQuery.sizeOf(context).width * .2)
++                        .clamp(80.0, 240.0)
++                        .toDouble()),
++                child:
++                    Text(text, maxLines: 1, overflow: TextOverflow.ellipsis)));
++
++        if (role.viewOnly) {
++          final owner = role.operatorName;
++          return Row(mainAxisSize: MainAxisSize.min, children: [
++            label(owner == null ? '只看模式' : '只看模式 · ${owner}正在操作'),
++            if (role.canClaim)
++              TextButton(
++                  onPressed: role.busy ? null : () => _confirmClaim(context),
++                  child: Text(role.claimLabel)),
++          ]);
++        }
++        if (viewers.isEmpty) return const SizedBox.shrink();
++        return Row(mainAxisSize: MainAxisSize.min, children: [
++          label(viewers.length == 1
++              ? '${viewers.values.single} 正在观看'
++              : '${viewers.values.first} 等 ${viewers.length} 人正在观看'),
++          if (viewers.length == 1)
++            TextButton(
++                onPressed: role.busy
++                    ? null
++                    : () => _submit(
++                        context, () => role.handOver(viewers.keys.single)),
++                child: const Text('转交操作权'))
++          else
++            PopupMenuButton<String>(
++                enabled: !role.busy,
++                tooltip: '转交操作权',
++                child: const Padding(
++                    padding: EdgeInsets.all(8), child: Text('转交操作权 ▾')),
++                itemBuilder: (_) => [
++                      for (final viewer in viewers.entries)
++                        PopupMenuItem(
++                            value: viewer.key,
++                            child: Text(viewer.value,
++                                maxLines: 1, overflow: TextOverflow.ellipsis))
++                    ],
++                onSelected: (target) =>
++                    _submit(context, () => role.handOver(target))),
++        ]);
++      });
++}
+diff --git a/flutter/lib/steaddesk/role_input.dart b/flutter/lib/steaddesk/role_input.dart
+new file mode 100644
+index 0000000..1ef94e8
+--- /dev/null
++++ b/flutter/lib/steaddesk/role_input.dart
+@@ -0,0 +1,37 @@
++/// Releases exactly the presses emitted by this connection. Release callbacks
++/// go straight to the transport; they must work after the local gate closes.
++class RolePressedInputs {
++  final _held = <String, Future<void> Function()>{};
++  bool releasing = false;
++
++  void track(String key, bool down, Future<void> Function() release) {
++    if (releasing) return;
++    if (down) {
++      _held[key] = release;
++    } else {
++      _held.remove(key);
++    }
++  }
++
++  Future<void> release() async {
++    releasing = true;
++    final pending = _held.values.toList();
++    _held.clear();
++    try {
++      await Future.wait(pending.map((sendUp) => Future.sync(sendUp)));
++    } finally {
++      releasing = false;
++    }
++  }
++}
++
++/// A promotion may arrive while a viewer is holding keys over the canvas.
++/// Reuse the current hover but only acquire after a physically neutral sample.
++class RoleInputPromotion {
++  bool waiting = false;
++  bool acquire({required bool wantsInput, required bool held}) {
++    if (!waiting || !wantsInput || held) return false;
++    waiting = false;
++    return true;
++  }
++}
+diff --git a/flutter/lib/steaddesk/role_launch.dart b/flutter/lib/steaddesk/role_launch.dart
+new file mode 100644
+index 0000000..af38778
+--- /dev/null
++++ b/flutter/lib/steaddesk/role_launch.dart
+@@ -0,0 +1,22 @@
++/// Serialize simultaneous entry points for one peer. Reopening an existing tab
++/// must retain its current registration and any manual view-only setting.
++class RemoteLaunchGate {
++  final _inFlight = <String, Future<void>>{};
++
++  Future<void> run(
++    String peer, {
++    required Future<bool> Function() activateExisting,
++    required Future<Map<String, dynamic>?> Function() prepare,
++    required Future<void> Function(Map<String, dynamic>?) open,
++  }) {
++    return _inFlight.putIfAbsent(peer, () async {
++      try {
++        if (await activateExisting()) return;
++        final seed = await prepare();
++        await open(seed);
++      } finally {
++        _inFlight.remove(peer);
++      }
++    });
++  }
++}
+diff --git a/flutter/lib/steaddesk/session_surface.dart b/flutter/lib/steaddesk/session_surface.dart
+index 42ea102..ac1a9d5 100644
+--- a/flutter/lib/steaddesk/session_surface.dart
++++ b/flutter/lib/steaddesk/session_surface.dart
+@@ -171,10 +171,14 @@ class _SessionSurfaceState extends State<SessionSurface> {
+       }
+       final connection = bind.sessionGetConnSessionId(sessionId: ffi.sessionId);
+       if (connection.isEmpty || connection == '0') return layout(history, drawer, null, null);
+-      return sessionToolbar(key: ValueKey((widget.id, ffi.sessionId, connection)),
++      final toolbarId = ffi.remoteRole?.toolbarSessionId;
++      return sessionToolbar(key: ValueKey((widget.id, ffi.sessionId, connection, toolbarId)),
+           peer: widget.id, session: ffi.sessionId.toString(), connection: connection,
++          toolbarId: toolbarId,
++          viewing: () => ffi.remoteRole?.viewOnly == true,
++          multipleSessions: () => ffi.remoteRole?.multipleSessions == true,
+           cases: casesEnabled && isWindows, platform: model.pi.platform,
+-          active: widget.toolbarActive!, screenshotAllowed: widget.screenshotAllowed!,
++          active: () => widget.toolbarActive!() && ffi.remoteRole?.toolbarSessionId == toolbarId, screenshotAllowed: widget.screenshotAllowed!,
+           frame: frame, builder: (toolbar, actions) => layout(history, drawer, toolbar, actions));
+     }
+     if (!casesEnabled || !isWindows) return withToolbar(null, null);
+@@ -257,7 +261,8 @@ class _SessionHeader extends StatelessWidget {
+       final matches = controls.where((item) => item.action == action);
+       return MenuButton(
+           ffi: ffi,
+-          child: Text(translate(label)),
++          child: action == SessionAction.transfer && ffi.remoteRole?.viewOnly == true
++              ? Tooltip(message: '只看模式', child: Text(translate(label))) : Text(translate(label)),
+           onPressed: matches.isEmpty ? null : matches.first.onPressed);
+     }
+ 
+@@ -290,6 +295,7 @@ class _SessionHeader extends StatelessWidget {
+                             mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                             children: [
+                               Row(children: [
++                                if (ffi.remoteRole case final role?) RoleHeader(role),
+                                 if (session.ready)
+                                   Obx(() => ConnectionTypeState.find(session.id)
+                                               .secure
+@@ -554,7 +560,7 @@ class _AndroidKeys extends StatelessWidget {
+         versionCmp(model.pi.version, '1.2.7') >= 0;
+     Widget key(String label, IconData icon, VoidCallback press) => Expanded(
+         child: IconButton(
+-            tooltip: translate(label),
++            tooltip: ffi.remoteRole?.viewOnly == true ? '只看模式' : translate(label),
+             padding: EdgeInsets.zero,
+             constraints: const BoxConstraints(),
+             color: _ocean,
+@@ -572,7 +578,7 @@ class _AndroidKeys extends StatelessWidget {
+           key('Volume up', Icons.volume_up_outlined, input.onMobileVolumeUp),
+           PowerMenuButton(
+               visible: isWindows && supportPowerMenuEnabled && model.isPeerAndroid,
+-              tooltip: translate('Power menu'),
++              tooltip: ffi.remoteRole?.viewOnly == true ? '只看模式' : translate('Power menu'),
+               enabled: enabled,
+               activeConnection: () {
+                 if (!model.isPeerAndroid || !model.keyboard || model.viewOnly ||
+@@ -580,6 +586,7 @@ class _AndroidKeys extends StatelessWidget {
+                 return bind.sessionGetConnSessionId(sessionId: ffi.sessionId);
+               },
+               send: (connection, count) async {
++                if (ffi.remoteRole?.viewOnly == true) return;
+                 final peer = input.id;
+                 final session = ffi.sessionId.toString();
+                 if (model.pi.platformAdditions['steaddesk_counted_power_menu'] == true) {
+diff --git a/flutter/lib/steaddesk/toolbar/host.dart b/flutter/lib/steaddesk/toolbar/host.dart
+index 63b87f3..db68836 100644
+--- a/flutter/lib/steaddesk/toolbar/host.dart
++++ b/flutter/lib/steaddesk/toolbar/host.dart
+@@ -35,6 +35,9 @@ Widget sessionToolbar(
+         required String peer,
+         required String session,
+         required String connection,
++        String? toolbarId,
++        bool Function()? viewing,
++        bool Function()? multipleSessions,
+         required bool cases,
+         required String platform,
+         required bool Function() active,
+@@ -57,6 +60,7 @@ Widget sessionToolbar(
+               peer: peer,
+               session: session,
+               connection: connection,
++              toolbarId: toolbarId, viewing: viewing, multipleSessions: multipleSessions,
+               cases: cases,
+               platform: platform,
+               active: active,
+@@ -72,6 +76,7 @@ class _Toolbar extends StatefulWidget {
+       required this.peer,
+       required this.session,
+       required this.connection,
++      this.toolbarId, this.viewing, this.multipleSessions,
+       required this.cases,
+       required this.platform,
+       required this.active,
+@@ -79,6 +84,8 @@ class _Toolbar extends StatefulWidget {
+       required this.frame,
+       required this.builder});
+   final String peer, session, connection, platform;
++  final String? toolbarId;
++  final bool Function()? viewing, multipleSessions;
+   final bool cases, read, fixed;
+   final bool Function() active, screenshotAllowed;
+   final ToolbarFrame frame;
+@@ -97,6 +104,9 @@ class _ToolbarState extends State<_Toolbar> {
+   List<FixedOption>? options;
+   String? supportPeer;
+   late final Timer timer;
++  bool get viewing => widget.viewing?.call() == true;
++  bool get multiple => widget.multipleSessions?.call() == true;
++  bool get fixedCurrent => current && !viewing && !multiple;
+   bool get current =>
+       mounted && owner != null && owner == _login() && widget.active();
+   @override
+@@ -132,12 +142,15 @@ class _ToolbarState extends State<_Toolbar> {
+                 opsEndpoint(Uri.parse(record['help_origin'])) != target)) {
+       throw const FormatException('工单与当前会话不匹配。');
+     }
++    if (widget.cases && record == null) {
++      throw const FormatException('正在等待当前结案记录。');
++    }
+     final path = toolbarSessionRoute(
+         peer: widget.peer,
+         session: widget.session,
+         connection: widget.connection,
+         cases: widget.cases,
+-        caseId: record?['id'] as String?);
++        caseId: widget.toolbarId ?? record?['id'] as String?);
+     if (route != null && route != path) throw const FormatException('会话编号已变化。');
+     ticket = record?['help_id'] as String?;
+     route = path;
+@@ -150,6 +163,14 @@ class _ToolbarState extends State<_Toolbar> {
+     if (!current || target != origin) {
+       throw const FormatException('会话或登录状态已变化。');
+     }
++    if (method == 'POST') {
++      if (path.startsWith('$route/fixed-') && !fixedCurrent) {
++        throw const FormatException('当前会话无法执行固定动作。');
++      }
++      if (viewing && (body?['action'] == 'quick_check' || body?['action'] == 'collect_logs')) {
++        throw const FormatException('只看模式');
++      }
++    }
+     return http!.request(method, path, body);
+   }
+ 
+@@ -187,7 +208,7 @@ class _ToolbarState extends State<_Toolbar> {
+               .toList();
+         });
+       }
+-      if (widget.fixed && current && !busy) {
++      if (widget.fixed && fixedCurrent && !busy) {
+         List<FixedOption>? found;
+         String? who;
+         try {
+@@ -223,7 +244,7 @@ class _ToolbarState extends State<_Toolbar> {
+     bool valid() =>
+         current &&
+         widget.read &&
+-        (action != ToolbarAction.screenshot || allowed());
++        (action == ToolbarAction.screenshot ? allowed() : !viewing);
+     if (!valid()) return;
+     setState(() {
+       busy = true;
+@@ -250,7 +271,7 @@ class _ToolbarState extends State<_Toolbar> {
+   Future<void> runFixed(FixedAction action) async {
+     final peer = supportPeer;
+     if (!widget.fixed ||
+-        !current ||
++        !fixedCurrent ||
+         !authorized ||
+         busy ||
+         peer == null ||
+@@ -267,25 +288,25 @@ class _ToolbarState extends State<_Toolbar> {
+       final latest = FixedOption.options(
+           await request('POST', '$route/fixed-options', {'peer_id': peer}));
+       final choices = latest?.where((o) => o.action == action).toList();
+-      if (choices == null || choices.isEmpty || !current) {
++      if (choices == null || choices.isEmpty || !fixedCurrent) {
+         throw const FormatException('此设备不支持或当前安全状态不允许执行。');
+       }
+       final choice = choices.length == 1
+           ? choices.single
+-          : await _guardedDialog<FixedOption>(context, () => current,
++          : await _guardedDialog<FixedOption>(context, () => fixedCurrent,
+               (ctx) => fixedTargetDialog(ctx, action, choices));
+-      if (choice == null || !current) return;
++      if (choice == null || !fixedCurrent) return;
+       await submitFixed(request, route!, peer, choice, (step) async {
+-        if (!current) return false;
+-        return await _guardedDialog<bool>(context, () => current,
++        if (!fixedCurrent) return false;
++        return await _guardedDialog<bool>(context, () => fixedCurrent,
+                 (ctx) => fixedConfirmDialog(ctx, choice, step)) ==
+             true;
+       },
+           () async =>
+               await fixedAllowed() &&
+-              current &&
++              fixedCurrent &&
+               await bind.mainGetMyId() == peer &&
+-              current,
++              fixedCurrent,
+           ticket: ticket);
+     } catch (e) {
+       if (mounted) {
+@@ -302,9 +323,9 @@ class _ToolbarState extends State<_Toolbar> {
+   }
+ 
+   Future<bool> fixedAllowed() async {
+-    if (!widget.fixed || !current) return false;
++    if (!widget.fixed || !fixedCurrent) return false;
+     final flags = await readStoreFeatures(widget.peer);
+-    return current &&
++    return fixedCurrent &&
+         widget.fixed &&
+         flags?.allows('toolbar_actions', fixedSupportEnabled, DateTime.now()) ==
+             true;
+@@ -345,7 +366,7 @@ class _ToolbarState extends State<_Toolbar> {
+         },
+         itemBuilder: (_) => toolbarMenuEntries(
+             widget.screenshotAllowed, widget.platform, options,
+-            read: widget.read, fixed: widget.fixed),
++            read: widget.read, fixed: widget.fixed, viewing: viewing, multiple: multiple),
+         child:
+             const Padding(padding: EdgeInsets.all(8), child: Text('快捷操作 ▾')));
+     final sidebar = Padding(
+@@ -401,23 +422,26 @@ List<PopupMenuEntry<Object>> toolbarMenuEntries(
+         String platform,
+         List<FixedOption>? options,
+         {bool read = toolbarEnabled,
+-        bool fixed = fixedSupportEnabled}) =>
++        bool fixed = fixedSupportEnabled, bool viewing = false, bool multiple = false}) =>
+     [
+       if (read && toolbarEnabled)
+         for (final a in ToolbarAction.values)
+           PopupMenuItem(
+               value: a,
+-              enabled: (a != ToolbarAction.screenshot || screenshotAllowed()) &&
++              enabled: (!viewing || a == ToolbarAction.screenshot) &&
++                  (a != ToolbarAction.screenshot || screenshotAllowed()) &&
+                   (a != ToolbarAction.logs ||
+                       {'Windows', 'Android'}.contains(platform)),
+-              child: Text(a.label)),
++              child: Text(viewing && a != ToolbarAction.screenshot ? '${a.label} · 只看模式' : a.label)),
+       if (fixed && fixedSupportEnabled) ...[
+         if (read && toolbarEnabled) const PopupMenuDivider(),
+         for (final action in FixedAction.values)
+           PopupMenuItem(
+               value: action,
+-              enabled: options?.any((o) => o.action == action) == true,
+-              child: Text(options == null
++              enabled: !multiple && !viewing && options?.any((o) => o.action == action) == true,
++              child: Text(viewing || multiple
++                  ? '${action.label} · ${viewing ? '只看模式' : ''}${viewing && multiple ? ' · ' : ''}${multiple ? '多人同时在线，固定动作暂不可用' : ''}'
++                  : options == null
+                   ? '${action.label} · 安全状态不可用'
+                   : options.any((o) => o.action == action)
+                       ? action.label
+diff --git a/flutter/lib/steaddesk/toolbar/off.dart b/flutter/lib/steaddesk/toolbar/off.dart
+index 9a281e7..9de9e4f 100644
+--- a/flutter/lib/steaddesk/toolbar/off.dart
++++ b/flutter/lib/steaddesk/toolbar/off.dart
+@@ -16,6 +16,9 @@ Widget sessionToolbar(
+         required String peer,
+         required String session,
+         required String connection,
++        String? toolbarId,
++        bool Function()? viewing,
++        bool Function()? multipleSessions,
+         required bool cases,
+         required String platform,
+         required bool Function() active,
+diff --git a/flutter/lib/utils/multi_window_manager.dart b/flutter/lib/utils/multi_window_manager.dart
+index 3e284b8..894806b 100644
+--- a/flutter/lib/utils/multi_window_manager.dart
++++ b/flutter/lib/utils/multi_window_manager.dart
+@@ -8,7 +8,7 @@ import 'package:flutter_hbb/consts.dart';
+ import 'package:flutter_hbb/common.dart';
+ import 'package:flutter_hbb/main.dart';
+ import 'package:flutter_hbb/models/input_model.dart';
+-import '../steaddesk/merchant_build.dart' show casesEnabled;
++import '../steaddesk/merchant_build.dart' show casesEnabled, merchantEdition;
+ import '../steaddesk/case_session_api.dart';
+ import '../steaddesk/metrics_api.dart';
+ import '../steaddesk/case_inbox_api.dart' show caseEnded;
+@@ -70,6 +70,31 @@ class RustDeskMultiWindowManager {
+   final List<int> _portForwardWindows = List.empty(growable: true);
+   final List<int> _terminalWindows = List.empty(growable: true);
+ 
++  Future<bool> activateExistingRemoteTab(String peer, String? helpAttempt) async {
++    for (final window in List.of(_remoteDesktopWindows)) {
++      try {
++        final activated = await DesktopMultiWindow.invokeMethod(
++            window, kWindowEventActiveSession, peer);
++        if (activated != true) continue;
++        if (helpAttempt != null) {
++          await DesktopMultiWindow.invokeMethod(window, 'steaddesk.help.attach',
++              jsonEncode({'id': peer, 'attempt': helpAttempt}));
++        }
++        return true;
++      } catch (_) {
++        // A closing engine no longer owns the tab. Let the normal launch
++        // negotiate an authoritative registration before opening a new one.
++      }
++    }
++    return false;
++  }
++
++  Future<bool> _canSplitRemote(int window, String peer) async {
++    if (!isWindows || merchantEdition) return true;
++    return await DesktopMultiWindow.invokeMethod(
++        window, 'steaddesk.role.canSplit', peer) == true;
++  }
++
+   moveTabToNewWindow(int windowId, String peerId, String sessionId,
+       WindowType windowType) async {
+     var params = {
+@@ -79,6 +104,7 @@ class RustDeskMultiWindowManager {
+       'session_id': sessionId,
+     };
+     if (windowType == WindowType.RemoteDesktop) {
++      if (!await _canSplitRemote(windowId, peerId)) return;
+       await _newSession(
+         false,
+         WindowType.RemoteDesktop,
+@@ -104,6 +130,7 @@ class RustDeskMultiWindowManager {
+   openMonitorSession(int windowId, String peerId, int display, int displayCount,
+       Rect? screenRect, int windowType) async {
+     final isCamera = windowType == WindowType.ViewCamera.index;
++    if (!isCamera && !await _canSplitRemote(windowId, peerId)) return;
+     final windowIDs = isCamera ? _viewCameraWindows : _remoteDesktopWindows;
+     if (windowIDs.length > 1) {
+       for (final windowId in windowIDs) {
+@@ -229,6 +256,7 @@ class RustDeskMultiWindowManager {
+     String remoteId,
+     List<int> windows, {
+     Map<String, dynamic>? metricSeed,
++    Map<String, dynamic>? roleSeed,
+     String? helpAttempt,
+     String? password,
+     bool? forceRelay,
+@@ -241,6 +269,7 @@ class RustDeskMultiWindowManager {
+       "type": type.index,
+       "id": remoteId,
+       if (metricSeed != null) "metric_seed": metricSeed,
++      if (roleSeed != null) "remote_role": roleSeed,
+       if (helpAttempt != null) "help_attempt": helpAttempt,
+       "password": password,
+       "forceRelay": forceRelay
+@@ -282,6 +311,7 @@ class RustDeskMultiWindowManager {
+   Future<MultiWindowCallResult> newRemoteDesktop(
+     String remoteId, {
+     Map<String, dynamic>? metricSeed,
++    Map<String, dynamic>? roleSeed,
+     String? helpAttempt,
+     String? password,
+     bool? isSharedPassword,
+@@ -294,6 +324,7 @@ class RustDeskMultiWindowManager {
+       remoteId,
+       _remoteDesktopWindows,
+       metricSeed: metricSeed,
++      roleSeed: roleSeed,
+       helpAttempt: helpAttempt,
+       password: password,
+       forceRelay: forceRelay,
+diff --git a/flutter/test/steaddesk/case_inbox_test.dart b/flutter/test/steaddesk/case_inbox_test.dart
+index 10f5d29..23a777b 100644
+--- a/flutter/test/steaddesk/case_inbox_test.dart
++++ b/flutter/test/steaddesk/case_inbox_test.dart
+@@ -36,6 +36,15 @@ CaseRecord _ended(String id, String account, {bool interrupted = false}) => {
+     };
+ 
+ void main() {
++  test('former operator persists history without enqueuing a close dialog',
++      () async {
++    final store = _Store();
++    final inbox = CaseInbox(store);
++    await inbox.ended({..._ended('handover', 'demo'), 'suppress_prompt': true});
++    expect(store.records.containsKey('handover'), isTrue);
++    expect(inbox.next('demo'), isNull);
++  });
++
+   testWidgets(
+       'queues normal sessions, keeps disconnect quiet, suppresses duplicate IPC',
+       (t) async {
+diff --git a/flutter/test/steaddesk/case_session_test.dart b/flutter/test/steaddesk/case_session_test.dart
+index 675581c..2636cbf 100644
+--- a/flutter/test/steaddesk/case_session_test.dart
++++ b/flutter/test/steaddesk/case_session_test.dart
+@@ -44,6 +44,66 @@ void main() {
+         'at': start.add(Duration(seconds: seconds)).toIso8601String()
+       };
+ 
++  const key = '10000000-0000-4000-a000-000000000001';
++  CaseData managed(bool viewer, bool operated, {CaseData? receipt}) => {
++        'toolbar_session_id': key,
++        'viewer': viewer,
++        'ever_operated': operated,
++        if (receipt != null) 'handover_notes': [receipt],
++      };
++
++  test('viewer-only connection does not produce a case on close or shutdown',
++      () async {
++    for (final shutdown in [false, true]) {
++      final connection = 'viewer-$shutdown';
++      await ledger.receive({
++        ...event('established', 0, connection),
++        'role': managed(true, false)
++      }, save);
++      if (shutdown) {
++        await ledger.shutdown(start.add(const Duration(minutes: 1)), save);
++      } else {
++        await emit('closed', 60, connection);
++      }
++      expect(writes, isEmpty);
++    }
++  });
++
++  test(
++      'former operator keeps history and typed notes; duplicate receipts add one line',
++      () async {
++    await ledger.receive(
++        {...event('established', 0), 'role': managed(false, true)}, save);
++    final id = ledger.live('test-device', account)!['id'] as String;
++    const line = '[14:32] A 将操作权转交给 B';
++    final changed = {
++      ...event('role', 20),
++      'role': managed(true, true, receipt: {'audit_id': 72, 'text': line})
++    };
++    await ledger.receive(changed, save);
++    await ledger.receive(changed, save);
++    expect(ledger.updateNote(edit('test-device', id, '手写内容', 21), account),
++        isTrue);
++    await emit('closed', 31);
++    expect(writes.single['note'], '手写内容\n$line');
++    expect(writes.single['suppress_prompt'], isTrue);
++  });
++
++  test(
++      'viewer promoted during round qualifies for normal case; stale role is ignored',
++      () async {
++    await ledger.receive(
++        {...event('established', 0), 'role': managed(true, false)}, save);
++    await ledger
++        .receive({...event('role', 20), 'role': managed(false, true)}, save);
++    await ledger.receive({
++      ...event('role', 22),
++      'role': {...managed(true, false), 'toolbar_session_id': 'different-round'}
++    }, save);
++    await emit('closed', 60);
++    expect(writes.single['suppress_prompt'], isNot(true));
++  });
++
+   test('notes require the exact live round and signed-in account', () async {
+     await emit('established', 0, 'one');
+     await emit('established', 0, 'two');
+diff --git a/flutter/test/steaddesk/remote_role_test.dart b/flutter/test/steaddesk/remote_role_test.dart
+new file mode 100644
+index 0000000..fb103c3
+--- /dev/null
++++ b/flutter/test/steaddesk/remote_role_test.dart
+@@ -0,0 +1,526 @@
++import 'dart:async';
++
++import 'dart:io';
++
++import 'package:flutter_test/flutter_test.dart';
++import 'package:flutter_hbb/steaddesk/ops_health.dart';
++import 'package:flutter_hbb/steaddesk/remote_role.dart';
++
++const peer = '987654321';
++const other = '23a2f974-1a16-45ab-8a80-ea3061230001';
++Map<String, dynamic> snapshot(
++        {String? me,
++        String? owner,
++        bool otherLive = false,
++        int version = 1,
++        String? vacancy}) =>
++    {
++      'device_id': peer,
++      'version': version,
++      'operator_session_id': owner,
++      'heartbeat_seconds': 5,
++      'predecessor_session_id': vacancy == null ? null : other,
++      'vacancy_reason': vacancy,
++      'predecessor_unconfirmed': vacancy == 'lease_expired',
++      'fixed_actions_available': !(otherLive && me != null),
++      'sessions': [
++        if (otherLive)
++          {'session_id': other, 'operator_username': 'A', 'state': 'connected'},
++        if (me != null)
++          {'session_id': me, 'operator_username': 'B', 'state': 'connected'},
++      ],
++    };
++typedef Json = Map<String, dynamic>;
++
++class Api implements HealthApi {
++  final Future<Json> Function(String, String, Json?) call;
++  final Stream<String>? events;
++  Api(this.call, {this.events});
++  @override
++  Future<Json> request(String m, String path, [Json? body]) =>
++      call(m, path, body);
++  @override
++  Stream<String> changes() => events ?? const Stream.empty();
++  @override
++  void close() {}
++}
++
++Future<Json?> join(HealthApi api, [Future<bool> Function(String)? confirm]) =>
++    RemoteRole.prepare(
++        api: api,
++        device: peer,
++        staffPeer: '987654322',
++        confirm: confirm ?? (_) => throw StateError('unexpected confirm'));
++
++class _NativeHttp extends HttpOverrides {}
++
++void loopbackTest(String name, Future<void> Function() run) {
++  test(name, () => HttpOverrides.runWithHttpOverrides(run, _NativeHttp()));
++}
++
++void main() {
++  test(
++      'fresh viewer sees expired operator name and only its own handover receipts',
++      () async {
++    String? me;
++    final api = Api((method, path, body) async {
++      if (method == 'POST') me = body!['session_id'];
++      return {
++        ...snapshot(me: me, vacancy: 'lease_expired'),
++        'predecessor_username': 'former',
++        'handover_receipts': [
++          for (final entry in [
++            [9, me],
++            [9, me],
++            [10, other]
++          ])
++            {
++              'audit_id': entry[0],
++              'from_session': 'prior',
++              'from_name': 'former',
++              'to_session': entry[1],
++              'to_name': 'next',
++              'at': '2026-11-18T10:32:00Z'
++            },
++        ],
++      };
++    });
++    final role = RemoteRole.fromSeed((await join(api))!,
++        api: api, releaseInput: () async {});
++    expect(role.claimPrompt, contains('former失去联系'));
++    final notes = role.handoverNotes;
++    expect(notes.single['audit_id'], 9);
++    expect(notes.single['text'], endsWith('former 将操作权转交给 next'));
++  });
++
++  loopbackTest(
++      'missing route and unreachable real loopback server preserve direct connect',
++      () async {
++    final local = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
++    final uri = Uri.parse('http://127.0.0.1:${local.port}');
++    int gets = 0;
++    local.listen((r) {
++      gets++;
++      expect(r.method, 'GET');
++      expect(r.uri.path, '/ops/v1/remote/devices/$peer/sessions');
++      r.response.statusCode = 404;
++      r.response.close();
++    });
++    Future<bool> legacy() async {
++      final api = OpsHealthHttp(uri, 'test');
++      try {
++        return await join(api) == null;
++      } finally {
++        api.close();
++      }
++    }
++
++    expect(await legacy(), true);
++    expect(gets, 1);
++    await local.close(force: true);
++    expect(await legacy(), true);
++  });
++  test('forbidden, unauthorized and invalid JSON never downgrade to legacy',
++      () async {
++    for (final code in [401, 403, 409, 429]) {
++      await expectLater(join(Api((m, p, b) async => throw HealthFailure(code))),
++          throwsA(isA<HealthFailure>()));
++    }
++    await expectLater(join(Api((m, p, b) async => {})), throwsFormatException);
++  });
++  test('register response decides role even when preflight saw an empty device',
++      () async {
++    String? sid;
++    final api = Api((m, p, b) async {
++      if (m == 'GET') return snapshot();
++      sid = b!['session_id'];
++      expect(b['toolbar_session_id'], isNot(sid));
++      return snapshot(me: sid, owner: other, otherLive: true, version: 2);
++    });
++    final seed = (await join(api))!;
++    final role = RemoteRole.fromSeed(seed, api: api, releaseInput: () async {});
++    expect(role.viewOnly, true);
++    expect(role.everOperated, false);
++    expect(role.operatorName, 'A');
++  });
++  test(
++      'busy device can cancel without registering and registration failures cannot grant control',
++      () async {
++    var posts = 0;
++    final api = Api((m, p, b) async {
++      if (m == 'GET') return snapshot(owner: other, otherLive: true);
++      posts++;
++      throw const SocketException('local test');
++    });
++    await expectLater(
++        join(api, (name) async {
++          expect(name, 'A');
++          return false;
++        }),
++        throwsA(isA<RemoteJoinCancelled>()));
++    expect(posts, 0);
++    await expectLater(
++        join(api, (_) async => true), throwsA(isA<SocketException>()));
++    expect(posts, 1);
++  });
++  test(
++      'handover releases input before POST and cannot restore an uncertain handover from an old snapshot',
++      () async {
++    String? sid;
++    final log = <String>[];
++    var version = 1;
++    final api = Api((m, p, b) async {
++      if (m == 'GET') {
++        return sid == null
++            ? snapshot()
++            : snapshot(
++                me: sid,
++                owner: version == 1 ? sid : other,
++                otherLive: true,
++                version: version);
++      }
++      if (p.endsWith('/handover')) {
++        log.add('post');
++        throw TimeoutException('uncertain');
++      }
++      sid = b!['session_id'];
++      return snapshot(me: sid, owner: sid, otherLive: true);
++    });
++    final role = RemoteRole.fromSeed((await join(api))!, api: api,
++        releaseInput: () async {
++      log.add('release');
++    });
++    await expectLater(role.handOver(other), throwsA(isA<TimeoutException>()));
++    expect(log, ['release', 'post']);
++    expect(role.viewOnly, true);
++    await role.refresh();
++    expect(role.viewOnly, true);
++    version++;
++    await role.refresh();
++    expect(role.viewOnly, true);
++    expect(role.everOperated, true);
++  });
++  test(
++      'authenticated vacancy requires explicit claim, reasons differ and stale claim refreshes once',
++      () async {
++    String? sid;
++    String? reason = 'ended';
++    int calls = 0, ver = 3;
++    final api = Api((m, p, b) async {
++      if (p.endsWith('/claim')) {
++        calls++;
++        throw const HealthFailure(409);
++      }
++      if (m == 'POST') sid = b!['session_id'];
++      return snapshot(me: sid, vacancy: reason, version: ver);
++    });
++    final role = RemoteRole.fromSeed((await join(api))!,
++        api: api, releaseInput: () async {});
++    expect(role.canClaim, true);
++    expect(role.claimPrompt, contains('已离开'));
++    reason = 'lease_expired';
++    ver++;
++    await role.refresh();
++    expect(role.claimPrompt, contains('可能仍在操作'));
++    expect(role.claimLabel, '仍要接管');
++    expect(calls, 0);
++    await role.claim();
++    expect(calls, 1);
++    expect(role.viewOnly, true);
++  });
++  test(
++      '404 or lost register after an empty probe uses legacy only when reconciliation has no known competing role',
++      () async {
++    var gets = 0, posts = 0, state = 'empty';
++    String? sid;
++    final api = Api((m, p, b) async {
++      if (m == 'POST') {
++        posts++;
++        sid = b!['session_id'];
++        throw const HealthFailure(404);
++      }
++      gets++;
++      if (gets == 1) return snapshot();
++      if (state == 'offline') throw const SocketException('unreachable');
++      if (state == 'recovered') {
++        return snapshot(me: sid, owner: other, otherLive: true);
++      }
++      if (state == 'race') return snapshot(owner: other, otherLive: true);
++      return snapshot();
++    });
++    for (final mode in ['empty', 'offline', 'recovered', 'race']) {
++      gets = 0;
++      posts = 0;
++      state = mode;
++      if (mode == 'race') {
++        await expectLater(join(api), throwsA(isA<HealthFailure>()));
++      } else {
++        final seed = await join(api);
++        if (mode == 'recovered') {
++          expect(
++              RemoteRole.fromSeed(seed!, api: api, releaseInput: () async {})
++                  .viewOnly,
++              true);
++        } else {
++          expect(seed, isNull);
++        }
++      }
++      expect(posts, 1);
++      expect(gets, 2);
++    }
++  });
++  test(
++      'server outage keeps confirmed operator and viewer roles; authenticated denial revokes control',
++      () async {
++    for (final operator in [true, false]) {
++      String? id;
++      var status = 200, releases = 0;
++      final api = Api((m, p, b) async {
++        if (status != 200) throw HealthFailure(status);
++        if (m == 'POST') id = b!['session_id'];
++        return snapshot(
++            me: id, owner: operator ? id : other, otherLive: !operator);
++      });
++      final role = RemoteRole.fromSeed((await join(api, (_) async => true))!,
++          api: api, releaseInput: () async {
++        releases++;
++      });
++      for (final code in [503, 404]) {
++        status = code;
++        await expectLater(role.refresh(), throwsA(isA<HealthFailure>()));
++        expect(role.viewOnly, !operator);
++        expect(releases, 0);
++      }
++      status = 403;
++      await expectLater(role.refresh(), throwsA(isA<HealthFailure>()));
++      expect(role.viewOnly, true);
++      expect(releases, operator ? 1 : 0);
++    }
++  });
++  test(
++      'release and fence survive an unrelated version change while handover POST is in flight',
++      () async {
++    String? id;
++    var version = 1;
++    final request = Completer<void>(), result = Completer<Json>();
++    final api = Api((m, p, b) async {
++      if (p.endsWith('/handover')) {
++        request.complete();
++        return result.future;
++      }
++      if (m == 'POST') id = b!['session_id'];
++      return snapshot(
++          me: id, owner: id, otherLive: id != null, version: version);
++    });
++    final role = RemoteRole.fromSeed((await join(api))!,
++        api: api, releaseInput: () async {});
++    final work = role.handOver(other);
++    await request.future;
++    version++;
++    await role.refresh();
++    expect(role.viewOnly, true);
++    result.completeError(const HealthFailure(409));
++    await work;
++    expect(role.viewOnly, false);
++  });
++  loopbackTest(
++      'existing SSE is shared by the same origin and identity; second tab survives first tab close',
++      () async {
++    final http = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
++    final origin = Uri.parse('http://127.0.0.1:${http.port}');
++    final a = OpsHealthHttp(origin, 'test'), b = OpsHealthHttp(origin, 'test');
++    final responses = <HttpResponse>[];
++    http.listen((r) async {
++      final response = r.response;
++      responses.add(response);
++      response.bufferOutput = false;
++      response.headers.contentType = ContentType('text', 'event-stream');
++      response.write(': online\n\n');
++      await response.flush();
++    });
++    final helloA = Completer<void>(),
++        helloB = Completer<void>(),
++        published = Completer<void>();
++    final one = a.changes().listen((s) {
++      if (s == 'connected') helloA.complete();
++    });
++    await helloA.future.timeout(const Duration(seconds: 2));
++    final two = b.changes().listen((s) {
++      if (s == 'connected') helloB.complete();
++      if (s == 'remote.session.changed') published.complete();
++    });
++    await helloB.future.timeout(const Duration(seconds: 2));
++    expect(responses, hasLength(1));
++    await one.cancel();
++    a.close();
++    responses.single.write('event: remote.session.changed\ndata: {}\n\n');
++    await responses.single.flush();
++    await published.future.timeout(const Duration(seconds: 2));
++    await two.cancel();
++    b.close();
++    await http.close(force: true);
++  });
++  testWidgets(
++      'background heartbeat uses advertised cadence and three-second polling covers SSE loss',
++      (t) async {
++    String? id;
++    int gets = 0, beats = 0, ends = 0;
++    final events = StreamController<String>.broadcast();
++    final api = Api((m, p, b) async {
++      if (m == 'GET') {
++        gets++;
++      } else if (p.endsWith('/heartbeat')) {
++        beats++;
++      } else if (p.endsWith('/end')) {
++        ends++;
++      } else {
++        id = b!['session_id'];
++      }
++      return snapshot(me: id, owner: id)..['heartbeat_seconds'] = 4;
++    }, events: events.stream);
++    late RemoteRole role;
++    join(api).then((seed) {
++      role = RemoteRole.fromSeed(seed!, api: api, releaseInput: () async {});
++      role.start();
++    });
++    await t.pump();
++    expect(gets, 1);
++    events.add('connected');
++    await t.pump();
++    expect(gets, 2);
++    await t.pump(const Duration(seconds: 8));
++    expect(beats, 2);
++    expect(gets, 2);
++    events.add('remote.session.changed');
++    await t.pump();
++    expect(gets, 3);
++    events.addError(const SocketException('disconnect'));
++    await t.pump();
++    await t.pump(const Duration(seconds: 3));
++    expect(gets, 4);
++    role.end();
++    await t.pump();
++    role.end();
++    await t.pump();
++    final settled = [gets, beats, ends];
++    expect(ends, 1);
++    await t.pump(const Duration(seconds: 30));
++    expect([gets, beats, ends], settled);
++    events.close();
++    await t.pump();
++  });
++  test(
++      'Q2 reconnection retires old UUID, registers once and keeps new viewer locked from first callback',
++      () async {
++    String? id;
++    bool reconnecting = false;
++    final ids = <String>[],
++        toolbars = <String>[],
++        ends = <String>[],
++        heartbeats = <String>[];
++    final api = Api((m, p, b) async {
++      if (m == 'GET') return snapshot(me: id, owner: id);
++      if (p.endsWith('/end')) {
++        ends.add(p);
++        return snapshot();
++      }
++      if (p.endsWith('/heartbeat')) {
++        heartbeats.add(p);
++        expect(b!['state'], 'connected');
++      } else {
++        id = b!['session_id'];
++        ids.add(id!);
++        toolbars.add(b['toolbar_session_id']);
++      }
++      return snapshot(
++          me: id, owner: reconnecting ? other : id, otherLive: reconnecting);
++    });
++    final role = RemoteRole.fromSeed((await join(api))!,
++        api: api, releaseInput: () async {});
++    expect(role.viewOnly, false);
++    reconnecting = true;
++    final retiring = role.suspend();
++    expect(role.viewOnly, true);
++    await retiring;
++    await Future.wait([role.reconnect(), role.reconnect()]);
++    expect(ids.toSet().length, 2);
++    expect(toolbars.toSet().length, 2);
++    expect(ends.single, endsWith('/${ids.first}/end'));
++    expect(heartbeats.single, endsWith('/${ids.last}/heartbeat'));
++    expect(role.viewOnly, true);
++    expect(role.everOperated, false);
++    await role.end();
++    expect(ends.last, endsWith('/${ids.last}/end'));
++  });
++  test('fresh registration survives a lost first connected heartbeat',
++      () async {
++    String? id;
++    int beats = 0;
++    final ended = <String>[];
++    final api = Api((m, path, body) async {
++      if (path.endsWith('/end')) {
++        ended.add(path);
++        return snapshot();
++      }
++      if (path.endsWith('/heartbeat') && ++beats == 1) {
++        throw const SocketException('lost initial heartbeat');
++      }
++      if (m == 'POST' && path.endsWith('/sessions')) id = body!['session_id'];
++      return snapshot(me: id, owner: id);
++    });
++    final role = RemoteRole.fromSeed((await join(api))!,
++        api: api, releaseInput: () async {});
++    final old = role.sessionId;
++    await role.suspend();
++    await role.reconnect();
++    expect(role.sessionId, isNot(old));
++    expect(role.viewOnly, false);
++    await role.connected();
++    expect(beats, 2);
++    await role.suspend();
++    expect(ended.last, endsWith('/${role.sessionId}/end'));
++    await role.end();
++  });
++  test('another disconnect retires a late registration without heartbeating it',
++      () async {
++    String? id;
++    final started = Completer<void>(), deliver = Completer<void>();
++    final ended = <String>[], beats = <String>[];
++    var registrations = 0;
++    final api = Api((m, path, body) async {
++      if (path.endsWith('/end')) {
++        ended.add(path);
++        return snapshot();
++      }
++      if (path.endsWith('/heartbeat')) beats.add(path);
++      if (m == 'POST' && path.endsWith('/sessions')) {
++        id = body!['session_id'];
++        if (++registrations == 2) {
++          started.complete();
++          await deliver.future;
++        }
++      }
++      return snapshot(me: id, owner: id);
++    });
++    final role = RemoteRole.fromSeed((await join(api))!,
++        api: api, releaseInput: () async {});
++    final old = role.sessionId;
++    await role.suspend();
++    final pending = role.reconnect();
++    await started.future;
++    await role.suspend();
++    final shouldCancel =
++        expectLater(pending, throwsA(isA<RemoteJoinCancelled>()));
++    deliver.complete();
++    await shouldCancel;
++    expect(role.sessionId, old);
++    expect(ended.last, endsWith('/$id/end'));
++    expect(beats, isEmpty);
++    expect(role.viewOnly, true);
++    await role.reconnect();
++    expect(role.sessionId, id);
++    expect(role.viewOnly, false);
++    expect(beats.single, endsWith('/$id/heartbeat'));
++    await role.end();
++  });
++}
+diff --git a/flutter/test/steaddesk/role_event_relay_test.dart b/flutter/test/steaddesk/role_event_relay_test.dart
+new file mode 100644
+index 0000000..69f5d5b
+--- /dev/null
++++ b/flutter/test/steaddesk/role_event_relay_test.dart
+@@ -0,0 +1,83 @@
++import 'dart:async';
++import 'dart:io';
++import 'package:flutter_test/flutter_test.dart';
++import 'package:flutter_hbb/steaddesk/ops_health.dart';
++import 'package:flutter_hbb/steaddesk/role_event_relay.dart';
++
++void main() {
++  test(
++      'two child windows share main SSE and removal of one cannot cancel the other',
++      () async {
++    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
++    final uri = Uri.parse('http://127.0.0.1:${server.port}');
++    final responses = <HttpResponse>[];
++    server.listen((req) async {
++      responses.add(req.response);
++      req.response.bufferOutput = false;
++      req.response.headers.contentType = ContentType('text', 'event-stream');
++      req.response.write(': stream\n\n');
++      await req.response.flush();
++    });
++    final first = Completer<void>(),
++        second = Completer<void>(),
++        changed = Completer<void>();
++    final host = RoleEventHost(
++        auth: (origin, identity) async =>
++            origin == uri.toString() && identity == 'digest',
++        open: (_, __) => OpsHealthHttp(uri, 'test'),
++        deliver: (window, subscription, event) async {
++          if (event == 'connected') {
++            final ack = window == 1 ? first : second;
++            if (!ack.isCompleted) ack.complete();
++          } else if (event == 'remote.session.changed' && window == 2) {
++            changed.complete();
++          }
++          return true;
++        });
++    final params = {
++      'subscription': 'subscription',
++      'origin': uri.toString(),
++      'identity': 'digest'
++    };
++    try {
++      expect(await host.handle(1, 'open', params), 'ok');
++      await first.future.timeout(const Duration(seconds: 3));
++      expect(await host.handle(2, 'open', params), 'ok');
++      await second.future.timeout(const Duration(seconds: 3));
++      expect(responses.length, 1);
++      expect(await host.handle(1, 'close', params), 'ok');
++      expect(await host.handle(1, 'renew', params), 'gone');
++      expect(await host.handle(2, 'renew', params), 'ok');
++      responses.single.write('event: remote.session.changed\ndata: {}\n\n');
++      await responses.single.flush();
++      await changed.future.timeout(const Duration(seconds: 3));
++      expect(await host.handle(3, 'open', {...params, 'identity': 'wrong'}),
++          'denied');
++    } finally {
++      host.dispose();
++      await server.close(force: true);
++    }
++  });
++  test('losing the main relay ends the child feed so GET fallback can run',
++      () async {
++    final opened = Completer<String>();
++    late RoleEventClient client;
++    client = RoleEventClient((message) async {
++      final id = message['subscription']!;
++      if (message['action'] == 'open') {
++        opened.complete(id);
++        return 'ok';
++      }
++      return 'gone';
++    }, renewEvery: const Duration(milliseconds: 15));
++    final events = <String>[], done = Completer<void>();
++    client
++        .listen('fixture', 'digest')
++        .listen(events.add, onDone: () => done.complete());
++    final id = await opened.future;
++    expect(client.receive(id, 'connected'), true);
++    await done.future.timeout(const Duration(seconds: 2));
++    expect(events, ['connected']);
++    expect(client.receive(id, 'remote.session.changed'), false);
++  });
++}
+diff --git a/flutter/test/steaddesk/role_input_test.dart b/flutter/test/steaddesk/role_input_test.dart
+new file mode 100644
+index 0000000..9fc39c1
+--- /dev/null
++++ b/flutter/test/steaddesk/role_input_test.dart
+@@ -0,0 +1,37 @@
++import 'dart:async';
++import 'package:flutter_test/flutter_test.dart';
++import 'package:flutter_hbb/steaddesk/role_input.dart';
++
++void main() {
++  test(
++      'promotion reacquires existing hover only after physical input is neutral',
++      () {
++    final promotion = RoleInputPromotion()..waiting = true;
++    expect(promotion.acquire(wantsInput: true, held: true), isFalse);
++    expect(promotion.waiting, isTrue);
++    expect(promotion.acquire(wantsInput: false, held: false), isFalse);
++    expect(promotion.acquire(wantsInput: true, held: false), isTrue);
++    expect(promotion.waiting, isFalse);
++    expect(promotion.acquire(wantsInput: true, held: false), isFalse);
++  });
++  test('demotion blocks new input while releasing only outstanding presses',
++      () async {
++    final keys = RolePressedInputs();
++    final held = Completer<void>();
++    final events = <String>[];
++    keys.track('key:a', true, () async => events.add('a up'));
++    keys.track('key:a', false, () async {});
++    keys.track('key:b', true, () async {
++      await held.future;
++      events.add('b up');
++    });
++    keys.track('mouse:left', true, () async => events.add('left up'));
++    final releasing = keys.release();
++    expect(keys.releasing, isTrue);
++    held.complete();
++    await releasing;
++    expect(events, unorderedEquals(['b up', 'left up']));
++    await keys.release();
++    expect(events.length, 2);
++  });
++}
+diff --git a/flutter/test/steaddesk/role_launch_test.dart b/flutter/test/steaddesk/role_launch_test.dart
+new file mode 100644
+index 0000000..c93b811
+--- /dev/null
++++ b/flutter/test/steaddesk/role_launch_test.dart
+@@ -0,0 +1,79 @@
++import 'dart:async';
++import 'dart:io';
++import 'package:flutter_hbb/steaddesk/ops_health.dart';
++import 'package:flutter_hbb/steaddesk/remote_role.dart';
++import 'package:flutter_test/flutter_test.dart';
++import 'package:flutter_hbb/steaddesk/role_launch.dart';
++
++void main() {
++  for (final offline in [false, true]) {
++    test(
++        'real ${offline ? "unreachable" : "404"} ops opens original connection exactly once',
++        () async {
++      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
++      final api =
++          OpsHealthHttp(Uri.parse('http://127.0.0.1:${server.port}'), 'test');
++      addTearDown(api.close);
++      final calls = <String>[];
++      if (offline) {
++        await server.close(force: true);
++      } else {
++        addTearDown(() => server.close(force: true));
++        server.listen((request) async {
++          calls.add('${request.method} ${request.uri.path}');
++          request.response.statusCode = 404;
++          await request.response.close();
++        });
++      }
++      final dispatch = <Object?>[];
++      await RemoteLaunchGate().run('123456789',
++          activateExisting: () async => false,
++          prepare: () => RemoteRole.prepare(
++              api: api,
++              device: '123456789',
++              resolveStaffPeer: () async => fail('legacy branch read staff ID'),
++              confirm: (_) async =>
++                  fail('legacy branch prompted for view-only')),
++          open: (seed) async => dispatch.add(seed));
++      expect(dispatch, [null]);
++      expect(
++          calls,
++          offline
++              ? isEmpty
++              : ['GET /ops/v1/remote/devices/123456789/sessions']);
++    });
++  }
++  test('direct legacy launch has no seed; a duplicate cannot register twice',
++      () async {
++    final gate = RemoteLaunchGate();
++    final dispatch = <Object?>[];
++    final wait = Completer<void>();
++    var probes = 0;
++    Future<void> launch() => gate.run('123456789',
++        activateExisting: () async => false,
++        prepare: () async {
++          probes++;
++          await wait.future;
++          return null;
++        },
++        open: (seed) async {
++          dispatch.add(seed);
++        });
++    final first = launch();
++    final second = launch();
++    wait.complete();
++    await Future.wait([first, second]);
++    expect(probes, 1);
++    expect(dispatch, [null]);
++  });
++  test('reuse follows existing open path without creating a new lease',
++      () async {
++    final gate = RemoteLaunchGate();
++    final dispatched = <Object?>[];
++    await gate.run('123456789',
++        activateExisting: () async => true,
++        prepare: () async => fail('unexpected registry request'),
++        open: (seed) async => dispatched.add(seed));
++    expect(dispatched, isEmpty);
++  });
++}
+diff --git a/flutter/test/steaddesk/viewer_controls_test.dart b/flutter/test/steaddesk/viewer_controls_test.dart
+new file mode 100644
+index 0000000..c5f7ea4
+--- /dev/null
++++ b/flutter/test/steaddesk/viewer_controls_test.dart
+@@ -0,0 +1,124 @@
++import 'package:flutter/material.dart';
++import 'package:flutter/gestures.dart';
++import 'package:flutter/services.dart';
++import 'package:flutter_test/flutter_test.dart';
++import 'package:flutter_hbb/common.dart' show SessionID;
++import 'package:flutter_hbb/models/input_model.dart';
++import 'package:flutter_hbb/models/model.dart';
++import 'package:flutter_hbb/steaddesk/remote_role.dart';
++import 'package:flutter_hbb/steaddesk/role_header.dart';
++import 'package:flutter_hbb/steaddesk/toolbar/actions.dart';
++import 'package:flutter_hbb/steaddesk/toolbar/host.dart';
++import 'package:flutter_hbb/steaddesk/fixed/protocol.dart';
++import 'package:flutter_hbb/steaddesk/fixed_build.dart';
++
++class _Role extends ChangeNotifier implements RemoteRole {
++  bool viewOnly = true, busy = false, canClaim = false;
++  String? operatorName = 'A';
++  String claimLabel = '接管', claimPrompt = 'A 已离开，要接管吗？';
++  final watchers = <String, String>{};
++  int claims = 0;
++  String? transferredTo;
++  Future<void> claim() async {
++    claims++;
++  }
++
++  Future<void> handOver(String target) async {
++    transferredTo = target;
++  }
++
++  @override
++  dynamic noSuchMethod(Invocation call) => super.noSuchMethod(call);
++}
++
++class _Client extends Fake implements FFI {
++  final remoteRole = _Role();
++  final sessionId = SessionID('00000000-0000-4000-8000-000000000001');
++  final closed = false;
++}
++
++void main() {
++  TestWidgetsFlutterBinding.ensureInitialized();
++
++  test(
++      'viewer input cannot reach uninitialized native transport before first frame',
++      () async {
++    final ffi = _Client();
++    final input = InputModel(WeakReference<FFI>(ffi));
++    expect(input.keyboardPerm, isFalse);
++    expect(input.osInputCurrent(input.osInputTicket), isFalse);
++    input.handleKeyEvent(const KeyDownEvent(
++        timeStamp: Duration.zero,
++        physicalKey: PhysicalKeyboardKey.keyA,
++        logicalKey: LogicalKeyboardKey.keyA));
++    input.newKeyboardMode('a', 4, true, false);
++    input.inputRawKey('a', 65, 30, true, false);
++    await input.sendMouse('down', MouseButtons.left);
++    input.handlePointerEvent('touch', 'pan_start', Offset.zero);
++    input.onPointerSignalImage(
++        const PointerScrollEvent(scrollDelta: Offset(0, 8)));
++    await input.scroll(1);
++    expect(input.setRelativeMouseMode(true), isFalse);
++    expect(input.handleMouse({}, Offset.zero), isNull);
++    input.enterOrLeave(true);
++  });
++
++  testWidgets(
++      'viewer sees operator, expired vacancy requires affirmative confirmation',
++      (t) async {
++    final role = _Role();
++    await t.pumpWidget(MaterialApp(home: Scaffold(body: RoleHeader(role))));
++    expect(find.text('只看模式 · A正在操作'), findsOneWidget);
++    role.operatorName = null;
++    role.canClaim = true;
++    role.claimLabel = '仍要接管';
++    role.claimPrompt = 'A 失去联系，可能仍在操作。确认要接管吗？';
++    role.notifyListeners();
++    await t.pump();
++    await t.tap(find.text('仍要接管'));
++    await t.pumpAndSettle();
++    expect(find.text(role.claimPrompt), findsOneWidget);
++    expect(role.claims, 0);
++    await t.tap(find.text('取消'));
++    await t.pumpAndSettle();
++    expect(role.claims, 0);
++    await t.tap(find.text('仍要接管'));
++    await t.pumpAndSettle();
++    await t.tap(find.descendant(
++        of: find.byType(AlertDialog), matching: find.text('仍要接管')));
++    await t.pumpAndSettle();
++    expect(role.claims, 1);
++    role.viewOnly = false;
++    role.watchers['second'] = 'B';
++    role.notifyListeners();
++    await t.pump();
++    await t.tap(find.text('转交操作权'));
++    expect(role.transferredTo, 'second');
++  });
++
++  test(
++      'watcher retains screenshot, multi-session fixed actions explain disablement',
++      () {
++    final items = toolbarMenuEntries(() => true, 'Android', [],
++            viewing: true, multiple: true)
++        .whereType<PopupMenuItem<Object>>();
++    if (readToolbarEnabled) {
++      expect(
++          items.singleWhere((i) => i.value == ToolbarAction.screenshot).enabled,
++          isTrue);
++      for (final a in [ToolbarAction.quick, ToolbarAction.logs]) {
++        final i = items.singleWhere((e) => e.value == a);
++        expect(i.enabled, isFalse);
++        expect((i.child as Text).data, contains('只看模式'));
++      }
++    }
++    if (fixedSupportEnabled) {
++      final fixed = items.where((i) => i.value is FixedAction);
++      expect(fixed.length, FixedAction.values.length);
++      for (final i in fixed) {
++        expect(i.enabled, isFalse);
++        expect((i.child as Text).data, contains('多人同时在线'));
++      }
++    }
++  });
++}
+diff --git a/src/client.rs b/src/client.rs
+index 8e2377a..0a8b66a 100644
+--- a/src/client.rs
++++ b/src/client.rs
+@@ -99,6 +99,7 @@ mod audio_playback_recovery;
+ #[cfg(all(test, not(target_os = "linux")))]
+ #[path = "client/tests/audio_state_tests.rs"]
+ mod audio_state_tests;
++mod clipboard_role;
+ pub mod file_trait;
+ pub mod helper;
+ pub mod io_loop;
+@@ -2827,6 +2828,7 @@ struct ConnToken {
+ /// Login config handler for [`Client`].
+ #[derive(Default)]
+ pub struct LoginConfigHandler {
++    pub(crate) clipboard_role: clipboard_role::ClipboardRole,
+     id: String,
+     pub conn_type: ConnType,
+     pub is_terminal_admin: bool,
+diff --git a/src/client/clipboard_role.rs b/src/client/clipboard_role.rs
+new file mode 100644
+index 0000000..e3d0145
+--- /dev/null
++++ b/src/client/clipboard_role.rs
+@@ -0,0 +1,39 @@
++// Runtime state owned by one login. It is deliberately absent from PeerConfig.
++#[derive(Default)]
++pub(crate) struct ClipboardRole {
++    viewer: bool,
++}
++
++impl ClipboardRole {
++    pub(crate) fn set(&mut self, value: &str) -> bool {
++        match value {
++            "Y" => self.viewer = true,
++            "N" => self.viewer = false,
++            _ => return false,
++        }
++        true
++    }
++
++    pub(crate) fn allows_outgoing(&self) -> bool {
++        !self.viewer
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn viewer_cannot_send_until_promoted_and_other_logins_stay_independent() {
++        let mut first = ClipboardRole::default();
++        let second = ClipboardRole::default();
++        assert!(first.allows_outgoing());
++        assert!(first.set("Y"));
++        assert!(!first.allows_outgoing());
++        assert!(!first.set(""));
++        assert!(!first.allows_outgoing());
++        assert!(second.allows_outgoing());
++        assert!(first.set("N"));
++        assert!(first.allows_outgoing());
++    }
++}
+diff --git a/src/client/io_loop.rs b/src/client/io_loop.rs
+index 98463dc..3614208 100644
+--- a/src/client/io_loop.rs
++++ b/src/client/io_loop.rs
+@@ -470,6 +470,7 @@ impl<T: InvokeUiSession> Remote<T> {
+                     self.handler.msgbox(&r#type, &title, &text, "");
+                 }
+                 // File-data responses bypass is_stopping_allowed, but still require login.
++                _ if !self.handler.lc.read().unwrap().clipboard_role.allows_outgoing() => {}
+                 _ if !self.is_connected => {
+                     log::debug!("Discarding local file clipboard message before login");
+                 }
+@@ -740,7 +741,9 @@ impl<T: InvokeUiSession> Remote<T> {
+                     return true;
+                 }
+                 self.initial_clipboard_pending = false;
+-                if !self.handler.is_text_clipboard_required() {
++                if !self.handler.lc.read().unwrap().clipboard_role.allows_outgoing()
++                    || !self.handler.is_text_clipboard_required()
++                {
+                     return true;
+                 }
+                 if generation != clipboard_listener::current_generation() {
+@@ -755,6 +758,13 @@ impl<T: InvokeUiSession> Remote<T> {
+                 }
+             }
+             Data::Message(msg) => {
++                // Recheck at dequeue, including file-content replies queued before a handover.
++                if matches!(
++                    &msg.union,
++                    Some(message::Union::Clipboard(_) | message::Union::MultiClipboards(_) | message::Union::Cliprdr(_))
++                ) && !self.handler.lc.read().unwrap().clipboard_role.allows_outgoing() {
++                    return true;
++                }
+                 // The Flutter clipboard broadcast is process-wide, so a clipboard can reach this
+                 // round's queue before the round has logged in; it is dropped here, on the round
+                 // itself.
+@@ -2643,6 +2653,9 @@ impl<T: InvokeUiSession> Remote<T> {
+                 }
+ 
+                 for msg in out_msgs.into_iter() {
++                    if !self.handler.lc.read().unwrap().clipboard_role.allows_outgoing() {
++                        break;
++                    }
+                     allow_err!(_peer.send(&msg).await);
+                 }
+             }
+@@ -2967,6 +2980,26 @@ mod tests {
+         Data::Message(msg)
+     }
+ 
++    #[tokio::test]
++    async fn demotion_drops_text_multi_and_file_clipboard_at_the_wire() {
++        let (mut remote, mut peer, mut far) = remote_and_peer().await;
++        remote.is_connected = true;
++        remote.handler.lc.write().unwrap().clipboard_role.set("Y");
++        let mut files = Message::new();
++        files.set_cliprdr(Default::default());
++        let mut multi = Message::new();
++        multi.set_multi_clipboards(Default::default());
++        for data in [clipboard(), Data::Message(multi), Data::Message(files)] {
++            assert!(remote.handle_msg_from_ui(data, &mut peer).await);
++            assert!(!arrives(&mut far).await);
++        }
++        assert!(remote.handle_msg_from_ui(auth_2fa(), &mut peer).await);
++        assert!(arrives(&mut far).await);
++        remote.handler.lc.write().unwrap().clipboard_role.set("N");
++        assert!(remote.handle_msg_from_ui(clipboard(), &mut peer).await);
++        assert!(arrives(&mut far).await);
++    }
++
+     // A clipboard queued before this round's login stays here; what the login itself sends
+     // through the same queue does not.
+     #[tokio::test]
+diff --git a/src/flutter_ffi.rs b/src/flutter_ffi.rs
+index 7340b57..1701de6 100644
+--- a/src/flutter_ffi.rs
++++ b/src/flutter_ffi.rs
+@@ -1438,6 +1438,17 @@ pub fn main_set_peer_option(id: String, key: String, value: String) {
+ }
+ 
+ pub fn main_set_peer_option_sync(id: String, key: String, value: String) -> SyncReturn<bool> {
++    // This BRIDGED synchronous command takes a live window UUID, not a peer ID.
++    // Consume the reserved key even for invalid input: never persist role state.
++    if key == "steaddesk-session-clipboard-viewer" {
++        let applied = SessionID::parse_str(&id)
++            .ok()
++            .and_then(|sid| sessions::get_session_by_session_id(&sid))
++            .filter(|session| session.is_default())
++            .map(|session| session.lc.write().unwrap().clipboard_role.set(&value))
++            .unwrap_or(false);
++        return SyncReturn(applied);
++    }
+     set_peer_option(id, key, value);
+     SyncReturn(true)
+ }
