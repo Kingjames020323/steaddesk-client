@@ -1,0 +1,434 @@
+diff --git a/flutter/lib/steaddesk/merchant_panel.dart b/flutter/lib/steaddesk/merchant_panel.dart
+index f14aa8f..f06f4d2 100644
+--- a/flutter/lib/steaddesk/merchant_panel.dart
++++ b/flutter/lib/steaddesk/merchant_panel.dart
+@@ -390,7 +390,7 @@ class _MerchantPanelState extends State<MerchantPanel>
+         if (merchantQuickEnabled &&
+             !widget.connectionManager &&
+             (merchantAndroid || merchantWindows))
+-          storeGate('quick_check', null, merchantQuickEntry()),
++          storeGate('quick_check', null, merchantQuickEntry(language)),
+         if (helpEnabled && !widget.connectionManager)
+           storeGate('help', null, merchantHelpEntry()),
+         if (merchantPhone.trim().isNotEmpty) ...[
+diff --git a/flutter/lib/steaddesk/ops_health_widgets.dart b/flutter/lib/steaddesk/ops_health_widgets.dart
+index ca2726e..ff9a097 100644
+--- a/flutter/lib/steaddesk/ops_health_widgets.dart
++++ b/flutter/lib/steaddesk/ops_health_widgets.dart
+@@ -1,5 +1,6 @@
+ import 'package:flutter/material.dart';
+ import 'ops_health.dart';
++import 'quick/result_line.dart';
+ 
+ String reasonText(String rule) =>
+     const {
+@@ -107,11 +108,9 @@ class _HealthDeviceViewState extends State<HealthDeviceView> {
+             if (result?['state'] == 'timeout') const Text('检查超时。'),
+             for (final item in (result?['results'] as List? ?? [])
+                 .cast<Map<String, dynamic>>())
+-              Text('${item['name']} · ${item['ip']} · ${const {
+-                    'reachable': '通',
+-                    'unreachable': '不通',
+-                    'timeout': '超时'
+-                  }[item['outcome']] ?? '未知'} · ${item['latency_ms'] == null ? '—' : '${item['latency_ms']} ms'}'),
++              QuickCheckResultLine(
++                  item, supportCheckLabels[item['outcome']] ?? '未知',
++                  showIp: true),
+           ]
+         ]);
+       });
+diff --git a/flutter/lib/steaddesk/quick/check.dart b/flutter/lib/steaddesk/quick/check.dart
+index f3c9101..d7fa1c2 100644
+--- a/flutter/lib/steaddesk/quick/check.dart
++++ b/flutter/lib/steaddesk/quick/check.dart
+@@ -62,7 +62,8 @@ List<Json> inventoryEntries(dynamic raw) {
+       }
+     }
+     return {
+-      for (final k in ['id', 'name', 'type', 'ip', 'model']) k: row[k]
++      for (final k in ['id', 'name', 'type', 'ip', 'model']) k: row[k],
++      'no_ping': row['no_ping'] == true,
+     };
+   }).toList();
+ }
+diff --git a/flutter/lib/steaddesk/quick/merchant.dart b/flutter/lib/steaddesk/quick/merchant.dart
+index f08b081..0a0db3e 100644
+--- a/flutter/lib/steaddesk/quick/merchant.dart
++++ b/flutter/lib/steaddesk/quick/merchant.dart
+@@ -8,11 +8,12 @@ import '../../models/platform_model.dart' show bind;
+ import '../help/merchant_help_client.dart' show configuredHelpOrigin;
+ import 'check.dart';
+ import 'probe.dart';
++import 'result_line.dart';
+ import 'http.dart';
+ import '../../common.dart' show translate;
+ 
+ const merchantQuickEnabled = true;
+-Widget merchantQuickEntry() => const _MerchantQuick();
++Widget merchantQuickEntry([String language = '']) => _MerchantQuick(language);
+ 
+ Future<CheckScope> _scope() async {
+   final origin =
+@@ -37,7 +38,8 @@ Future<Json> _signedCall(CheckScope scope, String op, int version, Json body) {
+ }
+ 
+ class _MerchantQuick extends StatefulWidget {
+-  const _MerchantQuick();
++  final String language;
++  const _MerchantQuick(this.language);
+   @override
+   State<_MerchantQuick> createState() => _MerchantQuickState();
+ }
+@@ -141,8 +143,14 @@ class _MerchantQuickState extends State<_MerchantQuick>
+         if (rows.any((r) => r['type'] == 'payment'))
+           Text(translate('Payment devices use ping only.')),
+         for (final row in rows)
+-          Text(
+-              "${row['name']} · ${translate(outcomeLabels[row['outcome']] ?? 'Check unavailable')} · ${row['latency_ms'] == null ? '—' : "${row['latency_ms']} ms"}"),
++          QuickCheckResultLine(
++              row,
++              row['outcome'] == 'undetectable'
++                  ? merchantUndetectableLabel(widget.language.isEmpty
++                      ? Platform.localeName
++                      : widget.language)
++                  : translate(
++                      outcomeLabels[row['outcome']] ?? 'Check unavailable')),
+         if (rows.any(
+             (r) => r['outcome'] == 'unreachable' || r['outcome'] == 'timeout'))
+           Text(translate(rows.any((r) =>
+diff --git a/flutter/lib/steaddesk/quick/merchant_off.dart b/flutter/lib/steaddesk/quick/merchant_off.dart
+index 3e9054a..bfe4449 100644
+--- a/flutter/lib/steaddesk/quick/merchant_off.dart
++++ b/flutter/lib/steaddesk/quick/merchant_off.dart
+@@ -1,4 +1,4 @@
+ import 'package:flutter/widgets.dart';
+ 
+ const merchantQuickEnabled = false;
+-Widget merchantQuickEntry() => const SizedBox.shrink();
++Widget merchantQuickEntry([String language = '']) => const SizedBox.shrink();
+diff --git a/flutter/lib/steaddesk/quick/probe.dart b/flutter/lib/steaddesk/quick/probe.dart
+index c59d86b..38751a4 100644
+--- a/flutter/lib/steaddesk/quick/probe.dart
++++ b/flutter/lib/steaddesk/quick/probe.dart
+@@ -88,7 +88,8 @@ Future<CheckOutcome> checkRegisteredDevice(Json row,
+   final ip = row['ip'];
+   if (ip is! String || !privateV4(ip)) throw const FormatException('无效地址');
+   final elapsed = Stopwatch()..start();
+-  var outcome = await ping(ip);
++  final pingResult = await ping(ip);
++  var outcome = pingResult;
+   if (row['type'] == 'printer' && outcome != 'reachable') {
+     final observed = {outcome};
+     for (final port in const [9100, 515, 631]) {
+@@ -99,6 +100,11 @@ Future<CheckOutcome> checkRegisteredDevice(Json row,
+     outcome = ['reachable', 'unknown', 'timeout', 'unreachable']
+         .firstWhere(observed.contains);
+   }
++  if (row['no_ping'] == true &&
++      (pingResult == 'unreachable' || pingResult == 'timeout') &&
++      outcome != 'reachable') {
++    return (outcome: 'undetectable', latency: null);
++  }
+   return (
+     outcome: outcome,
+     latency: outcome == 'unknown'
+diff --git a/flutter/lib/steaddesk/quick/result_line.dart b/flutter/lib/steaddesk/quick/result_line.dart
+new file mode 100644
+index 0000000..8d796f6
+--- /dev/null
++++ b/flutter/lib/steaddesk/quick/result_line.dart
+@@ -0,0 +1,48 @@
++import 'package:flutter/material.dart';
++
++const supportCheckLabels = {
++  'reachable': '通',
++  'unreachable': '不通',
++  'timeout': '超时',
++  'unknown': '未知',
++  'undetectable': '无法检测',
++};
++
++String merchantUndetectableLabel(String locale) {
++  switch (locale.toLowerCase().split(RegExp('[-_]')).first) {
++    case 'zh':
++      return '无法检测';
++    case 'es':
++      return 'No se puede detectar';
++    default:
++      return 'Cannot detect';
++  }
++}
++
++class QuickCheckResultLine extends StatelessWidget {
++  final Map row;
++  final String label;
++  final bool showIp;
++  final bool showMissingLatency;
++
++  const QuickCheckResultLine(this.row, this.label,
++      {super.key, this.showIp = false, this.showMissingLatency = true});
++
++  @override
++  Widget build(BuildContext context) {
++    final latency = row['latency_ms'];
++    return Text.rich(TextSpan(children: [
++      TextSpan(text: "${row['name']} · "),
++      if (showIp) TextSpan(text: "${row['ip']} · "),
++      TextSpan(
++          text: label,
++          style: row['outcome'] == 'undetectable'
++              ? const TextStyle(color: Colors.grey)
++              : null),
++      if (latency != null)
++        TextSpan(text: ' · $latency ms')
++      else if (showMissingLatency)
++        const TextSpan(text: ' · —'),
++    ]));
++  }
++}
+diff --git a/flutter/lib/steaddesk/quick/support.dart b/flutter/lib/steaddesk/quick/support.dart
+index 32eea39..dd00a94 100644
+--- a/flutter/lib/steaddesk/quick/support.dart
++++ b/flutter/lib/steaddesk/quick/support.dart
+@@ -1,6 +1,7 @@
+ import 'package:flutter/material.dart';
+ import '../ops_health.dart';
+ import 'check.dart';
++import 'result_line.dart';
+ 
+ const supportQuickEnabled = true;
+ Widget storeInventory(HealthStore store, String device) =>
+@@ -184,6 +185,7 @@ class _EditorState extends State<_Editor> {
+   late String type = typeLabels.containsKey(widget.row?['type'])
+       ? widget.row!['type'] as String
+       : 'other';
++  late bool noPing = widget.row?['no_ping'] == true;
+   @override
+   Widget build(BuildContext context) => AlertDialog(
+           title: Text(widget.row == null ? '新增设备' : '编辑设备'),
+@@ -226,8 +228,18 @@ class _EditorState extends State<_Editor> {
+                                 value: entry.key, child: Text(entry.value))
+                         ],
+                         onChanged: (v) {
+-                          if (v != null) setState(() => type = v);
++                          if (v == null || v == type) return;
++                          setState(() {
++                            type = v;
++                            noPing = type == 'payment';
++                          });
+                         }),
++                    CheckboxListTile(
++                        contentPadding: EdgeInsets.zero,
++                        title: const Text('不回应 ping'),
++                        value: noPing,
++                        onChanged: (value) =>
++                            setState(() => noPing = value == true)),
+                   ]))),
+           actions: [
+             TextButton(
+@@ -236,7 +248,8 @@ class _EditorState extends State<_Editor> {
+             TextButton(
+                 onPressed: () {
+                   if (form.currentState!.validate()) {
+-                    Navigator.pop(context, {...values, 'type': type});
++                    Navigator.pop(
++                        context, {...values, 'type': type, 'no_ping': noPing});
+                   }
+                 },
+                 child: const Text('保存')),
+@@ -296,12 +309,9 @@ class _LatestReportState extends State<_LatestReport> {
+               .split('.')
+               .first),
+           for (final row in latest!['results'] as List)
+-            Text("${row['name']} · ${row['ip']} · ${const {
+-                  'reachable': '通',
+-                  'unreachable': '不通',
+-                  'timeout': '超时',
+-                  'unknown': '未知'
+-                }[row['outcome']] ?? '未知'} · ${row['latency_ms'] == null ? '—' : "${row['latency_ms']} ms"}"),
++            QuickCheckResultLine(
++                row, supportCheckLabels[row['outcome']] ?? '未知',
++                showIp: true),
+         ],
+       ]);
+ }
+diff --git a/flutter/lib/steaddesk/toolbar/host.dart b/flutter/lib/steaddesk/toolbar/host.dart
+index 63b87f3..0c7a1f2 100644
+--- a/flutter/lib/steaddesk/toolbar/host.dart
++++ b/flutter/lib/steaddesk/toolbar/host.dart
+@@ -11,6 +11,7 @@ import '../fixed_build.dart';
+ import '../store_features.dart';
+ import '../fixed/protocol.dart';
+ import '../fixed/support_dialogs.dart';
++import '../quick/result_line.dart';
+ import 'actions.dart';
+ import 'frame.dart';
+ export 'frame.dart' show ToolbarFrame;
+@@ -382,8 +383,12 @@ class _ToolbarState extends State<_Toolbar> {
+                 Text(status),
+               for (final r
+                   in (row['results'] as List? ?? const []).whereType<Map>())
+-                Text(
+-                    "${r['name']} · ${r['outcome']}${r['latency_ms'] == null ? '' : ' · ${r['latency_ms']} ms'}"),
++                QuickCheckResultLine(
++                    r,
++                    r['outcome'] == 'undetectable'
++                        ? supportCheckLabels['undetectable']!
++                        : "${r['outcome']}",
++                    showMissingLatency: false),
+               if (row['state'] == 'completed' &&
+                   {'screenshot', 'collect_logs'}.contains(row['action']))
+                 TextButton(
+diff --git a/flutter/test/steaddesk/quick_check_test.dart b/flutter/test/steaddesk/quick_check_test.dart
+index 51f7384..83b4460 100644
+--- a/flutter/test/steaddesk/quick_check_test.dart
++++ b/flutter/test/steaddesk/quick_check_test.dart
+@@ -97,6 +97,37 @@ void main() {
+     }
+     expect(ports, isEmpty);
+   });
++  test('registered no-ping devices distinguish silence from local errors',
++      () async {
++    for (final flag in [false, true]) {
++      final row = inventoryEntries([
++        {...payment, 'no_ping': flag}
++      ]).single;
++      expect(row['no_ping'], flag);
++      for (final pingStatus in [
++        'reachable',
++        'unreachable',
++        'timeout',
++        'unknown'
++      ]) {
++        final result =
++            await checkRegisteredDevice(row, ping: (_) async => pingStatus);
++        final silent = flag && ['unreachable', 'timeout'].contains(pingStatus);
++        expect(result.outcome, silent ? 'undetectable' : pingStatus);
++        if (silent) expect(result.latency, isNull);
++      }
++    }
++    expect(inventoryEntries([payment]).single['no_ping'], false);
++    final row = {...printer, 'no_ping': true};
++    for (final available in [false, true]) {
++      final result = await checkRegisteredDevice(row,
++          ping: (_) async => 'timeout',
++          connect: (_, port) async =>
++              available && port == 515 ? 'reachable' : 'unreachable');
++      expect(result.outcome, available ? 'reachable' : 'undetectable');
++    }
++  });
++
+   test(
+       'cached approved inventory works offline, limits across restarts, flushes when online, and revocation clears it',
+       () async {
+@@ -123,12 +154,20 @@ void main() {
+               'allowed': allowed,
+               'expires_at': now + 902,
+               'revision': 'a' * 64,
+-              'entries': allowed ? [printer, payment] : []
++              'entries': allowed
++                  ? [
++                      printer,
++                      {...payment, 'no_ping': true}
++                    ]
++                  : []
+             };
+           reports.add(body);
+           return {'id': 'r_demo', 'state': 'completed'};
+         }, (row) async {
+           probes++;
++          if (row['type'] == 'payment') {
++            return checkRegisteredDevice(row, ping: (_) async => 'unreachable');
++          }
+           return (outcome: 'reachable', latency: 2);
+         }, clock: () => now);
+     await open().sync();
+@@ -143,7 +182,7 @@ void main() {
+     await open().sync();
+     expect(reports.single['results'], [
+       {'id': 'i_a', 'outcome': 'reachable', 'latency_ms': 2},
+-      {'id': 'i_b', 'outcome': 'reachable', 'latency_ms': 2}
++      {'id': 'i_b', 'outcome': 'undetectable', 'latency_ms': null}
+     ]);
+     now += 60;
+     allowed = false;
+diff --git a/flutter/test/steaddesk/quick_support_test.dart b/flutter/test/steaddesk/quick_support_test.dart
+index fbf8c6d..fa19e5f 100644
+--- a/flutter/test/steaddesk/quick_support_test.dart
++++ b/flutter/test/steaddesk/quick_support_test.dart
+@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
+ import 'package:flutter_test/flutter_test.dart';
+ import 'package:flutter_hbb/steaddesk/ops_health.dart';
+ import 'package:flutter_hbb/steaddesk/quick/support.dart';
++import 'package:flutter_hbb/steaddesk/quick/result_line.dart';
+ import 'package:flutter_hbb/steaddesk/quick/check.dart';
+ 
+ class _Fixture implements HealthApi {
+@@ -40,6 +41,12 @@ class _Fixture implements HealthApi {
+                 'ip': '192.168.2.5',
+                 'outcome': 'reachable',
+                 'latency_ms': 8
++              },
++              {
++                'name': 'Terminal',
++                'ip': '192.168.2.6',
++                'outcome': 'undetectable',
++                'latency_ms': null
+               }
+             ]
+           }
+@@ -58,6 +65,12 @@ class _Fixture implements HealthApi {
+ }
+ 
+ void main() {
++  test('merchant label follows the selected or regional device language', () {
++    expect(merchantUndetectableLabel('zh_CN'), '无法检测');
++    expect(merchantUndetectableLabel('es-MX'), 'No se puede detectar');
++    expect(merchantUndetectableLabel('en_US'), 'Cannot detect');
++  });
++
+   testWidgets(
+       'server viewer can read inventory and last report; only admin can edit policy and inventory',
+       (t) async {
+@@ -81,6 +94,17 @@ void main() {
+     await t.tap(find.text('最近商户快速检查'));
+     await t.pumpAndSettle();
+     expect(find.textContaining('8 ms'), findsOneWidget);
++    final status = find.textContaining('无法检测');
++    expect(status, findsOneWidget);
++    final result = t.widget<Text>(status);
++    expect(
++        (result.textSpan as TextSpan)
++            .children!
++            .whereType<TextSpan>()
++            .singleWhere((span) => span.text == '无法检测')
++            .style!
++            .color,
++        Colors.grey);
+     api.admin = true;
+     await show(storeInventory(store, '123'));
+     await t.tap(find.byType(SwitchListTile));
+@@ -93,11 +117,23 @@ void main() {
+     await t.pumpAndSettle();
+     expect(find.text('本店已登记此 IP'), findsOneWidget);
+     await t.enterText(find.byType(TextFormField).at(1), '192.168.2.6');
++    await t.ensureVisible(find.byType(DropdownButtonFormField<String>));
++    await t.tap(find.byType(DropdownButtonFormField<String>));
++    await t.pumpAndSettle();
++    await t.tap(find.text('支付设备').last);
++    await t.pumpAndSettle();
++    final noPing = find.widgetWithText(CheckboxListTile, '不回应 ping');
++    expect(t.widget<CheckboxListTile>(noPing).value, true);
++    await t.ensureVisible(noPing);
++    await t.tap(noPing);
++    await t.pumpAndSettle();
+     await t.tap(find.text('保存'));
+     await t.pumpAndSettle();
+     expect(find.text('Demo host'), findsOneWidget);
+     await t.tap(find.byTooltip('编辑设备').last);
+     await t.pumpAndSettle();
++    expect(api.rows.last['no_ping'], false);
++    expect(t.widget<CheckboxListTile>(noPing).value, false);
+     await t.enterText(find.byType(TextFormField).at(0), 'Demo edited');
+     await t.tap(find.text('保存'));
+     await t.pumpAndSettle();
