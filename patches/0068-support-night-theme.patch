@@ -304,7 +304,7 @@ index 965e3b6..39ccf97 100644
            const Divider(color: SteadDeskTheme.divider, height: 1, thickness: 1),
            if (elevate != null)
 diff --git a/flutter/lib/steaddesk/directory_row.dart b/flutter/lib/steaddesk/directory_row.dart
-index 78dd8e2..eb6397e 100644
+index cd2a7c6..9408b1a 100644
 --- a/flutter/lib/steaddesk/directory_row.dart
 +++ b/flutter/lib/steaddesk/directory_row.dart
 @@ -1,3 +1,4 @@
@@ -321,8 +321,8 @@ index 78dd8e2..eb6397e 100644
      final label = FittedBox(
          fit: BoxFit.scaleDown,
          child: Text(tr(online ? 'Connect' : 'Details'), maxLines: 1));
-@@ -110,7 +111,7 @@ class _DirectoryRowState extends State<DirectoryRow> {
-             style: FilledButton.styleFrom(
+@@ -113,7 +114,7 @@ class _DirectoryRowState extends State<DirectoryRow> {
+                 shape: actionShape,
                  padding: const EdgeInsets.symmetric(horizontal: 10),
                  backgroundColor: blue,
 -                foregroundColor: Colors.white),
@@ -330,7 +330,7 @@ index 78dd8e2..eb6397e 100644
              child: label)
          : OutlinedButton(
              onPressed: widget.onDetails,
-@@ -133,7 +134,7 @@ class _DirectoryRowState extends State<DirectoryRow> {
+@@ -137,7 +138,7 @@ class _DirectoryRowState extends State<DirectoryRow> {
                  onTap: widget.onDetails,
                  child: Container(
                    height: 56,
@@ -339,7 +339,7 @@ index 78dd8e2..eb6397e 100644
                    child: DirectoryColumns(
                        Row(children: [
                          Expanded(
-@@ -175,8 +176,8 @@ class _DirectoryRowState extends State<DirectoryRow> {
+@@ -179,8 +180,8 @@ class _DirectoryRowState extends State<DirectoryRow> {
                                    : 'Offline'),
                            style: TextStyle(
                                color: online
@@ -350,6 +350,294 @@ index 78dd8e2..eb6397e 100644
                        Text(d.model.isEmpty ? '—' : d.model)),
                  ))));
    }
+diff --git a/flutter/test/steaddesk/directory_row_test.dart b/flutter/test/steaddesk/directory_row_test.dart
+index cc83000..4fcb132 100644
+--- a/flutter/test/steaddesk/directory_row_test.dart
++++ b/flutter/test/steaddesk/directory_row_test.dart
+@@ -6,142 +6,151 @@ import 'package:flutter/rendering.dart';
+ import 'package:flutter/services.dart';
+ import 'package:flutter_test/flutter_test.dart';
+ import 'package:flutter_hbb/steaddesk/directory_row.dart';
++import 'package:flutter_hbb/steaddesk/support_appearance.dart';
+ import 'package:flutter_hbb/steaddesk/support_device.dart';
+ 
+ void main() {
+-  testWidgets('directory mouse, keyboard, presence and responsive layout',
+-      (t) async {
+-    final capture = GlobalKey();
+-    String action = '';
+-    final font = Platform.isWindows
+-        ? File(r'C:\Windows\Fonts\segoeui.ttf')
+-        : File('/System/Library/Fonts/Supplemental/Arial.ttf');
+-    if (font.existsSync()) {
+-      final loader = FontLoader('DirectoryTestFont')
+-        ..addFont(Future.value(ByteData.sublistView(font.readAsBytesSync())));
+-      await loader.load();
+-    }
+-    final mono = File(Platform.isWindows
+-        ? r'C:\Windows\Fonts\consola.ttf'
+-        : '/System/Library/Fonts/Supplemental/Courier New.ttf');
+-    if (mono.existsSync()) {
+-      await (FontLoader('Cascadia Mono')
+-            ..addFont(
+-                Future.value(ByteData.sublistView(mono.readAsBytesSync()))))
++  for (final night in [false, true]) {
++    testWidgets('directory interaction and corners (night: $night)', (t) async {
++      final capture = GlobalKey();
++      String action = '';
++      final font = Platform.isWindows
++          ? File(r'C:\Windows\Fonts\segoeui.ttf')
++          : File('/System/Library/Fonts/Supplemental/Arial.ttf');
++      if (font.existsSync()) {
++        final loader = FontLoader('DirectoryTestFont')
++          ..addFont(Future.value(ByteData.sublistView(font.readAsBytesSync())));
++        await loader.load();
++      }
++      final mono = File(Platform.isWindows
++          ? r'C:\Windows\Fonts\consola.ttf'
++          : '/System/Library/Fonts/Supplemental/Courier New.ttf');
++      if (mono.existsSync()) {
++        await (FontLoader('Cascadia Mono')
++              ..addFont(
++                  Future.value(ByteData.sublistView(mono.readAsBytesSync()))))
++            .load();
++      }
++      await (FontLoader('MaterialIcons')
++            ..addFont(rootBundle.load('fonts/MaterialIcons-Regular.otf')))
+           .load();
+-    }
+-    await (FontLoader('MaterialIcons')
+-          ..addFont(rootBundle.load('fonts/MaterialIcons-Regular.otf')))
+-        .load();
+-    t.view.devicePixelRatio = 1;
+-    t.view.physicalSize = const Size(1280, 400);
+-    addTearDown(t.view.resetPhysicalSize);
+-    addTearDown(t.view.resetDevicePixelRatio);
+-    final devices = [
+-      for (final online in [true, false])
+-        SupportDevice(
+-            id: online ? '987654321' : '987654322',
+-            alias: online ? 'Front counter' : 'Office',
+-            hostnames: ['M0001-S01-SUNMI1', 'SUNMI-Demo'],
+-            platform: 'Android',
+-            groupName: '',
+-            online: online),
+-    ];
+-    await t.pumpWidget(MaterialApp(
+-        theme: ThemeData(fontFamily: 'DirectoryTestFont'),
+-        home: Scaffold(
+-            body: Center(
+-                child: RepaintBoundary(
+-                    key: capture,
+-                    child: Material(
+-                        child: SizedBox(
+-                            height: 160,
+-                            child: Column(children: [
+-                              const SizedBox(
+-                                  height: 36,
+-                                  child: DirectoryColumns(Text('Device'),
+-                                      Text('Status'), Text('Model'))),
+-                              for (final d in devices)
+-                                DirectoryRow(
+-                                    device: d,
+-                                    translate: (s) => s,
+-                                    onDetails: () => action = 'details ${d.id}',
+-                                    onConnect: () => action = 'connect ${d.id}',
+-                                    onTransfer: () =>
+-                                        action = 'transfer ${d.id}',
+-                                    more: IconButton(
+-                                        onPressed: () => action = 'menu',
+-                                        icon: const Icon(Icons.more_horiz))),
+-                            ]))))))));
+-    void expectActionCorners(Finder button) {
+-      final action = t.widget<ButtonStyleButton>(button);
+-      final shape = action.style?.shape?.resolve({});
+-      expect(shape, isA<RoundedRectangleBorder>());
+-      expect((shape as RoundedRectangleBorder).borderRadius,
+-          BorderRadius.circular(6));
+-    }
++      t.view.devicePixelRatio = 1;
++      t.view.physicalSize = const Size(1280, 400);
++      addTearDown(t.view.resetPhysicalSize);
++      addTearDown(t.view.resetDevicePixelRatio);
++      final devices = [
++        for (final online in [true, false])
++          SupportDevice(
++              id: online ? '987654321' : '987654322',
++              alias: online ? 'Front counter' : 'Office',
++              hostnames: ['M0001-S01-SUNMI1', 'SUNMI-Demo'],
++              platform: 'Android',
++              groupName: '',
++              online: online),
++      ];
++      await t.pumpWidget(MaterialApp(
++          theme: ThemeData(fontFamily: 'DirectoryTestFont'),
++          darkTheme: supportNightTheme(ThemeData(
++              brightness: Brightness.dark, fontFamily: 'DirectoryTestFont')),
++          themeMode: night ? ThemeMode.dark : ThemeMode.light,
++          home: Scaffold(
++              body: Center(
++                  child: RepaintBoundary(
++                      key: capture,
++                      child: Material(
++                          child: SizedBox(
++                              height: 160,
++                              child: Column(children: [
++                                const SizedBox(
++                                    height: 36,
++                                    child: DirectoryColumns(Text('Device'),
++                                        Text('Status'), Text('Model'))),
++                                for (final d in devices)
++                                  DirectoryRow(
++                                      device: d,
++                                      translate: (s) => s,
++                                      onDetails: () =>
++                                          action = 'details ${d.id}',
++                                      onConnect: () =>
++                                          action = 'connect ${d.id}',
++                                      onTransfer: () =>
++                                          action = 'transfer ${d.id}',
++                                      more: IconButton(
++                                          onPressed: () => action = 'menu',
++                                          icon: const Icon(Icons.more_horiz))),
++                              ]))))))));
++      void expectActionCorners(Finder button) {
++        final action = t.widget<ButtonStyleButton>(button);
++        final shape = action.style?.shape?.resolve({});
++        expect(shape, isA<RoundedRectangleBorder>());
++        expect((shape as RoundedRectangleBorder).borderRadius,
++            BorderRadius.circular(6));
++      }
+ 
+-    Future<void> shot(String name) async {
+-      final dir = Platform.environment['STEADDESK_DIRECTORY_SHOTS'];
+-      if (dir == null) return;
+-      await t.runAsync(() async {
+-        final obj =
+-            capture.currentContext!.findRenderObject() as RenderRepaintBoundary;
+-        final image = await obj.toImage();
+-        final bytes = await image.toByteData(format: ui.ImageByteFormat.png);
+-        Directory(dir).createSync(recursive: true);
+-        File('$dir/$name.png').writeAsBytesSync(bytes!.buffer.asUint8List());
+-        image.dispose();
+-      });
+-    }
++      Future<void> shot(String name) async {
++        final dir = Platform.environment['STEADDESK_DIRECTORY_SHOTS'];
++        if (dir == null) return;
++        await t.runAsync(() async {
++          final obj = capture.currentContext!.findRenderObject()
++              as RenderRepaintBoundary;
++          final image = await obj.toImage();
++          final bytes = await image.toByteData(format: ui.ImageByteFormat.png);
++          Directory(dir).createSync(recursive: true);
++          File('$dir/${night ? 'night-' : ''}$name.png')
++              .writeAsBytesSync(bytes!.buffer.asUint8List());
++          image.dispose();
++        });
++      }
+ 
+-    expect(find.text('M0001-S01-SUNMI1'), findsNothing);
+-    expect(find.text('Connect').hitTestable(), findsNothing);
+-    await shot('default');
+-    final mouse = await t.createGesture(kind: PointerDeviceKind.mouse);
+-    await mouse.addPointer(location: Offset.zero);
+-    final front = find.text('Front counter'), office = find.text('Office');
+-    final before = t.getTopLeft(front);
+-    await mouse.moveTo(t.getCenter(front));
+-    await t.pumpAndSettle();
+-    expect(t.getTopLeft(front), before);
+-    expect(find.text('Connect'), findsOneWidget);
+-    expectActionCorners(find.widgetWithText(FilledButton, 'Connect'));
+-    await shot('hover-online');
+-    await t.tap(find.byTooltip('Transfer file').hitTestable());
+-    await t.pump(const Duration(milliseconds: 350));
+-    expect(action, 'transfer 987654321');
+-    await mouse.moveTo(t.getCenter(office));
+-    await t.pumpAndSettle();
+-    expect(find.text('Details'), findsOneWidget);
+-    expectActionCorners(find.widgetWithText(OutlinedButton, 'Details'));
+-    await shot('hover-offline');
+-    await t.tap(find.text('Details'));
+-    await t.pump(const Duration(milliseconds: 350));
+-    expect(action, 'details 987654322');
+-    await mouse.moveTo(Offset.zero);
+-    await t.pumpAndSettle();
+-    final firstRow = find.byType(DirectoryRow).first;
+-    final focus = t.widget<Focus>(find.descendant(of: firstRow, matching: find.byType(Focus)).first);
+-    focus.focusNode!.requestFocus();
+-    await t.pumpAndSettle();
+-    await t.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+-    await t.pumpAndSettle();
+-    await t.sendKeyEvent(LogicalKeyboardKey.space);
+-    expect(action, 'details 987654322');
+-    action = '';
+-    await t.sendKeyEvent(LogicalKeyboardKey.enter);
+-    expect(action, '');
+-    await t.sendKeyEvent(LogicalKeyboardKey.arrowUp);
+-    await t.pumpAndSettle();
+-    await t.sendKeyEvent(LogicalKeyboardKey.enter);
+-    expect(action, 'connect 987654321');
+-    await shot('keyboard-selected');
+-    t.view.physicalSize = const Size(540, 400);
+-    await t.pumpAndSettle();
+-    expect(find.text('Model'), findsNothing);
+-    expect(t.takeException(), isNull);
+-    await shot('narrow');
+-    await mouse.removePointer();
+-  });
++      expect(find.text('M0001-S01-SUNMI1'), findsNothing);
++      expect(find.text('Connect').hitTestable(), findsNothing);
++      await shot('default');
++      final mouse = await t.createGesture(kind: PointerDeviceKind.mouse);
++      await mouse.addPointer(location: Offset.zero);
++      final front = find.text('Front counter'), office = find.text('Office');
++      final before = t.getTopLeft(front);
++      await mouse.moveTo(t.getCenter(front));
++      await t.pumpAndSettle();
++      expect(t.getTopLeft(front), before);
++      expect(find.text('Connect'), findsOneWidget);
++      expectActionCorners(find.widgetWithText(FilledButton, 'Connect'));
++      await shot('hover-online');
++      await t.tap(find.byTooltip('Transfer file').hitTestable());
++      await t.pump(const Duration(milliseconds: 350));
++      expect(action, 'transfer 987654321');
++      await mouse.moveTo(t.getCenter(office));
++      await t.pumpAndSettle();
++      expect(find.text('Details'), findsOneWidget);
++      expectActionCorners(find.widgetWithText(OutlinedButton, 'Details'));
++      await shot('hover-offline');
++      await t.tap(find.text('Details'));
++      await t.pump(const Duration(milliseconds: 350));
++      expect(action, 'details 987654322');
++      await mouse.moveTo(Offset.zero);
++      await t.pumpAndSettle();
++      final firstRow = find.byType(DirectoryRow).first;
++      final focus = t.widget<Focus>(
++          find.descendant(of: firstRow, matching: find.byType(Focus)).first);
++      focus.focusNode!.requestFocus();
++      await t.pumpAndSettle();
++      await t.sendKeyEvent(LogicalKeyboardKey.arrowDown);
++      await t.pumpAndSettle();
++      await t.sendKeyEvent(LogicalKeyboardKey.space);
++      expect(action, 'details 987654322');
++      action = '';
++      await t.sendKeyEvent(LogicalKeyboardKey.enter);
++      expect(action, '');
++      await t.sendKeyEvent(LogicalKeyboardKey.arrowUp);
++      await t.pumpAndSettle();
++      await t.sendKeyEvent(LogicalKeyboardKey.enter);
++      expect(action, 'connect 987654321');
++      await shot('keyboard-selected');
++      t.view.physicalSize = const Size(540, 400);
++      await t.pumpAndSettle();
++      expect(find.text('Model'), findsNothing);
++      expect(t.takeException(), isNull);
++      await shot('narrow');
++      await mouse.removePointer();
++    });
++  }
+ }
 diff --git a/flutter/lib/steaddesk/file_transfer.dart b/flutter/lib/steaddesk/file_transfer.dart
 index 97079b4..32740c1 100644
 --- a/flutter/lib/steaddesk/file_transfer.dart
