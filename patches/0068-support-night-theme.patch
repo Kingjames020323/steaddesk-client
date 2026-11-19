@@ -1,5 +1,5 @@
 diff --git a/flutter/lib/common.dart b/flutter/lib/common.dart
-index 2f8bf82..4af6a1c 100644
+index 2f8bf82..0ae06cd 100644
 --- a/flutter/lib/common.dart
 +++ b/flutter/lib/common.dart
 @@ -16,6 +16,7 @@ import 'package:flutter_hbb/main.dart';
@@ -28,8 +28,62 @@ index 2f8bf82..4af6a1c 100644
  
    static ColorThemeExtension color(BuildContext context) {
      return Theme.of(context).extension<ColorThemeExtension>()!;
+@@ -3581,6 +3591,7 @@ class ComboBox extends StatelessWidget {
+   late final String initialKey;
+   late final Function(String key) onChanged;
+   late final bool enabled;
++  final String? semanticLabel;
+   late String current;
+ 
+   ComboBox({
+@@ -3590,6 +3601,7 @@ class ComboBox extends StatelessWidget {
+     required this.initialKey,
+     required this.onChanged,
+     this.enabled = true,
++    this.semanticLabel,
+   }) : super(key: key);
+ 
+   @override
+@@ -3600,6 +3612,12 @@ class ComboBox extends StatelessWidget {
+     }
+     var ref = values[index].obs;
+     current = keys[index];
++    Widget itemText(String value, {String? semantics}) => Text(
++          value,
++          semanticsLabel: semantics,
++          style: const TextStyle(fontSize: 15),
++          overflow: TextOverflow.ellipsis,
++        ).marginOnly(left: 15);
+     return Container(
+       decoration: BoxDecoration(
+         border: Border.all(
+@@ -3633,14 +3651,19 @@ class ComboBox extends StatelessWidget {
+                     }
+                   }
+                 : null,
++            selectedItemBuilder: semanticLabel == null
++                ? null
++                : (_) => [
++                      for (final value in values)
++                        Align(
++                          alignment: AlignmentDirectional.centerStart,
++                          child: itemText(value, semantics: '$semanticLabel: $value'),
++                        ),
++                    ],
+             items: values.map<DropdownMenuItem<String>>((String value) {
+               return DropdownMenuItem<String>(
+                 value: value,
+-                child: Text(
+-                  value,
+-                  style: const TextStyle(fontSize: 15),
+-                  overflow: TextOverflow.ellipsis,
+-                ).marginOnly(left: 15),
++                child: itemText(value),
+               );
+             }).toList(),
+           )),
 diff --git a/flutter/lib/desktop/pages/desktop_setting_page.dart b/flutter/lib/desktop/pages/desktop_setting_page.dart
-index 4fd5403..3a32b25 100644
+index 4fd5403..86f49b0 100644
 --- a/flutter/lib/desktop/pages/desktop_setting_page.dart
 +++ b/flutter/lib/desktop/pages/desktop_setting_page.dart
 @@ -1,3 +1,4 @@
@@ -61,13 +115,14 @@ index 4fd5403..3a32b25 100644
                child: PageView(
                  controller: controller,
                  physics: NeverScrollableScrollPhysics(),
-@@ -416,6 +417,17 @@ class _GeneralState extends State<_General> {
+@@ -416,6 +417,18 @@ class _GeneralState extends State<_General> {
        controller: scrollController,
        children: [
          if (!isWeb) service(),
 +        if (MyTheme.supportAppearanceEnabled)
 +          _Card(title: _appearanceLabel('Appearance', '外观'), children: [
 +            ComboBox(keys: const ['system','light','dark'],
++              semanticLabel: _appearanceLabel('Appearance', '外观'),
 +              values: [translate('Follow System'), _appearanceLabel('Day','白天'), _appearanceLabel('Night','夜间')],
 +              initialKey: MyTheme.preferredThemeMode().name,
 +              onChanged: (key) async {
@@ -79,7 +134,7 @@ index 4fd5403..3a32b25 100644
          _Card(title: 'Language', children: [language()]),
          if (!isWeb) hwcodec(),
          if (!isWeb) audio(context),
-@@ -825,6 +837,12 @@ class _GeneralState extends State<_General> {
+@@ -825,6 +838,12 @@ class _GeneralState extends State<_General> {
      });
    }
  
@@ -92,7 +147,7 @@ index 4fd5403..3a32b25 100644
    Widget language() {
      return futureBuilder(future: () async {
        String langs = await bind.mainGetLangs();
-@@ -2594,16 +2612,16 @@ Widget _Card(
+@@ -2594,16 +2613,16 @@ Widget _Card(
      {required String title,
      required List<Widget> children,
      List<Widget>? title_suffix}) {
@@ -113,7 +168,7 @@ index 4fd5403..3a32b25 100644
              child: Column(
                children: [
                  Row(
-@@ -2619,8 +2637,8 @@ Widget _Card(
+@@ -2619,8 +2638,8 @@ Widget _Card(
                      ...?title_suffix
                    ],
                  ).marginOnly(left: _kContentHMargin, top: 10, bottom: 10),
@@ -124,7 +179,7 @@ index 4fd5403..3a32b25 100644
                  ...children
                      .map((e) => e.marginOnly(top: 4, right: _kContentHMargin)),
                ],
-@@ -2629,7 +2647,7 @@ Widget _Card(
+@@ -2629,7 +2648,7 @@ Widget _Card(
          ),
        ),
      ],
@@ -1535,15 +1590,44 @@ index 8b84247..cf6f489 100644
                              child: Column(
 diff --git a/flutter/test/steaddesk/support_appearance_test.dart b/flutter/test/steaddesk/support_appearance_test.dart
 new file mode 100644
-index 0000000..3dfebe8
+index 0000000..2b9086e
 --- /dev/null
 +++ b/flutter/test/steaddesk/support_appearance_test.dart
-@@ -0,0 +1,37 @@
+@@ -0,0 +1,66 @@
 +import 'package:flutter/material.dart';
++import 'package:flutter_hbb/common.dart' show ComboBox, MyTheme;
 +import 'package:flutter_test/flutter_test.dart';
 +import 'package:flutter_hbb/steaddesk/support_appearance.dart';
 +
 +void main() {
++  testWidgets(
++      'appearance picker exposes its closed value and every menu choice',
++      (tester) async {
++    var saved = 'light';
++    await tester.pumpWidget(MaterialApp(
++      theme: MyTheme.lightTheme,
++      home: Scaffold(
++          body: ComboBox(
++        keys: const ['system', 'light', 'dark'],
++        values: const ['Follow System', 'Day', 'Night'],
++        initialKey: saved,
++        semanticLabel: 'Appearance',
++        onChanged: (key) => saved = key,
++      )),
++    ));
++    final selected = find.bySemanticsLabel('Appearance: Day');
++    expect(selected, findsOneWidget);
++    await tester.tap(selected);
++    await tester.pumpAndSettle();
++    for (final label in ['Follow System', 'Day', 'Night']) {
++      expect(find.bySemanticsLabel(label), findsOneWidget);
++    }
++    await tester.tap(find.bySemanticsLabel('Night'));
++    await tester.pumpAndSettle();
++    expect(saved, 'dark');
++    expect(find.bySemanticsLabel('Appearance: Night'), findsOneWidget);
++  }, variant: TargetPlatformVariant.only(TargetPlatform.windows));
++
 +  testWidgets('system changes live; explicit choices override OS brightness',
 +      (t) async {
 +    final platform = t.platformDispatcher;

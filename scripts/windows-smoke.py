@@ -271,15 +271,33 @@ if recent_fixture and directory_fixture:
     capture_home("appearance-day-home")
     open_settings()
     press(window, "General")
-    press(window, "Day")
-    options = [wait_for(s, lambda s=s: by_name(window, s)) for s in ("Follow System", "Night")]
-    boxes = [el.rectangle() for el in options]
+    def appearance_control(label):
+        # Flutter can expose the selected label as UIA Name, Text or Value.
+        # Restrict matches to the entire public label of a visible control.
+        named = by_name(window, label)
+        if named is not None:
+            return named
+        for control in controls(window, lambda _: True):
+            if any(field.strip().casefold() == label.casefold()
+                   for field in public_fields(control)):
+                return control
+        return None
+
+    day_picker = wait_for("closed Appearance: Day picker",
+                          lambda: appearance_control("Appearance: Day"))
+    click_control(day_picker)
+    options = {
+        label: wait_for("appearance option " + label, lambda label=label: appearance_control(label))
+        for label in ("Follow System", "Day", "Night")
+    }
+    boxes = [el.rectangle() for el in options.values()]
     frame = window.rectangle()
     dropdown = (min(r.left for r in boxes) - frame.left, min(r.top for r in boxes) - frame.top,
                 max(r.right for r in boxes) - frame.left, max(r.bottom for r in boxes) - frame.top)
-    save_evidence(window, "appearance-settings", options + controls(window, lambda s: s in {"Appearance", "Day"}), [dropdown])
-    click_control(options[1])
-    wait_for("night selection", lambda: by_name(window, "Night"))
+    save_evidence(window, "appearance-settings", list(options.values()), [dropdown])
+    click_control(options["Night"])
+    wait_for("closed Appearance: Night picker",
+             lambda: appearance_control("Appearance: Night"))
     press(window, "Home")
     wait_for("dark directory body", lambda: True if background() <= 60 else None)
     capture_home("appearance-night-home")
