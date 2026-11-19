@@ -504,6 +504,9 @@ jobs:
     - uses: nttld/setup-ndk@ed92fe6cadad69be94a966a7ee3271275e62f779
       id: setup-ndk
       with: *1
+    - name: Prepare verified Flutter Gradle dependencies
+      shell: bash
+      run: bash .distribution/scripts/prepare-android-gradle.sh
     - name: Build rustdesk
       shell: bash
       env:
