@@ -55,10 +55,10 @@ index 417405b..45efea9 100644
  
 diff --git a/flutter/lib/steaddesk/directory_row.dart b/flutter/lib/steaddesk/directory_row.dart
 new file mode 100644
-index 0000000..78dd8e2
+index 0000000..cd2a7c6
 --- /dev/null
 +++ b/flutter/lib/steaddesk/directory_row.dart
-@@ -0,0 +1,183 @@
+@@ -0,0 +1,187 @@
 +import 'package:flutter/material.dart';
 +import 'package:flutter/services.dart';
 +import 'device_id_widgets.dart';
@@ -165,10 +165,13 @@ index 0000000..78dd8e2
 +    final label = FittedBox(
 +        fit: BoxFit.scaleDown,
 +        child: Text(tr(online ? 'Connect' : 'Details'), maxLines: 1));
++    const actionShape = RoundedRectangleBorder(
++        borderRadius: BorderRadius.all(Radius.circular(6)));
 +    final primary = online
 +        ? FilledButton(
 +            onPressed: widget.onConnect,
 +            style: FilledButton.styleFrom(
++                shape: actionShape,
 +                padding: const EdgeInsets.symmetric(horizontal: 10),
 +                backgroundColor: blue,
 +                foregroundColor: Colors.white),
@@ -176,6 +179,7 @@ index 0000000..78dd8e2
 +        : OutlinedButton(
 +            onPressed: widget.onDetails,
 +            style: OutlinedButton.styleFrom(
++                shape: actionShape,
 +                padding: const EdgeInsets.symmetric(horizontal: 10),
 +                foregroundColor: blue),
 +            child: label);
@@ -376,10 +380,10 @@ index 57b8f99..df7abbf 100644
      });
 diff --git a/flutter/test/steaddesk/directory_row_test.dart b/flutter/test/steaddesk/directory_row_test.dart
 new file mode 100644
-index 0000000..5f63d5b
+index 0000000..cc83000
 --- /dev/null
 +++ b/flutter/test/steaddesk/directory_row_test.dart
-@@ -0,0 +1,137 @@
+@@ -0,0 +1,147 @@
 +import 'dart:io';
 +import 'dart:ui' as ui;
 +import 'package:flutter/gestures.dart';
@@ -455,6 +459,14 @@ index 0000000..5f63d5b
 +                                        onPressed: () => action = 'menu',
 +                                        icon: const Icon(Icons.more_horiz))),
 +                            ]))))))));
++    void expectActionCorners(Finder button) {
++      final action = t.widget<ButtonStyleButton>(button);
++      final shape = action.style?.shape?.resolve({});
++      expect(shape, isA<RoundedRectangleBorder>());
++      expect((shape as RoundedRectangleBorder).borderRadius,
++          BorderRadius.circular(6));
++    }
++
 +    Future<void> shot(String name) async {
 +      final dir = Platform.environment['STEADDESK_DIRECTORY_SHOTS'];
 +      if (dir == null) return;
@@ -480,6 +492,7 @@ index 0000000..5f63d5b
 +    await t.pumpAndSettle();
 +    expect(t.getTopLeft(front), before);
 +    expect(find.text('Connect'), findsOneWidget);
++    expectActionCorners(find.widgetWithText(FilledButton, 'Connect'));
 +    await shot('hover-online');
 +    await t.tap(find.byTooltip('Transfer file').hitTestable());
 +    await t.pump(const Duration(milliseconds: 350));
@@ -487,6 +500,7 @@ index 0000000..5f63d5b
 +    await mouse.moveTo(t.getCenter(office));
 +    await t.pumpAndSettle();
 +    expect(find.text('Details'), findsOneWidget);
++    expectActionCorners(find.widgetWithText(OutlinedButton, 'Details'));
 +    await shot('hover-offline');
 +    await t.tap(find.text('Details'));
 +    await t.pump(const Duration(milliseconds: 350));
