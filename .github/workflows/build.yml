@@ -38,6 +38,10 @@ name: Build SteadDesk
         description: Test shared groups, health, help and case writeback with registered devices
         type: boolean
         default: false
+      steaddesk_quick_check:
+        description: Enable quick checks for registered store devices
+        type: boolean
+        default: false
       steaddesk_fleet_update:
         description: Include the merchant update client in this preview test build
         type: boolean
@@ -73,7 +77,7 @@ env:
   STEADDESK_FLEET_WINDOWS_PROFILE: ${{ vars.STEADDESK_FLEET_WINDOWS_PROFILE }}
   STEADDESK_FLEET_SILENT_PROFILE: ${{ vars.STEADDESK_FLEET_SILENT_PROFILE }}
   STEADDESK_HELP: ${{ github.event_name == 'workflow_dispatch' && github.ref_type == 'branch' && inputs.steaddesk_ops_integration && 'true' || vars.STEADDESK_HELP }}
-  STEADDESK_QUICK_CHECK: ${{ github.event_name == 'workflow_dispatch' && github.ref_type == 'branch' && inputs.steaddesk_ops_integration && 'true' || vars.STEADDESK_QUICK_CHECK == 'true' && 'true' || 'false' }}
+  STEADDESK_QUICK_CHECK: ${{ github.event_name == 'workflow_dispatch' && github.ref_type == 'branch' && inputs.steaddesk_quick_check && 'true' || vars.STEADDESK_QUICK_CHECK == 'true' && 'true' || 'false' }}
   STEADDESK_QUALITY: ${{ vars.STEADDESK_QUALITY }}
   STEADDESK_OPS_HEALTH: ${{ github.event_name == 'workflow_dispatch' && github.ref_type == 'branch' && inputs.steaddesk_ops_integration && 'true' || vars.STEADDESK_OPS_HEALTH }}
   STEADDESK_OPS_GROUPS: ${{ github.event_name == 'workflow_dispatch' && github.ref_type == 'branch' && inputs.steaddesk_ops_integration && 'true' || vars.STEADDESK_OPS_GROUPS }}
