@@ -1,0 +1,1662 @@
+diff --git a/flutter/lib/common.dart b/flutter/lib/common.dart
+index 2f8bf82..0ae06cd 100644
+--- a/flutter/lib/common.dart
++++ b/flutter/lib/common.dart
+@@ -16,6 +16,7 @@ import 'package:flutter_hbb/main.dart';
+ import 'package:flutter_hbb/models/peer_model.dart';
+ import 'package:flutter_hbb/models/peer_tab_model.dart';
+ import 'package:flutter_hbb/models/state_model.dart';
++import 'package:flutter_hbb/steaddesk/support_appearance.dart';
+ import 'package:flutter_hbb/utils/multi_window_manager.dart';
+ import 'package:flutter_hbb/utils/platform_channel.dart';
+ import 'package:flutter_svg/flutter_svg.dart';
+@@ -572,7 +573,16 @@ class MyTheme {
+     ],
+   );
+ 
+-  static ThemeMode currentThemeMode() => ThemeMode.light;
++  static bool get supportAppearanceEnabled => isWindows && !merchantEdition;
++  static ThemeMode preferredThemeMode() => supportAppearanceEnabled
++      ? supportMode(bind.mainGetLocalOption(key: appearanceOption)) : ThemeMode.light;
++  static ThemeMode currentThemeMode() {
++    final mode = preferredThemeMode();
++    if (mode != ThemeMode.system) return mode;
++    return WidgetsBinding.instance.platformDispatcher.platformBrightness == Brightness.dark
++        ? ThemeMode.dark : ThemeMode.light;
++  }
++  static final supportDark = supportNightTheme(darkTheme);
+ 
+   static ColorThemeExtension color(BuildContext context) {
+     return Theme.of(context).extension<ColorThemeExtension>()!;
+@@ -3581,6 +3591,7 @@ class ComboBox extends StatelessWidget {
+   late final String initialKey;
+   late final Function(String key) onChanged;
+   late final bool enabled;
++  final String? semanticLabel;
+   late String current;
+ 
+   ComboBox({
+@@ -3590,6 +3601,7 @@ class ComboBox extends StatelessWidget {
+     required this.initialKey,
+     required this.onChanged,
+     this.enabled = true,
++    this.semanticLabel,
+   }) : super(key: key);
+ 
+   @override
+@@ -3600,6 +3612,12 @@ class ComboBox extends StatelessWidget {
+     }
+     var ref = values[index].obs;
+     current = keys[index];
++    Widget itemText(String value, {String? semantics}) => Text(
++          value,
++          semanticsLabel: semantics,
++          style: const TextStyle(fontSize: 15),
++          overflow: TextOverflow.ellipsis,
++        ).marginOnly(left: 15);
+     return Container(
+       decoration: BoxDecoration(
+         border: Border.all(
+@@ -3633,14 +3651,19 @@ class ComboBox extends StatelessWidget {
+                     }
+                   }
+                 : null,
++            selectedItemBuilder: semanticLabel == null
++                ? null
++                : (_) => [
++                      for (final value in values)
++                        Align(
++                          alignment: AlignmentDirectional.centerStart,
++                          child: itemText(value, semantics: '$semanticLabel: $value'),
++                        ),
++                    ],
+             items: values.map<DropdownMenuItem<String>>((String value) {
+               return DropdownMenuItem<String>(
+                 value: value,
+-                child: Text(
+-                  value,
+-                  style: const TextStyle(fontSize: 15),
+-                  overflow: TextOverflow.ellipsis,
+-                ).marginOnly(left: 15),
++                child: itemText(value),
+               );
+             }).toList(),
+           )),
+diff --git a/flutter/lib/desktop/pages/desktop_setting_page.dart b/flutter/lib/desktop/pages/desktop_setting_page.dart
+index 4fd5403..86f49b0 100644
+--- a/flutter/lib/desktop/pages/desktop_setting_page.dart
++++ b/flutter/lib/desktop/pages/desktop_setting_page.dart
+@@ -1,3 +1,4 @@
++import 'package:flutter_hbb/steaddesk/support_appearance.dart';
+ import 'dart:async';
+ import 'dart:convert';
+ import 'dart:io';
+@@ -276,7 +277,7 @@ class _DesktopSettingPageState extends State<DesktopSettingPage>
+   Widget build(BuildContext context) {
+     super.build(context);
+     return Scaffold(
+-      backgroundColor: SteadDeskTheme.page,
++      backgroundColor: context.shade(SteadDeskTheme.page,Night.window),
+       body: _buildBlock(
+         children: <Widget>[
+           SizedBox(
+@@ -288,11 +289,11 @@ class _DesktopSettingPageState extends State<DesktopSettingPage>
+               ],
+             ),
+           ),
+-          const VerticalDivider(
+-              width: 1, thickness: 1, color: SteadDeskTheme.divider),
++          VerticalDivider(
++              width: 1, thickness: 1, color: context.supportLine),
+           Expanded(
+             child: Container(
+-              color: SteadDeskTheme.page,
++              color: context.shade(SteadDeskTheme.page,Night.panel),
+               child: PageView(
+                 controller: controller,
+                 physics: NeverScrollableScrollPhysics(),
+@@ -416,6 +417,18 @@ class _GeneralState extends State<_General> {
+       controller: scrollController,
+       children: [
+         if (!isWeb) service(),
++        if (MyTheme.supportAppearanceEnabled)
++          _Card(title: _appearanceLabel('Appearance', '外观'), children: [
++            ComboBox(keys: const ['system','light','dark'],
++              semanticLabel: _appearanceLabel('Appearance', '外观'),
++              values: [translate('Follow System'), _appearanceLabel('Day','白天'), _appearanceLabel('Night','夜间')],
++              initialKey: MyTheme.preferredThemeMode().name,
++              onChanged: (key) async {
++                await bind.mainSetLocalOption(key: appearanceOption,value:key);
++                Get.changeThemeMode(supportMode(key));
++                await reloadAllWindows();
++              }).marginOnly(left: _kContentHMargin)
++          ]),
+         _Card(title: 'Language', children: [language()]),
+         if (!isWeb) hwcodec(),
+         if (!isWeb) audio(context),
+@@ -825,6 +838,12 @@ class _GeneralState extends State<_General> {
+     });
+   }
+ 
++  String _appearanceLabel(String english,String chinese) {
++    final saved = bind.mainGetLocalOption(key: 'lang');
++    return (saved.isEmpty ? localeName.toString() : saved).toLowerCase().startsWith('zh')
++        ? chinese : translate(english);
++  }
++
+   Widget language() {
+     return futureBuilder(future: () async {
+       String langs = await bind.mainGetLangs();
+@@ -2594,16 +2613,16 @@ Widget _Card(
+     {required String title,
+     required List<Widget> children,
+     List<Widget>? title_suffix}) {
+-  return Row(
++  return Builder(builder: (context) => Row(
+     children: [
+       Flexible(
+         child: SizedBox(
+           width: _kCardFixedWidth,
+           child: DecoratedBox(
+-            decoration: const BoxDecoration(
+-                color: SteadDeskTheme.page,
++            decoration: BoxDecoration(
++                color: context.shade(SteadDeskTheme.page,Night.panel),
+                 border:
+-                    Border(bottom: BorderSide(color: SteadDeskTheme.divider))),
++                    Border(bottom: BorderSide(color: context.supportLine))),
+             child: Column(
+               children: [
+                 Row(
+@@ -2619,8 +2638,8 @@ Widget _Card(
+                     ...?title_suffix
+                   ],
+                 ).marginOnly(left: _kContentHMargin, top: 10, bottom: 10),
+-                const Divider(
+-                    height: 1, thickness: 1, color: SteadDeskTheme.rowDivider),
++                Divider(
++                    height: 1, thickness: 1, color: context.supportHairline),
+                 ...children
+                     .map((e) => e.marginOnly(top: 4, right: _kContentHMargin)),
+               ],
+@@ -2629,7 +2648,7 @@ Widget _Card(
+         ),
+       ),
+     ],
+-  );
++  ));
+ }
+ 
+ // ignore: non_constant_identifier_names
+diff --git a/flutter/lib/desktop/pages/file_manager_page.dart b/flutter/lib/desktop/pages/file_manager_page.dart
+index a01be74..abdab4b 100644
+--- a/flutter/lib/desktop/pages/file_manager_page.dart
++++ b/flutter/lib/desktop/pages/file_manager_page.dart
+@@ -1,3 +1,4 @@
++import 'package:flutter_hbb/steaddesk/support_appearance.dart';
+ import 'dart:async';
+ import 'dart:io';
+ import 'dart:math';
+diff --git a/flutter/lib/desktop/widgets/remote_toolbar.dart b/flutter/lib/desktop/widgets/remote_toolbar.dart
+index 74cd9e7..bacdf85 100644
+--- a/flutter/lib/desktop/widgets/remote_toolbar.dart
++++ b/flutter/lib/desktop/widgets/remote_toolbar.dart
+@@ -11,6 +11,7 @@ import 'package:flutter_hbb/common/widgets/dialog.dart';
+ import 'package:flutter_hbb/common/widgets/toolbar.dart';
+ import 'package:flutter_hbb/models/chat_model.dart';
+ import 'package:flutter_hbb/models/state_model.dart';
++import 'package:flutter_hbb/steaddesk/support_appearance.dart';
+ import 'package:flutter_hbb/consts.dart';
+ import 'package:flutter_svg/flutter_svg.dart';
+ import 'package:get/get.dart';
+diff --git a/flutter/lib/main.dart b/flutter/lib/main.dart
+index 997283a..e3523fb 100644
+--- a/flutter/lib/main.dart
++++ b/flutter/lib/main.dart
+@@ -372,7 +372,8 @@ void _runApp(
+       debugShowCheckedModeBanner: false,
+       title: title,
+       theme: MyTheme.lightTheme,
+-      themeMode: themeMode,
++      darkTheme: MyTheme.supportAppearanceEnabled ? MyTheme.supportDark : null,
++      themeMode: MyTheme.supportAppearanceEnabled ? MyTheme.preferredThemeMode() : themeMode,
+       home: home,
+       localizationsDelegates: const [
+         GlobalMaterialLocalizations.delegate,
+@@ -488,7 +489,8 @@ class _AppState extends State<App> with WidgetsBindingObserver {
+               ? '${bind.mainGetAppNameSync()} Web Client V2 (Preview)'
+               : bind.mainGetAppNameSync(),
+           theme: MyTheme.lightTheme,
+-          themeMode: merchantAndroid || merchantWindows ? ThemeMode.light : MyTheme.currentThemeMode(),
++          darkTheme: MyTheme.supportAppearanceEnabled ? MyTheme.supportDark : null,
++          themeMode: MyTheme.preferredThemeMode(),
+           home: merchantAndroid || merchantWindows ? const MerchantPanel() : isDesktop
+               ? const DesktopTabPage()
+               : isWeb
+diff --git a/flutter/lib/steaddesk/device_card.dart b/flutter/lib/steaddesk/device_card.dart
+index 3f96fd4..1822064 100644
+--- a/flutter/lib/steaddesk/device_card.dart
++++ b/flutter/lib/steaddesk/device_card.dart
+@@ -199,13 +199,13 @@ class _DeviceCardState extends State<_DeviceCard> {
+         SizedBox(
+             width: 94,
+             child: Text(translate(label),
+-                style: const TextStyle(color: Color(0xff4b5563)))),
++                style: TextStyle(color: context.supportMuted))),
+         Expanded(
+             child: tap == null
+                 ? SelectableText(value)
+                 : InkWell(
+                     onTap: tap,
+-                    child: Text(value, style: const TextStyle(color: _blue))))
++                    child: Text(value, style: TextStyle(color: context.supportAccent))))
+       ]));
+ 
+   Widget _additionalTab(String device) {
+@@ -234,14 +234,15 @@ class _DeviceCardState extends State<_DeviceCard> {
+             ? d.name
+             : d.id;
+     return Material(
+-        color: Colors.white,
++        color: context.shade(Colors.white, Night.overlay),
++        shape: context.night ? RoundedRectangleBorder(borderRadius: BorderRadius.circular(8), side: const BorderSide(color: Night.strong)) : null,
+         child: Column(children: [
+           ListTile(
+               leading: Icon(
+                   d.platform.toLowerCase() == 'android'
+                       ? Icons.tablet_android
+                       : Icons.devices,
+-                  color: _blue),
++                  color: context.supportAccent),
+               title: Row(children: [
+                 Flexible(
+                     child: d.alias.isEmpty && d.name.isEmpty
+@@ -298,7 +299,7 @@ class _DeviceCardState extends State<_DeviceCard> {
+                       TextButtonTheme(
+                           data: TextButtonThemeData(
+                               style: TextButton.styleFrom(
+-                                  foregroundColor: _blue,
++                                  foregroundColor: context.supportAccent,
+                                   minimumSize: const Size(0, 40),
+                                   padding: const EdgeInsets.symmetric(
+                                       horizontal: 6))),
+diff --git a/flutter/lib/steaddesk/device_id_widgets.dart b/flutter/lib/steaddesk/device_id_widgets.dart
+index 45efea9..55bcd0a 100644
+--- a/flutter/lib/steaddesk/device_id_widgets.dart
++++ b/flutter/lib/steaddesk/device_id_widgets.dart
+@@ -1,3 +1,4 @@
++import 'package:flutter_hbb/steaddesk/support_appearance.dart';
+ import 'dart:ui' show FontFeature;
+ 
+ import 'package:flutter/material.dart';
+@@ -137,14 +138,14 @@ class DirectoryDeviceIdentity extends StatelessWidget {
+     final title = [alias, name].map((v) => v.trim()).firstWhere(
+       (v) => v.isNotEmpty && !_asset.hasMatch(v), orElse: () => translate('Device'));
+     final link = TextStyle(decoration: TextDecoration.underline,
+-        decorationColor: hovered ? const Color(0xff0a6fa8) : const Color(0xff94a3b8));
++        decorationColor: hovered ? context.supportAccent : const Color(0xff94a3b8));
+     return Column(mainAxisAlignment: MainAxisAlignment.center,
+       crossAxisAlignment: CrossAxisAlignment.start, children: [
+         Text(title, maxLines: 1, overflow: TextOverflow.ellipsis,
+           style: link.copyWith(fontWeight: FontWeight.w600)),
+         DeviceIdText(id, translate: translate, maxLines: 1,
+           overflow: TextOverflow.ellipsis, style: link.copyWith(
+-            fontSize: 12, color: const Color(0xff4b5563), fontFamily: 'Cascadia Mono',
++            fontSize: 12, color: context.supportMuted, fontFamily: 'Cascadia Mono',
+             fontFamilyFallback: const ['Consolas', 'monospace'])),
+       ]);
+   }
+diff --git a/flutter/lib/steaddesk/dialogs.dart b/flutter/lib/steaddesk/dialogs.dart
+index 965e3b6..39ccf97 100644
+--- a/flutter/lib/steaddesk/dialogs.dart
++++ b/flutter/lib/steaddesk/dialogs.dart
+@@ -1,3 +1,4 @@
++import 'package:flutter_hbb/steaddesk/support_appearance.dart';
+ import 'package:flutter/material.dart';
+ import '../common.dart' show CustomAlertDialog, translate;
+ import '../consts.dart' show kCommConfKeyLang;
+@@ -76,16 +77,16 @@ String oidcFailureText(String message) {
+ }
+ 
+ Widget dangerAction(String key, {required VoidCallback? onPressed}) =>
+-    TextButton(
+-        style: SteadDeskTheme.dangerButton,
++    Builder(builder: (context)=> TextButton(
++        style: context.night ? TextButton.styleFrom(foregroundColor: Night.error) : SteadDeskTheme.dangerButton,
+         onPressed: onPressed,
+-        child: Text(translate(key)));
++        child: Text(translate(key))));
+ 
+ Widget dialogAction(String key,
+         {required VoidCallback? onPressed, bool primary = true}) =>
+-    TextButton(
++    Builder(builder: (context) => TextButton(
+       onPressed: onPressed,
+-      style: primary
++      style: context.night ? TextButton.styleFrom(foregroundColor: primary ? Night.accent : Night.text) : primary
+           ? SteadDeskTheme.button
+           : SteadDeskTheme.button.copyWith(
+               foregroundColor: MaterialStateProperty.resolveWith((states) =>
+@@ -93,7 +94,7 @@ Widget dialogAction(String key,
+                       ? SteadDeskTheme.offline
+                       : SteadDeskTheme.body)),
+       child: Text(translate(key)),
+-    );
++    ));
+ 
+ /// Keep upstream's focus, keyboard, scrolling and overlay dismissal behavior.
+ class SteadDialog extends CustomAlertDialog {
+@@ -129,7 +130,7 @@ class SteadDialog extends CustomAlertDialog {
+     return Theme(
+       data: theme.copyWith(
+           dialogTheme: theme.dialogTheme.copyWith(
+-              backgroundColor: SteadDeskTheme.page,
++              backgroundColor: context.shade(SteadDeskTheme.page,Night.overlay),
+               surfaceTintColor: Colors.transparent)),
+       child: super.build(context),
+     );
+@@ -144,7 +145,7 @@ class SteadIncomingActions extends StatelessWidget {
+ 
+   @override
+   Widget build(BuildContext context) => Material(
+-        color: SteadDeskTheme.page,
++        color: context.shade(SteadDeskTheme.page,Night.overlay),
+         child: Column(mainAxisSize: MainAxisSize.min, children: [
+           const Divider(color: SteadDeskTheme.divider, height: 1, thickness: 1),
+           if (elevate != null)
+diff --git a/flutter/lib/steaddesk/directory_row.dart b/flutter/lib/steaddesk/directory_row.dart
+index cd2a7c6..9408b1a 100644
+--- a/flutter/lib/steaddesk/directory_row.dart
++++ b/flutter/lib/steaddesk/directory_row.dart
+@@ -1,3 +1,4 @@
++import 'package:flutter_hbb/steaddesk/support_appearance.dart';
+ import 'package:flutter/material.dart';
+ import 'package:flutter/services.dart';
+ import 'device_id_widgets.dart';
+@@ -100,7 +101,7 @@ class _DirectoryRowState extends State<DirectoryRow> {
+     final tr = widget.translate;
+     final online = d.online == true;
+     final active = hovered || focused;
+-    const blue = Color(0xff0a6fa8);
++    final blue = context.supportAccent;
+     final label = FittedBox(
+         fit: BoxFit.scaleDown,
+         child: Text(tr(online ? 'Connect' : 'Details'), maxLines: 1));
+@@ -113,7 +114,7 @@ class _DirectoryRowState extends State<DirectoryRow> {
+                 shape: actionShape,
+                 padding: const EdgeInsets.symmetric(horizontal: 10),
+                 backgroundColor: blue,
+-                foregroundColor: Colors.white),
++                foregroundColor: context.shade(Colors.white,Night.window)),
+             child: label)
+         : OutlinedButton(
+             onPressed: widget.onDetails,
+@@ -137,7 +138,7 @@ class _DirectoryRowState extends State<DirectoryRow> {
+                 onTap: widget.onDetails,
+                 child: Container(
+                   height: 56,
+-                  color: active ? const Color(0xfff3f4f6) : Colors.transparent,
++                  color: active ? context.shade(context.supportHover, Night.selection) : Colors.transparent,
+                   child: DirectoryColumns(
+                       Row(children: [
+                         Expanded(
+@@ -179,8 +180,8 @@ class _DirectoryRowState extends State<DirectoryRow> {
+                                   : 'Offline'),
+                           style: TextStyle(
+                               color: online
+-                                  ? const Color(0xff16803d)
+-                                  : const Color(0xff4b5563))),
++                                  ? context.shade(const Color(0xff16803d), Night.online)
++                                  : context.supportMuted)),
+                       Text(d.model.isEmpty ? '—' : d.model)),
+                 ))));
+   }
+diff --git a/flutter/test/steaddesk/directory_row_test.dart b/flutter/test/steaddesk/directory_row_test.dart
+index cc83000..4fcb132 100644
+--- a/flutter/test/steaddesk/directory_row_test.dart
++++ b/flutter/test/steaddesk/directory_row_test.dart
+@@ -6,142 +6,151 @@ import 'package:flutter/rendering.dart';
+ import 'package:flutter/services.dart';
+ import 'package:flutter_test/flutter_test.dart';
+ import 'package:flutter_hbb/steaddesk/directory_row.dart';
++import 'package:flutter_hbb/steaddesk/support_appearance.dart';
+ import 'package:flutter_hbb/steaddesk/support_device.dart';
+ 
+ void main() {
+-  testWidgets('directory mouse, keyboard, presence and responsive layout',
+-      (t) async {
+-    final capture = GlobalKey();
+-    String action = '';
+-    final font = Platform.isWindows
+-        ? File(r'C:\Windows\Fonts\segoeui.ttf')
+-        : File('/System/Library/Fonts/Supplemental/Arial.ttf');
+-    if (font.existsSync()) {
+-      final loader = FontLoader('DirectoryTestFont')
+-        ..addFont(Future.value(ByteData.sublistView(font.readAsBytesSync())));
+-      await loader.load();
+-    }
+-    final mono = File(Platform.isWindows
+-        ? r'C:\Windows\Fonts\consola.ttf'
+-        : '/System/Library/Fonts/Supplemental/Courier New.ttf');
+-    if (mono.existsSync()) {
+-      await (FontLoader('Cascadia Mono')
+-            ..addFont(
+-                Future.value(ByteData.sublistView(mono.readAsBytesSync()))))
++  for (final night in [false, true]) {
++    testWidgets('directory interaction and corners (night: $night)', (t) async {
++      final capture = GlobalKey();
++      String action = '';
++      final font = Platform.isWindows
++          ? File(r'C:\Windows\Fonts\segoeui.ttf')
++          : File('/System/Library/Fonts/Supplemental/Arial.ttf');
++      if (font.existsSync()) {
++        final loader = FontLoader('DirectoryTestFont')
++          ..addFont(Future.value(ByteData.sublistView(font.readAsBytesSync())));
++        await loader.load();
++      }
++      final mono = File(Platform.isWindows
++          ? r'C:\Windows\Fonts\consola.ttf'
++          : '/System/Library/Fonts/Supplemental/Courier New.ttf');
++      if (mono.existsSync()) {
++        await (FontLoader('Cascadia Mono')
++              ..addFont(
++                  Future.value(ByteData.sublistView(mono.readAsBytesSync()))))
++            .load();
++      }
++      await (FontLoader('MaterialIcons')
++            ..addFont(rootBundle.load('fonts/MaterialIcons-Regular.otf')))
+           .load();
+-    }
+-    await (FontLoader('MaterialIcons')
+-          ..addFont(rootBundle.load('fonts/MaterialIcons-Regular.otf')))
+-        .load();
+-    t.view.devicePixelRatio = 1;
+-    t.view.physicalSize = const Size(1280, 400);
+-    addTearDown(t.view.resetPhysicalSize);
+-    addTearDown(t.view.resetDevicePixelRatio);
+-    final devices = [
+-      for (final online in [true, false])
+-        SupportDevice(
+-            id: online ? '987654321' : '987654322',
+-            alias: online ? 'Front counter' : 'Office',
+-            hostnames: ['M0001-S01-SUNMI1', 'SUNMI-Demo'],
+-            platform: 'Android',
+-            groupName: '',
+-            online: online),
+-    ];
+-    await t.pumpWidget(MaterialApp(
+-        theme: ThemeData(fontFamily: 'DirectoryTestFont'),
+-        home: Scaffold(
+-            body: Center(
+-                child: RepaintBoundary(
+-                    key: capture,
+-                    child: Material(
+-                        child: SizedBox(
+-                            height: 160,
+-                            child: Column(children: [
+-                              const SizedBox(
+-                                  height: 36,
+-                                  child: DirectoryColumns(Text('Device'),
+-                                      Text('Status'), Text('Model'))),
+-                              for (final d in devices)
+-                                DirectoryRow(
+-                                    device: d,
+-                                    translate: (s) => s,
+-                                    onDetails: () => action = 'details ${d.id}',
+-                                    onConnect: () => action = 'connect ${d.id}',
+-                                    onTransfer: () =>
+-                                        action = 'transfer ${d.id}',
+-                                    more: IconButton(
+-                                        onPressed: () => action = 'menu',
+-                                        icon: const Icon(Icons.more_horiz))),
+-                            ]))))))));
+-    void expectActionCorners(Finder button) {
+-      final action = t.widget<ButtonStyleButton>(button);
+-      final shape = action.style?.shape?.resolve({});
+-      expect(shape, isA<RoundedRectangleBorder>());
+-      expect((shape as RoundedRectangleBorder).borderRadius,
+-          BorderRadius.circular(6));
+-    }
++      t.view.devicePixelRatio = 1;
++      t.view.physicalSize = const Size(1280, 400);
++      addTearDown(t.view.resetPhysicalSize);
++      addTearDown(t.view.resetDevicePixelRatio);
++      final devices = [
++        for (final online in [true, false])
++          SupportDevice(
++              id: online ? '987654321' : '987654322',
++              alias: online ? 'Front counter' : 'Office',
++              hostnames: ['M0001-S01-SUNMI1', 'SUNMI-Demo'],
++              platform: 'Android',
++              groupName: '',
++              online: online),
++      ];
++      await t.pumpWidget(MaterialApp(
++          theme: ThemeData(fontFamily: 'DirectoryTestFont'),
++          darkTheme: supportNightTheme(ThemeData(
++              brightness: Brightness.dark, fontFamily: 'DirectoryTestFont')),
++          themeMode: night ? ThemeMode.dark : ThemeMode.light,
++          home: Scaffold(
++              body: Center(
++                  child: RepaintBoundary(
++                      key: capture,
++                      child: Material(
++                          child: SizedBox(
++                              height: 160,
++                              child: Column(children: [
++                                const SizedBox(
++                                    height: 36,
++                                    child: DirectoryColumns(Text('Device'),
++                                        Text('Status'), Text('Model'))),
++                                for (final d in devices)
++                                  DirectoryRow(
++                                      device: d,
++                                      translate: (s) => s,
++                                      onDetails: () =>
++                                          action = 'details ${d.id}',
++                                      onConnect: () =>
++                                          action = 'connect ${d.id}',
++                                      onTransfer: () =>
++                                          action = 'transfer ${d.id}',
++                                      more: IconButton(
++                                          onPressed: () => action = 'menu',
++                                          icon: const Icon(Icons.more_horiz))),
++                              ]))))))));
++      void expectActionCorners(Finder button) {
++        final action = t.widget<ButtonStyleButton>(button);
++        final shape = action.style?.shape?.resolve({});
++        expect(shape, isA<RoundedRectangleBorder>());
++        expect((shape as RoundedRectangleBorder).borderRadius,
++            BorderRadius.circular(6));
++      }
+ 
+-    Future<void> shot(String name) async {
+-      final dir = Platform.environment['STEADDESK_DIRECTORY_SHOTS'];
+-      if (dir == null) return;
+-      await t.runAsync(() async {
+-        final obj =
+-            capture.currentContext!.findRenderObject() as RenderRepaintBoundary;
+-        final image = await obj.toImage();
+-        final bytes = await image.toByteData(format: ui.ImageByteFormat.png);
+-        Directory(dir).createSync(recursive: true);
+-        File('$dir/$name.png').writeAsBytesSync(bytes!.buffer.asUint8List());
+-        image.dispose();
+-      });
+-    }
++      Future<void> shot(String name) async {
++        final dir = Platform.environment['STEADDESK_DIRECTORY_SHOTS'];
++        if (dir == null) return;
++        await t.runAsync(() async {
++          final obj = capture.currentContext!.findRenderObject()
++              as RenderRepaintBoundary;
++          final image = await obj.toImage();
++          final bytes = await image.toByteData(format: ui.ImageByteFormat.png);
++          Directory(dir).createSync(recursive: true);
++          File('$dir/${night ? 'night-' : ''}$name.png')
++              .writeAsBytesSync(bytes!.buffer.asUint8List());
++          image.dispose();
++        });
++      }
+ 
+-    expect(find.text('M0001-S01-SUNMI1'), findsNothing);
+-    expect(find.text('Connect').hitTestable(), findsNothing);
+-    await shot('default');
+-    final mouse = await t.createGesture(kind: PointerDeviceKind.mouse);
+-    await mouse.addPointer(location: Offset.zero);
+-    final front = find.text('Front counter'), office = find.text('Office');
+-    final before = t.getTopLeft(front);
+-    await mouse.moveTo(t.getCenter(front));
+-    await t.pumpAndSettle();
+-    expect(t.getTopLeft(front), before);
+-    expect(find.text('Connect'), findsOneWidget);
+-    expectActionCorners(find.widgetWithText(FilledButton, 'Connect'));
+-    await shot('hover-online');
+-    await t.tap(find.byTooltip('Transfer file').hitTestable());
+-    await t.pump(const Duration(milliseconds: 350));
+-    expect(action, 'transfer 987654321');
+-    await mouse.moveTo(t.getCenter(office));
+-    await t.pumpAndSettle();
+-    expect(find.text('Details'), findsOneWidget);
+-    expectActionCorners(find.widgetWithText(OutlinedButton, 'Details'));
+-    await shot('hover-offline');
+-    await t.tap(find.text('Details'));
+-    await t.pump(const Duration(milliseconds: 350));
+-    expect(action, 'details 987654322');
+-    await mouse.moveTo(Offset.zero);
+-    await t.pumpAndSettle();
+-    final firstRow = find.byType(DirectoryRow).first;
+-    final focus = t.widget<Focus>(find.descendant(of: firstRow, matching: find.byType(Focus)).first);
+-    focus.focusNode!.requestFocus();
+-    await t.pumpAndSettle();
+-    await t.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+-    await t.pumpAndSettle();
+-    await t.sendKeyEvent(LogicalKeyboardKey.space);
+-    expect(action, 'details 987654322');
+-    action = '';
+-    await t.sendKeyEvent(LogicalKeyboardKey.enter);
+-    expect(action, '');
+-    await t.sendKeyEvent(LogicalKeyboardKey.arrowUp);
+-    await t.pumpAndSettle();
+-    await t.sendKeyEvent(LogicalKeyboardKey.enter);
+-    expect(action, 'connect 987654321');
+-    await shot('keyboard-selected');
+-    t.view.physicalSize = const Size(540, 400);
+-    await t.pumpAndSettle();
+-    expect(find.text('Model'), findsNothing);
+-    expect(t.takeException(), isNull);
+-    await shot('narrow');
+-    await mouse.removePointer();
+-  });
++      expect(find.text('M0001-S01-SUNMI1'), findsNothing);
++      expect(find.text('Connect').hitTestable(), findsNothing);
++      await shot('default');
++      final mouse = await t.createGesture(kind: PointerDeviceKind.mouse);
++      await mouse.addPointer(location: Offset.zero);
++      final front = find.text('Front counter'), office = find.text('Office');
++      final before = t.getTopLeft(front);
++      await mouse.moveTo(t.getCenter(front));
++      await t.pumpAndSettle();
++      expect(t.getTopLeft(front), before);
++      expect(find.text('Connect'), findsOneWidget);
++      expectActionCorners(find.widgetWithText(FilledButton, 'Connect'));
++      await shot('hover-online');
++      await t.tap(find.byTooltip('Transfer file').hitTestable());
++      await t.pump(const Duration(milliseconds: 350));
++      expect(action, 'transfer 987654321');
++      await mouse.moveTo(t.getCenter(office));
++      await t.pumpAndSettle();
++      expect(find.text('Details'), findsOneWidget);
++      expectActionCorners(find.widgetWithText(OutlinedButton, 'Details'));
++      await shot('hover-offline');
++      await t.tap(find.text('Details'));
++      await t.pump(const Duration(milliseconds: 350));
++      expect(action, 'details 987654322');
++      await mouse.moveTo(Offset.zero);
++      await t.pumpAndSettle();
++      final firstRow = find.byType(DirectoryRow).first;
++      final focus = t.widget<Focus>(
++          find.descendant(of: firstRow, matching: find.byType(Focus)).first);
++      focus.focusNode!.requestFocus();
++      await t.pumpAndSettle();
++      await t.sendKeyEvent(LogicalKeyboardKey.arrowDown);
++      await t.pumpAndSettle();
++      await t.sendKeyEvent(LogicalKeyboardKey.space);
++      expect(action, 'details 987654322');
++      action = '';
++      await t.sendKeyEvent(LogicalKeyboardKey.enter);
++      expect(action, '');
++      await t.sendKeyEvent(LogicalKeyboardKey.arrowUp);
++      await t.pumpAndSettle();
++      await t.sendKeyEvent(LogicalKeyboardKey.enter);
++      expect(action, 'connect 987654321');
++      await shot('keyboard-selected');
++      t.view.physicalSize = const Size(540, 400);
++      await t.pumpAndSettle();
++      expect(find.text('Model'), findsNothing);
++      expect(t.takeException(), isNull);
++      await shot('narrow');
++      await mouse.removePointer();
++    });
++  }
+ }
+diff --git a/flutter/lib/steaddesk/file_transfer.dart b/flutter/lib/steaddesk/file_transfer.dart
+index 73d176b..72edf9f 100644
+--- a/flutter/lib/steaddesk/file_transfer.dart
++++ b/flutter/lib/steaddesk/file_transfer.dart
+@@ -1,13 +1,5 @@
+ part of '../desktop/pages/file_manager_page.dart';
+ 
+-// TODO(U-01): reference the shared SteadDesk theme after its PR lands.
+-const _ftBlue = Color(0xFF0A6FA8);
+-const _ftSelection = Color(0xFFDFF2FA);
+-const _ftInk = Color(0xFF17324A);
+-const _ftMuted = Color(0xFF4B5563);
+-const _ftLine = Color(0xFFE5E7EB);
+-const _ftRowLine = Color(0xFFEEF0F2);
+-const _ftHover = Color(0xFFF3F4F6);
+ const _ftRowHeight = 27.0;
+ 
+ // Prefer the upstream translation. These page-only labels are absent from its
+@@ -27,7 +19,7 @@ double _fraction(String key, double fallback) {
+       : fallback;
+ }
+ 
+-Widget _splitter(Axis axis, ValueChanged<double> move, VoidCallback save) {
++Widget _splitter(BuildContext context, Axis axis, ValueChanged<double> move, VoidCallback save) {
+   final vertical = axis == Axis.vertical;
+   return MouseRegion(
+     cursor: vertical
+@@ -46,7 +38,7 @@ Widget _splitter(Axis axis, ValueChanged<double> move, VoidCallback save) {
+             child: Container(
+                 width: vertical ? 1 : null,
+                 height: vertical ? null : 1,
+-                color: _ftLine)),
++                color: context.supportLine)),
+       ),
+     ),
+   );
+@@ -92,7 +84,7 @@ class _TransferWorkspaceState extends State<_TransferWorkspace> {
+ 
+   @override
+   Widget build(BuildContext context) => Material(
+-        color: Colors.white,
++        color: context.shade(Colors.white,Night.panel),
+         child: LayoutBuilder(builder: (context, box) {
+           final width = max(1.0, box.maxWidth - 7);
+           final minShare = min(.5, 250 / width);
+@@ -112,7 +104,7 @@ class _TransferWorkspaceState extends State<_TransferWorkspace> {
+                     crossAxisAlignment: CrossAxisAlignment.stretch,
+                     children: [
+                   SizedBox(width: width * share, child: widget.local),
+-                  _splitter(
++                  _splitter(context,
+                       Axis.vertical,
+                       (dx) => setState(() {
+                             split = (share + dx / width)
+@@ -123,7 +115,7 @@ class _TransferWorkspaceState extends State<_TransferWorkspace> {
+                           key: splitKey, value: split.toString())),
+                   Expanded(child: widget.remote),
+                 ])),
+-            _splitter(
++            _splitter(context,
+                 Axis.horizontal,
+                 (dy) => setState(() {
+                       if (maxQueue < 1 || box.maxHeight < 1) return;
+@@ -154,7 +146,7 @@ class _TransferWorkspaceState extends State<_TransferWorkspace> {
+                             size: 17),
+                         label: Text(
+                             '${_ftLabel("Transfer queue", "传输队列")}  ${jobs.jobTable.length}'),
+-                        style: TextButton.styleFrom(foregroundColor: _ftBlue),
++                        style: TextButton.styleFrom(foregroundColor: context.supportAccent),
+                       )),
+                   const Spacer(),
+                   Obx(() => TextButton(
+@@ -187,7 +179,7 @@ class _TransferWorkspaceState extends State<_TransferWorkspace> {
+                                         ? Icons.arrow_back
+                                         : Icons.arrow_forward,
+                                 size: 16,
+-                                color: _ftBlue),
++                                color: context.supportAccent),
+                             const SizedBox(width: 8),
+                             Expanded(
+                                 child: Tooltip(
+@@ -222,12 +214,12 @@ class _TransferWorkspaceState extends State<_TransferWorkspace> {
+                                                 .clamp(0.0, 1.0)
+                                                 .toDouble(),
+                                             color: const Color(0xFF1FA7E0),
+-                                            backgroundColor: _ftSelection),
++                                            backgroundColor: context.supportSelection),
+                                       ])),
+                             if (j.state == JobState.paused)
+-                              _tool(Icons.play_arrow, translate('Resume'),
++                              _tool(context, Icons.play_arrow, translate('Resume'),
+                                   () => jobs.resumeJob(j.id)),
+-                            _tool(Icons.close, translate('Delete'), () {
++                            _tool(context, Icons.close, translate('Delete'), () {
+                               jobs.jobTable.remove(j);
+                               jobs.cancelJob(j.id);
+                             }),
+@@ -239,11 +231,11 @@ class _TransferWorkspaceState extends State<_TransferWorkspace> {
+       );
+ }
+ 
+-Widget _tool(IconData icon, String label, VoidCallback? action) => IconButton(
++Widget _tool(BuildContext context, IconData icon, String label, VoidCallback? action) => IconButton(
+       tooltip: label,
+       onPressed: action,
+       iconSize: 17,
+-      color: _ftBlue,
++      color: context.supportAccent,
+       constraints: const BoxConstraints.tightFor(width: 29, height: 28),
+       padding: EdgeInsets.zero,
+       icon: Icon(icon),
+@@ -550,7 +542,7 @@ class _TransferPaneState extends State<_TransferPane> {
+                   onPressed: action,
+                   style: TextButton.styleFrom(
+                       alignment: Alignment.centerLeft,
+-                      foregroundColor: _ftBlue,
++                      foregroundColor: context.supportAccent,
+                       padding: const EdgeInsets.symmetric(horizontal: 5)),
+                   child: Row(children: [
+                     Icon(icon, size: 15),
+@@ -640,9 +632,9 @@ class _TransferPaneState extends State<_TransferPane> {
+     return Obx(() {
+       final selected = c.selectedItems.items.contains(e);
+       final row = Material(
+-        color: selected ? _ftSelection : Colors.white,
++        color: selected ? context.supportSelection : context.shade(Colors.white,Night.panel),
+         child: InkWell(
+-          hoverColor: _ftHover,
++          hoverColor: context.supportHover,
+           onTap: () {
+             listFocus.requestFocus();
+             widget.select(rows, e);
+@@ -650,8 +642,8 @@ class _TransferPaneState extends State<_TransferPane> {
+           onDoubleTap: e.isFile ? null : () => _open(e.path),
+           onSecondaryTapDown: (event) => _contextMenu(e, event.globalPosition),
+           child: Container(
+-              decoration: const BoxDecoration(
+-                  border: Border(bottom: BorderSide(color: _ftRowLine))),
++              decoration: BoxDecoration(
++                  border: Border(bottom: BorderSide(color: context.supportHairline))),
+               child: Row(
+                 children: [
+                   for (int i = 0; i < cells.length; i++)
+@@ -668,7 +660,7 @@ class _TransferPaneState extends State<_TransferPane> {
+                                           ? Icons.insert_drive_file_outlined
+                                           : Icons.folder_outlined,
+                                   size: 15,
+-                                  color: _ftBlue),
++                                  color: context.supportAccent),
+                               const SizedBox(width: 4)
+                             ],
+                             Expanded(
+@@ -677,8 +669,8 @@ class _TransferPaneState extends State<_TransferPane> {
+                                     child: Text(cells[i],
+                                         maxLines: 1,
+                                         overflow: TextOverflow.ellipsis,
+-                                        style: const TextStyle(
+-                                            fontSize: 13, color: _ftInk)))),
++                                        style: TextStyle(
++                                            fontSize: 13, color: context.shade(const Color(0xff17324a), Night.text))))),
+                           ]),
+                         )),
+                 ],
+@@ -745,19 +737,19 @@ class _TransferPaneState extends State<_TransferPane> {
+                                                       maxLines: 1,
+                                                       overflow:
+                                                           TextOverflow.ellipsis,
+-                                                      style: const TextStyle(
++                                                      style: TextStyle(
+                                                           fontSize: 13,
+-                                                          color: _ftMuted))),
++                                                          color: context.supportMuted))),
+                                               if (sort == columns[i])
+                                                 Icon(
+                                                     ascending
+                                                         ? Icons.arrow_drop_up
+                                                         : Icons.arrow_drop_down,
+                                                     size: 13,
+-                                                    color: _ftBlue),
++                                                    color: context.supportAccent),
+                                             ]))),
+                                     if (i < 3)
+-                                      _splitter(
++                                      _splitter(context,
+                                           Axis.vertical,
+                                           (dx) => setState(() {
+                                                 final delta = (dx / extra)
+@@ -772,7 +764,7 @@ class _TransferPaneState extends State<_TransferPane> {
+                                               value: shares.join(','))),
+                                   ])),
+                           ])),
+-                      const Divider(height: 1, color: _ftLine),
++                      Divider(height: 1, color: context.supportLine),
+                       Expanded(
+                           child: ListView.builder(
+                               controller: scroll,
+@@ -799,7 +791,7 @@ class _TransferPaneState extends State<_TransferPane> {
+         enable: !c.isLocal,
+         onDragDone: _dropExternal,
+         child: Container(
+-            color: dragging.isEmpty ? Colors.white : _ftSelection,
++            color: dragging.isEmpty ? context.shade(Colors.white,Night.panel) : context.supportSelection,
+             padding: const EdgeInsets.symmetric(horizontal: 6),
+             child: Column(children: [
+               SizedBox(
+@@ -812,8 +804,8 @@ class _TransferPaneState extends State<_TransferPane> {
+                                 : 'Remote Computer'),
+                             maxLines: 1,
+                             overflow: TextOverflow.ellipsis,
+-                            style: const TextStyle(
+-                                fontWeight: FontWeight.w600, color: _ftInk))),
++                            style: TextStyle(
++                                fontWeight: FontWeight.w600, color: context.shade(const Color(0xff17324a), Night.text)))),
+                     Obx(() => TextButton.icon(
+                           onPressed:
+                               SelectedItems.valid(c.selectedItems.items) &&
+@@ -824,7 +816,7 @@ class _TransferPaneState extends State<_TransferPane> {
+                                           .isNotEmpty
+                                   ? _transferSelection
+                                   : null,
+-                          style: TextButton.styleFrom(foregroundColor: _ftBlue),
++                          style: TextButton.styleFrom(foregroundColor: context.supportAccent),
+                           icon: Icon(
+                               c.isLocal
+                                   ? Icons.arrow_forward
+@@ -834,8 +826,8 @@ class _TransferPaneState extends State<_TransferPane> {
+                         )),
+                   ])),
+               Row(children: [
+-                _tool(Icons.arrow_back, translate('Back'), c.goBack),
+-                _tool(Icons.arrow_upward, translate('Parent directory'),
++                _tool(context, Icons.arrow_back, translate('Back'), c.goBack),
++                _tool(context, Icons.arrow_upward, translate('Parent directory'),
+                     c.goToParentDirectory),
+                 Expanded(
+                     child: TextField(
+@@ -853,13 +845,13 @@ class _TransferPaneState extends State<_TransferPane> {
+                             contentPadding: EdgeInsets.symmetric(
+                                 horizontal: 5, vertical: 6),
+                             border: OutlineInputBorder()))),
+-                _tool(Icons.refresh, translate('Refresh File'), () {
++                _tool(context, Icons.refresh, translate('Refresh File'), () {
+                   c.refresh();
+                   if (showComputer && expanded) _loadVolumes();
+                 }),
+-                _tool(Icons.create_new_folder_outlined,
++                _tool(context, Icons.create_new_folder_outlined,
+                     translate('Create Folder'), widget.createFolder),
+-                _tool(
++                _tool(context,
+                     Icons.search,
+                     translate('Search'),
+                     () => setState(() {
+@@ -880,7 +872,7 @@ class _TransferPaneState extends State<_TransferPane> {
+                           SizedBox(
+                               width: showComputer && expanded ? 138 : 78,
+                               child: _places()),
+-                          const VerticalDivider(width: 1, color: _ftLine),
++                          VerticalDivider(width: 1, color: context.supportLine),
+                         ],
+                         Expanded(child: _table()),
+                       ]))),
+diff --git a/flutter/lib/steaddesk/ops_group_controls.dart b/flutter/lib/steaddesk/ops_group_controls.dart
+index a0972c4..0717637 100644
+--- a/flutter/lib/steaddesk/ops_group_controls.dart
++++ b/flutter/lib/steaddesk/ops_group_controls.dart
+@@ -265,7 +265,7 @@ extension _OpsControls on _DirectoryState {
+                                 if (error.isNotEmpty)
+                                   Text(error,
+                                       style:
+-                                          const TextStyle(color: Colors.red)),
++                                          TextStyle(color: context.shade(Colors.red, Night.error))),
+                                 if (latest.isNotEmpty) SelectableText(latest),
+                               ]))),
+                       actions: [
+diff --git a/flutter/lib/steaddesk/session_surface.dart b/flutter/lib/steaddesk/session_surface.dart
+index 42ea102..7144350 100644
+--- a/flutter/lib/steaddesk/session_surface.dart
++++ b/flutter/lib/steaddesk/session_surface.dart
+@@ -1,8 +1,6 @@
+ part of '../desktop/widgets/remote_toolbar.dart';
+ 
+ // TODO(U-01): Replace the inline session colors with the shared theme tokens.
+-const _ocean = Color(0xff0a6fa8);
+-const _ink = Color(0xff0b2e42);
+ const _surface = Color(0xffeaf4f9);
+ const _danger = Color(0xffdc2626);
+ const _numbers = TextStyle(fontFeatures: [ui.FontFeature.tabularFigures()]);
+@@ -80,7 +78,7 @@ class _SessionSurfaceState extends State<SessionSurface> {
+     Widget layout(Widget? history, Widget? drawer, Widget? toolbar, Widget? actions) => Obx(() {
+       final grabbed = ffi.inputModel.relativeMouseMode.value;
+       return ColoredBox(
+-          color: _surface,
++          color: context.shade(_surface, Night.window),
+           child: Column(children: [
+             IgnorePointer(
+                 ignoring: grabbed,
+@@ -91,7 +89,7 @@ class _SessionSurfaceState extends State<SessionSurface> {
+                                 (states) =>
+                                     states.contains(MaterialState.disabled)
+                                         ? const Color(0xff9ca3af)
+-                                        : _ocean),
++                                        : context.supportAccent),
+                             overlayColor: const MaterialStatePropertyAll(
+                                 Color(0xfff3f4f6)),
+                             shape: MaterialStatePropertyAll(
+@@ -264,9 +262,9 @@ class _SessionHeader extends StatelessWidget {
+     return Container(
+         height: 52,
+         padding: const EdgeInsets.symmetric(horizontal: 8),
+-        decoration: const BoxDecoration(
+-            color: Colors.white,
+-            border: Border(bottom: BorderSide(color: Color(0xffe5e7eb)))),
++        decoration: BoxDecoration(
++            color: context.shade(Colors.white,Night.panel),
++            border: Border(bottom: BorderSide(color: context.supportLine))),
+         child: LayoutBuilder(builder: (context, bounds) {
+           return Row(children: [
+             SizedBox(
+@@ -549,6 +547,7 @@ class _AndroidKeys extends StatelessWidget {
+   Widget build(BuildContext context) {
+     final model = Provider.of<FfiModel>(context);
+     final input = ffi.inputModel;
++    final _ocean = context.supportAccent;
+     final enabled = model.keyboard &&
+         !model.viewOnly &&
+         versionCmp(model.pi.version, '1.2.7') >= 0;
+@@ -562,7 +561,7 @@ class _AndroidKeys extends StatelessWidget {
+             icon: FittedBox(child: Icon(icon)),
+             onPressed: enabled ? press : null));
+     return Material(
+-        color: Colors.white,
++        color: context.shade(Colors.white,Night.panel),
+         child: Row(children: [
+           key('Back', Icons.arrow_back, input.onMobileBack),
+           key('Home', Icons.home_outlined, input.onMobileHome),
+@@ -633,7 +632,7 @@ class _DevicePanel extends StatelessWidget {
+     final pi = model.pi;
+     final expand = IconButton(
+         icon: const Icon(Icons.chevron_right),
+-        color: _ocean,
++        color: context.supportAccent,
+         tooltip: translate('Expand panel'),
+         onPressed: () => change(_PanelMode.expanded));
+     if (mode == _PanelMode.hidden)
+@@ -644,10 +643,10 @@ class _DevicePanel extends StatelessWidget {
+                   padding: EdgeInsets.zero,
+                   constraints: const BoxConstraints(),
+                   icon: const Icon(Icons.chevron_right, size: 18),
+-                  color: _ocean,
++                  color: context.supportAccent,
+                   tooltip: translate('Expand panel'),
+                   onPressed: () => change(_PanelMode.expanded))));
+-    final reduced = MediaQuery.disableAnimationsOf(context) ||
++    final reduced = context.night || MediaQuery.disableAnimationsOf(context) ||
+         bind.mainGetOptionSync(key: kOptionAllowAlwaysSoftwareRender) == 'Y';
+     final border = BorderRadius.circular(20);
+     Widget glow(Alignment at, Color color) => DecoratedBox(
+@@ -660,8 +659,8 @@ class _DevicePanel extends StatelessWidget {
+         padding: const EdgeInsets.fromLTRB(12, 5, 12, 5),
+         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+           Text(translate(label),
+-              style: const TextStyle(fontSize: 11, color: Color(0xff4b5563))),
+-          SelectableText(value, style: _numbers.copyWith(color: _ink)),
++              style: TextStyle(fontSize: 11, color: context.supportMuted)),
++          SelectableText(value, style: _numbers.copyWith(color: context.supportInk)),
+         ]));
+     final compact = mode == _PanelMode.compact;
+     final width = compact
+@@ -691,7 +690,7 @@ class _DevicePanel extends StatelessWidget {
+                             child: Stack(fit: StackFit.expand, children: [
+                           glow(Alignment.topLeft, const Color(0xff1fa7e0)),
+                           glow(Alignment.centerRight, const Color(0xff34c3a6)),
+-                          glow(Alignment.bottomLeft, _ocean),
++                          glow(Alignment.bottomLeft, context.supportAccent),
+                         ])),
+                       if (!reduced)
+                         Positioned.fill(
+@@ -704,7 +703,7 @@ class _DevicePanel extends StatelessWidget {
+                               borderRadius: border,
+                               border:
+                                   Border.all(color: const Color(0xc7ffffff)),
+-                              color: reduced ? const Color(0xffe8f4fa) : null,
++                              color: reduced ? context.shade(const Color(0xffe8f4fa),Night.panel) : null,
+                               gradient: reduced
+                                   ? null
+                                   : const LinearGradient(
+@@ -728,8 +727,8 @@ class _DevicePanel extends StatelessWidget {
+                                             child: Text(
+                                                 translate('Device status'),
+                                                 overflow: TextOverflow.ellipsis,
+-                                                style: const TextStyle(
+-                                                    color: _ink,
++                                                style: TextStyle(
++                                                    color: context.supportInk,
+                                                     fontWeight:
+                                                         FontWeight.w600))),
+                                         IconButton(
+diff --git a/flutter/lib/steaddesk/support_appearance.dart b/flutter/lib/steaddesk/support_appearance.dart
+new file mode 100644
+index 0000000..d696852
+--- /dev/null
++++ b/flutter/lib/steaddesk/support_appearance.dart
+@@ -0,0 +1,101 @@
++import 'package:flutter/material.dart';
++
++const appearanceOption = 'support-appearance';
++ThemeMode supportMode(String value) => ThemeMode.values
++    .firstWhere((mode) => mode.name == value, orElse: () => ThemeMode.system);
++
++class Night {
++  static const window = Color(0xff08090a),
++      panel = Color(0xff0f1011),
++      overlay = Color(0xff191a1b),
++      weak = Color(0x0dffffff),
++      line = Color(0x14ffffff),
++      strong = Color(0x1fffffff),
++      selection = Color(0x291fa7e0),
++      accent = Color(0xff1fa7e0),
++      text = Color(0xfff3f4f6),
++      muted = Color(0xff9ca3af),
++      online = Color(0xff4ade80),
++      warning = Color(0xfff59e0b),
++      error = Color(0xfff87171),
++      danger = Color(0xffdc2626);
++}
++
++extension SupportAppearance on BuildContext {
++  bool get night => Theme.of(this).brightness == Brightness.dark;
++  Color shade(Color day, Color dark) => night ? dark : day;
++  Color get supportAccent => shade(const Color(0xff0a6fa8), Night.accent);
++  Color get supportInk => shade(const Color(0xff0b2e42), Night.text);
++  Color get supportMuted => shade(const Color(0xff4b5563), Night.muted);
++  Color get supportLine => shade(const Color(0xffe5e7eb), Night.line);
++  Color get supportHairline => shade(const Color(0xffeef0f2), Night.weak);
++  Color get supportHover => shade(const Color(0xfff3f4f6), Night.overlay);
++  Color get supportSelection => shade(const Color(0xffdff2fa), Night.selection);
++}
++
++ThemeData supportNightTheme(ThemeData upstream) {
++  const rounded = RoundedRectangleBorder(
++      borderRadius: BorderRadius.all(Radius.circular(6)));
++  final colors = upstream.colorScheme.copyWith(
++      primary: Night.accent,
++      onPrimary: Night.window,
++      secondary: Night.accent,
++      surface: Night.panel,
++      onSurface: Night.text,
++      error: Night.error,
++      outline: Night.strong);
++  return upstream.copyWith(
++    colorScheme: colors,
++    scaffoldBackgroundColor: Night.window,
++    canvasColor: Night.panel,
++    cardColor: Night.overlay,
++    dividerColor: Night.line,
++    hoverColor: Night.overlay,
++    shadowColor: Colors.transparent,
++    dialogBackgroundColor: Night.overlay,
++    dialogTheme: upstream.dialogTheme.copyWith(
++        backgroundColor: Night.overlay,
++        elevation: 0,
++        surfaceTintColor: Colors.transparent,
++        shape: const RoundedRectangleBorder(
++            borderRadius: BorderRadius.all(Radius.circular(8)),
++            side: BorderSide(color: Night.strong))),
++    inputDecorationTheme:
++        upstream.inputDecorationTheme.copyWith(fillColor: Night.panel),
++    textButtonTheme: TextButtonThemeData(
++        style: TextButton.styleFrom(
++            foregroundColor: Night.accent, shape: rounded)),
++    popupMenuTheme:
++        upstream.popupMenuTheme.copyWith(color: Night.overlay, elevation: 0),
++    menuTheme: const MenuThemeData(
++        style: MenuStyle(
++            elevation: WidgetStatePropertyAll(0.0),
++            backgroundColor: WidgetStatePropertyAll(Night.overlay),
++            side: WidgetStatePropertyAll(BorderSide(color: Night.strong)))),
++    filledButtonTheme: FilledButtonThemeData(
++        style: FilledButton.styleFrom(
++            foregroundColor: Night.window,
++            backgroundColor: Night.accent,
++            shape: rounded)),
++  );
++}
++
++ThemeData supportHomeFonts(ThemeData base) {
++  const family = 'Inter';
++  const fallback = ['Microsoft YaHei UI', 'Segoe UI'];
++  TextStyle style(double size, double height, int weight) => TextStyle(
++      fontFamily: family,
++      fontFamilyFallback: fallback,
++      fontSize: size,
++      height: height / size,
++      fontVariations: [FontVariation('wght', weight.toDouble())]);
++  final text =
++      base.textTheme.apply(fontFamily: family, fontFamilyFallback: fallback);
++  return base.copyWith(
++      textTheme: text.copyWith(
++          labelSmall: text.labelSmall?.merge(style(11, 16, 400)),
++          bodySmall: text.bodySmall?.merge(style(12, 16, 400)),
++          bodyMedium: text.bodyMedium?.merge(style(13, 20, 400)),
++          titleMedium: text.titleMedium?.merge(style(16, 24, 510)),
++          titleLarge: text.titleLarge?.merge(style(20, 28, 590))));
++}
+diff --git a/flutter/lib/steaddesk/support_device_menu.dart b/flutter/lib/steaddesk/support_device_menu.dart
+index d1a6f71..0d70c58 100644
+--- a/flutter/lib/steaddesk/support_device_menu.dart
++++ b/flutter/lib/steaddesk/support_device_menu.dart
+@@ -139,10 +139,11 @@ class _DeviceMenuState extends State<_DeviceMenu> {
+     final writable =
+         !_useOps || (dir.canWrite && identical(originStore, dir.ops));
+     final style = MenuStyle(
+-        backgroundColor: const WidgetStatePropertyAll(Colors.white),
++        backgroundColor: WidgetStatePropertyAll(context.shade(Colors.white, Night.overlay)),
+         side:
+-            const WidgetStatePropertyAll(BorderSide(color: Color(0xffe5e7eb))),
+-        shadowColor: const WidgetStatePropertyAll(Color(0x330b2e42)));
++            WidgetStatePropertyAll(BorderSide(color: context.supportLine)),
++        elevation: context.night ? const WidgetStatePropertyAll(0.0) : null,
++        shadowColor: WidgetStatePropertyAll(context.shade(const Color(0x330b2e42), Colors.transparent)));
+     return MenuAnchor(
+         style: style,
+         controller: controller,
+diff --git a/flutter/lib/steaddesk/support_directory.dart b/flutter/lib/steaddesk/support_directory.dart
+index 3e21cfb..cd8c1d5 100644
+--- a/flutter/lib/steaddesk/support_directory.dart
++++ b/flutter/lib/steaddesk/support_directory.dart
+@@ -524,9 +524,9 @@ class _DirectoryState extends State<_Directory> {
+                                   padding:
+                                       const EdgeInsets.fromLTRB(16, 16, 16, 4),
+                                   child: Text(translate(widget.page.label),
+-                                      style: const TextStyle(
++                                      style: TextStyle(
+                                           fontSize: 20,
+-                                          color: _ink,
++                                          color: context.supportInk,
+                                           fontWeight: FontWeight.w600))),
+                               SingleChildScrollView(
+                                   scrollDirection: Axis.horizontal,
+@@ -535,7 +535,7 @@ class _DirectoryState extends State<_Directory> {
+                                       InkWell(
+                                           onTap: () =>
+                                               setState(() => filter = f),
+-                                          hoverColor: const Color(0xfff3f4f6),
++                                          hoverColor: context.supportHover,
+                                           child: Container(
+                                               padding:
+                                                   const EdgeInsets.symmetric(
+@@ -546,22 +546,21 @@ class _DirectoryState extends State<_Directory> {
+                                                       bottom: BorderSide(
+                                                           width: 2,
+                                                           color: filter == f
+-                                                              ? _blue
++                                                              ? context.supportAccent
+                                                               : Colors
+                                                                   .transparent))),
+                                               child: Text(translate(f.label),
+                                                   style: TextStyle(
+                                                       color: filter == f
+-                                                          ? _blue
+-                                                          : const Color(
+-                                                              0xff4b5563)))))
++                                                          ? context.supportAccent
++                                                          : context.supportMuted))))
+                                   ])),
+                               SizedBox(height: 36, child: DirectoryColumns(
+                                   Text(translate('Device')),
+                                   Text(translate('Status')),
+                                   Text(translate('Model')))),
+-                              const Divider(
+-                                  height: 1, color: Color(0xffe5e7eb)),
++                              Divider(
++                                  height: 1, color: context.supportLine),
+                               Expanded(
+                                   child: rows.isEmpty && missing.isEmpty
+                                       ? Center(child: _emptyResults(entries))
+@@ -569,9 +568,9 @@ class _DirectoryState extends State<_Directory> {
+                                           itemCount:
+                                               rows.length + missing.length,
+                                           separatorBuilder: (_, __) =>
+-                                              const Divider(
++                                              Divider(
+                                                   height: 1,
+-                                                  color: Color(0xffeef0f2)),
++                                                  color: context.supportHairline),
+                                           itemBuilder: (_, i) => i < rows.length
+                                               ? _row(rows[i])
+                                               : _unavailable(
+@@ -615,7 +614,7 @@ class _DirectoryState extends State<_Directory> {
+     Widget node(String key, String label, int depth, {bool branch = false}) {
+       final count = counts[key] ?? (0, 0);
+       return Material(
+-          color: selected == key ? const Color(0xffdff2fa) : Colors.transparent,
++          color: selected == key ? context.supportSelection : Colors.transparent,
+           child: InkWell(
+               onTap: () => setState(() => scope = key),
+               child: Padding(
+@@ -642,9 +641,9 @@ class _DirectoryState extends State<_Directory> {
+                             child: Text(label,
+                                 maxLines: 1, overflow: TextOverflow.ellipsis))),
+                     Text('${count.$1}/${count.$2}',
+-                        style: const TextStyle(
++                        style: TextStyle(
+                             fontSize: 12,
+-                            color: Color(0xff4b5563),
++                            color: context.supportMuted,
+                             fontFeatures: [ui.FontFeature.tabularFigures()])),
+                   ]))));
+     }
+diff --git a/flutter/lib/steaddesk/support_group_tree.dart b/flutter/lib/steaddesk/support_group_tree.dart
+index 57346b4..9ec255d 100644
+--- a/flutter/lib/steaddesk/support_group_tree.dart
++++ b/flutter/lib/steaddesk/support_group_tree.dart
+@@ -115,11 +115,11 @@ extension _GroupTree on _DirectoryState {
+   Future<String?> _groupMenu(Offset point, List<PopupMenuEntry<String>> items) {
+     final box = Overlay.of(context).context.findRenderObject() as RenderBox;
+     return showMenu<String>(
+-        color: Colors.white,
++        color: context.shade(Colors.white, Night.overlay),
+         surfaceTintColor: Colors.transparent,
+         shape: RoundedRectangleBorder(
+             borderRadius: BorderRadius.circular(8),
+-            side: const BorderSide(color: Color(0xffe5e7eb))),
++            side: BorderSide(color: context.supportLine)),
+         constraints: const BoxConstraints(minWidth: 230, maxWidth: 350),
+         context: context,
+         position: RelativeRect.fromRect(
+@@ -260,7 +260,7 @@ extension _GroupTree on _DirectoryState {
+                                 _personalMenu(group, e.globalPosition, owner),
+                             child: Container(
+                                 color: scope == key || candidates.isNotEmpty
+-                                    ? const Color(0xffdff2fa)
++                                    ? context.supportSelection
+                                     : null,
+                                 padding: const EdgeInsets.symmetric(
+                                     horizontal: 14, vertical: 9),
+diff --git a/flutter/lib/steaddesk/support_home.dart b/flutter/lib/steaddesk/support_home.dart
+index cc06545..6f723bd 100644
+--- a/flutter/lib/steaddesk/support_home.dart
++++ b/flutter/lib/steaddesk/support_home.dart
+@@ -1,3 +1,4 @@
++import 'package:flutter_hbb/steaddesk/support_appearance.dart';
+ import 'directory_row.dart';
+ import 'device_id.dart';
+ import 'recent_search.dart';
+@@ -69,9 +70,6 @@ enum SupportPage {
+ 
+ enum _Rail { expanded, compact, hidden }
+ 
+-// TODO(U-01): reference the shared light theme tokens after U-01 lands.
+-const _blue = Color(0xff0a6fa8);
+-const _ink = Color(0xff0b2e42);
+ const _solid = Color(0xffe8f4fa);
+ 
+ final caseHomeKey = GlobalKey<_SupportHomeState>();
+@@ -449,21 +447,21 @@ class _SupportHomeState extends State<SupportHome> {
+         automatic && narrow && !expandWhileNarrow && mode == _Rail.expanded
+             ? _Rail.compact
+             : mode;
+-    final opaque = slowRaster ||
++    final opaque = context.night || slowRaster ||
+         MediaQuery.of(context).disableAnimations ||
+         bind.mainGetOptionSync(key: kOptionAllowAlwaysSoftwareRender) == 'Y';
+     glassVisible = visible != _Rail.hidden && !opaque;
+     if (!glassVisible) rasterWindow.clear();
+     return Theme(
+-        data: ThemeData(
++        data: supportHomeFonts(context.night ? Theme.of(context) : ThemeData(
+             brightness: Brightness.light,
+             fontFamily: isWindows ? 'Segoe UI' : null,
+             fontFamilyFallback: isWindows ? const ['Microsoft YaHei'] : null,
+             textButtonTheme: TextButtonThemeData(
+                 style: TextButton.styleFrom(
+-                    foregroundColor: _blue,
++                    foregroundColor: context.supportAccent,
+                     shape: RoundedRectangleBorder(
+-                        borderRadius: BorderRadius.circular(6))))),
++                        borderRadius: BorderRadius.circular(6)))))),
+         child: CallbackShortcuts(
+             bindings: {
+               if (page == SupportPage.devices)
+@@ -477,7 +475,7 @@ class _SupportHomeState extends State<SupportHome> {
+             child: Focus(
+                 autofocus: true,
+                 child: Material(
+-                    color: Colors.white,
++                    color: context.shade(Colors.white, Night.window),
+                     child: Row(children: [
+                       if (visible != _Rail.hidden)
+                         _rail(visible, narrow, opaque),
+@@ -505,7 +503,7 @@ class _SupportHomeState extends State<SupportHome> {
+                                     }
+                                   });
+                                 }),
+-                            const Divider(height: 1, color: Color(0xffe5e7eb)),
++                            Divider(height: 1, color: context.supportLine),
+                             if (casesEnabled && isWindows)
+                               Obx(() => PendingCasesBar(
+                                   admin: gFFI.userModel.isAdmin.value,
+@@ -525,17 +523,17 @@ class _SupportHomeState extends State<SupportHome> {
+ 
+   Widget _rail(_Rail visible, bool narrow, bool opaque) {
+     final full = visible == _Rail.expanded;
+-    final radius = BorderRadius.circular(20);
++    final radius = BorderRadius.circular(context.night ? 0 : 20);
+     Widget item(String label, IconData icon, VoidCallback? tap,
+             {bool selected = false}) =>
+         Tooltip(
+             message: label,
+             child: Material(
+-                color: selected ? _blue.withOpacity(.12) : Colors.transparent,
+-                borderRadius: BorderRadius.circular(10),
++                color: selected ? context.shade(context.supportAccent.withOpacity(.12), Night.selection) : Colors.transparent,
++                borderRadius: BorderRadius.circular(context.night ? 6 : 10),
+                 child: InkWell(
+                     onTap: tap,
+-                    borderRadius: BorderRadius.circular(10),
++                    borderRadius: BorderRadius.circular(context.night ? 6 : 10),
+                     child: SizedBox(
+                         height: 42,
+                         child: Row(
+@@ -545,14 +543,14 @@ class _SupportHomeState extends State<SupportHome> {
+                             children: [
+                               if (full) const SizedBox(width: 10),
+                               Icon(icon,
+-                                  size: 20, color: selected ? _blue : _ink),
++                                  size: 20, color: selected ? context.supportAccent : context.supportInk),
+                               if (full) ...[
+                                 const SizedBox(width: 10),
+                                 Expanded(
+                                     child: Text(label,
+                                         overflow: TextOverflow.ellipsis,
+                                         style: TextStyle(
+-                                            color: selected ? _blue : _ink)))
++                                            color: selected ? context.supportAccent : context.supportInk)))
+                               ],
+                             ])))));
+     final content = Column(children: [
+@@ -560,9 +558,9 @@ class _SupportHomeState extends State<SupportHome> {
+         if (full) ...[
+           Image.asset('assets/icon.png', width: 28, height: 28),
+           const SizedBox(width: 6),
+-          const Expanded(
++          Expanded(
+               child: Text('SteadDesk',
+-                  style: TextStyle(fontWeight: FontWeight.bold, color: _ink)))
++                  style: TextStyle(fontWeight: FontWeight.bold, color: context.supportInk)))
+         ],
+         Builder(
+             builder: (buttonContext) => IconButton(
+@@ -605,7 +603,7 @@ class _SupportHomeState extends State<SupportHome> {
+     return Container(
+         width: full ? 200 : 64,
+         margin: const EdgeInsets.all(10),
+-        decoration: BoxDecoration(borderRadius: radius, boxShadow: const [
++        decoration: BoxDecoration(borderRadius: radius, boxShadow: context.night ? null : const [
+           BoxShadow(
+               color: Color(0x240b3c5a), offset: Offset(0, 10), blurRadius: 30)
+         ]),
+@@ -620,7 +618,7 @@ class _SupportHomeState extends State<SupportHome> {
+                     for (final glow in [
+                       (Alignment.topLeft, const Color(0xff1fa7e0)),
+                       (Alignment.centerRight, const Color(0xff34c3a6)),
+-                      (Alignment.bottomLeft, _blue)
++                      (Alignment.bottomLeft, context.supportAccent)
+                     ])
+                       DecoratedBox(
+                           decoration: BoxDecoration(
+@@ -639,10 +637,10 @@ class _SupportHomeState extends State<SupportHome> {
+                       padding: EdgeInsets.symmetric(
+                           horizontal: full ? 10 : 6, vertical: 10),
+                       decoration: BoxDecoration(
+-                          color: opaque ? _solid : null,
++                          color: opaque ? context.shade(_solid, Night.panel) : null,
+                           borderRadius: radius,
+                           border:
+-                              Border.all(color: Colors.white.withOpacity(.78)),
++                              Border.all(color: context.shade(Colors.white.withOpacity(.78), Night.line)),
+                           gradient: opaque
+                               ? null
+                               : LinearGradient(
+diff --git a/flutter/lib/steaddesk/support_home_bar.dart b/flutter/lib/steaddesk/support_home_bar.dart
+index a35566e..0e09f18 100644
+--- a/flutter/lib/steaddesk/support_home_bar.dart
++++ b/flutter/lib/steaddesk/support_home_bar.dart
+@@ -63,16 +63,16 @@ class _HomeHeader extends StatelessWidget {
+                           crossAxisAlignment: CrossAxisAlignment.end,
+                           children: [
+                             Text(label,
+-                                style: const TextStyle(
+-                                    color: _ink,
++                                style: TextStyle(
++                                    color: context.supportInk,
+                                     fontFeatures: [
+                                       ui.FontFeature.tabularFigures()
+                                     ])),
+                             Text(
+                                 translate(
+                                     'Incoming connections require your approval'),
+-                                style: const TextStyle(
+-                                    fontSize: 11, color: Color(0xff4b5563))),
++                                style: TextStyle(
++                                    fontSize: 11, color: context.supportMuted)),
+                           ])));
+             }),
+       ]));
+@@ -126,14 +126,14 @@ class _ServerStatusState extends State<_ServerStatus> {
+                 ? 'Reachable'
+                 : 'Unreachable';
+         return Container(
+-          decoration: const BoxDecoration(
+-              border: Border(top: BorderSide(color: Color(0xffe5e7eb)))),
++          decoration: BoxDecoration(
++              border: Border(top: BorderSide(color: context.supportLine))),
+           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+           child: Row(children: [
+             Icon(Icons.circle,
+                 size: 8,
+                 color: reachable == true
+-                    ? const Color(0xff16a34a)
++                    ? context.shade(const Color(0xff16a34a), Night.online)
+                     : const Color(0xff9ca3af)),
+             const SizedBox(width: 8),
+             Expanded(
+@@ -141,8 +141,8 @@ class _ServerStatusState extends State<_ServerStatus> {
+                     '${translate("ID server")} · ${translate(server)}   |   ${translate(account)}',
+                     maxLines: 1,
+                     overflow: TextOverflow.ellipsis,
+-                    style: const TextStyle(
+-                        color: Color(0xff4b5563), fontSize: 12))),
++                    style: TextStyle(
++                        color: context.supportMuted, fontSize: 12))),
+           ]),
+         );
+       });
+diff --git a/flutter/lib/steaddesk/support_search.dart b/flutter/lib/steaddesk/support_search.dart
+index 8b84247..cf6f489 100644
+--- a/flutter/lib/steaddesk/support_search.dart
++++ b/flutter/lib/steaddesk/support_search.dart
+@@ -327,13 +327,13 @@ class _SupportSearchFieldState extends State<_SupportSearchField> {
+                           constraints: BoxConstraints(
+                               maxHeight: space.clamp(0.0, 420.0).toDouble()),
+                           child: Material(
+-                              color: Colors.white,
++                              color: context.shade(Colors.white, Night.overlay),
+                               shape: RoundedRectangleBorder(
+                                   borderRadius: BorderRadius.circular(8),
+-                                  side: const BorderSide(
+-                                      color: Color(0xffe5e7eb))),
++                                  side: BorderSide(
++                                      color: context.supportLine)),
+                               clipBehavior: Clip.antiAlias,
+-                              elevation: 2,
++                              elevation: context.night ? 0 : 2,
+                               shadowColor: const Color(0x330b2e42),
+                               child: AnimatedBuilder(
+                                   animation: Listenable.merge([
+@@ -397,7 +397,7 @@ class _SupportSearchFieldState extends State<_SupportSearchField> {
+     Widget heading(String s) => Padding(
+         padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
+         child: Text(translate(s),
+-            style: const TextStyle(fontSize: 12, color: Color(0xff4b5563))));
++            style: TextStyle(fontSize: 12, color: context.supportMuted)));
+     return Column(
+         mainAxisSize: MainAxisSize.min,
+         crossAxisAlignment: CrossAxisAlignment.stretch,
+@@ -486,10 +486,10 @@ class _SupportSearchFieldState extends State<_SupportSearchField> {
+     final key = tileKeys.putIfAbsent(c.key, () => GlobalKey());
+     final tile = Material(
+         key: key,
+-        color: selected == c.key ? const Color(0xffe6f5fb) : Colors.white,
++        color: selected == c.key ? context.shade(const Color(0xffe6f5fb), Night.selection) : context.shade(Colors.white, Night.overlay),
+         child: InkWell(
+             canRequestFocus: false,
+-            hoverColor: const Color(0xfff3f4f6),
++            hoverColor: context.supportHover,
+             onTap: _enabled(c) ? () => _activate(c) : null,
+             child: Padding(
+                 padding:
+@@ -503,7 +503,7 @@ class _SupportSearchFieldState extends State<_SupportSearchField> {
+                             ? null
+                             : '${translate("Direct connect ID")} ${spokenDeviceId(direct, translate)}',
+                         style:
+-                            TextStyle(color: _enabled(c) ? _ink : Colors.grey))
++                            TextStyle(color: _enabled(c) ? context.supportInk : Colors.grey))
+                     : Row(children: [
+                         Expanded(
+                             child: Column(
+diff --git a/flutter/test/steaddesk/support_appearance_test.dart b/flutter/test/steaddesk/support_appearance_test.dart
+new file mode 100644
+index 0000000..2b9086e
+--- /dev/null
++++ b/flutter/test/steaddesk/support_appearance_test.dart
+@@ -0,0 +1,66 @@
++import 'package:flutter/material.dart';
++import 'package:flutter_hbb/common.dart' show ComboBox, MyTheme;
++import 'package:flutter_test/flutter_test.dart';
++import 'package:flutter_hbb/steaddesk/support_appearance.dart';
++
++void main() {
++  testWidgets(
++      'appearance picker exposes its closed value and every menu choice',
++      (tester) async {
++    var saved = 'light';
++    await tester.pumpWidget(MaterialApp(
++      theme: MyTheme.lightTheme,
++      home: Scaffold(
++          body: ComboBox(
++        keys: const ['system', 'light', 'dark'],
++        values: const ['Follow System', 'Day', 'Night'],
++        initialKey: saved,
++        semanticLabel: 'Appearance',
++        onChanged: (key) => saved = key,
++      )),
++    ));
++    final selected = find.bySemanticsLabel('Appearance: Day');
++    expect(selected, findsOneWidget);
++    await tester.tap(selected);
++    await tester.pumpAndSettle();
++    for (final label in ['Follow System', 'Day', 'Night']) {
++      expect(find.bySemanticsLabel(label), findsOneWidget);
++    }
++    await tester.tap(find.bySemanticsLabel('Night'));
++    await tester.pumpAndSettle();
++    expect(saved, 'dark');
++    expect(find.bySemanticsLabel('Appearance: Night'), findsOneWidget);
++  }, variant: TargetPlatformVariant.only(TargetPlatform.windows));
++
++  testWidgets('system changes live; explicit choices override OS brightness',
++      (t) async {
++    final platform = t.platformDispatcher;
++    addTearDown(platform.clearPlatformBrightnessTestValue);
++    Future<void> mount(String saved) async {
++      await t.pumpWidget(MaterialApp(
++          theme: ThemeData.light(),
++          darkTheme: supportNightTheme(ThemeData.dark()),
++          themeMode: supportMode(saved),
++          home: Builder(
++              builder: (c) => Text(c.night ? 'night' : 'day',
++                  style: TextStyle(color: c.supportInk)))));
++      await t.pumpAndSettle();
++    }
++
++    platform.platformBrightnessTestValue = Brightness.light;
++    await mount('');
++    expect(find.text('day'), findsOneWidget);
++    platform.platformBrightnessTestValue = Brightness.dark;
++    await t.pumpAndSettle();
++    expect(find.text('night'), findsOneWidget);
++    await mount('light');
++    expect(find.text('day'), findsOneWidget);
++    platform.platformBrightnessTestValue = Brightness.light;
++    await mount('dark');
++    final c = t.element(find.text('night'));
++    expect(Theme.of(c).scaffoldBackgroundColor, Night.window);
++    expect(Theme.of(c).colorScheme.onPrimary, Night.window);
++    expect(c.supportAccent, Night.accent);
++    expect(supportMode('unknown'), ThemeMode.system);
++  });
++}

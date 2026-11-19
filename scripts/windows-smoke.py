@@ -113,6 +113,7 @@ if recent_fixture:
         handle.write("[options]\n")
         for key, value in {
             "access_token": "offline-ui-fixture",
+            "support-appearance": "light",
             "user_info": json.dumps({"name": account}),
             "support-recent-search-v1-" + account: json.dumps(history),
         }.items():
@@ -232,17 +233,91 @@ if recent_fixture and directory_fixture:
     capture_directory("directory-narrow")
     window.maximize()
 
-settings = by_name(window, "Settings")
-if settings:
-    click_control(settings)
-else:
-    # In the pinned Windows tab bar, Settings precedes the three window
-    # actions. All four buttons are 27 logical pixels wide.
-    frame = window.rectangle()
-    scale = windll.user32.GetDpiForWindow(wintypes.HWND(window.handle)) / 96
-    click(coords=(frame.right - round(3.5 * 27 * scale),
-                  frame.top + round(14 * scale)))
+def open_settings():
+    settings = by_name(window, "Settings")
+    if settings:
+        click_control(settings)
+    else:
+        # In the pinned Windows tab bar, Settings precedes the three window
+        # actions. All four buttons are 27 logical pixels wide.
+        frame = window.rectangle()
+        scale = windll.user32.GetDpiForWindow(wintypes.HWND(window.handle)) / 96
+        click(coords=(frame.right - round(3.5 * 27 * scale),
+                      frame.top + round(14 * scale)))
 
+if recent_fixture and directory_fixture:
+    # Home contains only these two seeded rows. Save the body below the local
+    # ID header. Verify the empty part of the directory actually changed color.
+    def capture_home(name, extra=()):
+        frame = window.rectangle()
+        identity = wait_for("local device button", local_id_button).rectangle()
+        scale = windll.user32.GetDpiForWindow(wintypes.HWND(window.handle)) / 96
+        # Remove the whole local-ID header and account/status footer. The
+        # remaining navigation, group tree and directory use the offline fixture.
+        body = (8, identity.bottom - frame.top + 2, frame.width() - 8,
+                frame.height() - round(110 * scale))
+        if body[1] >= body[3]:
+            raise RuntimeError("Cannot isolate the public directory")
+        row = wait_for("synthetic online row", lambda: fixture_row(True))
+        save_evidence(window, name, [row, *extra], [body])
+
+    def background():
+        status = wait_for("status column", lambda: by_name(window, "Status")).rectangle()
+        frame = window.rectangle()
+        pixel = window.capture_as_image().convert("RGB").getpixel((
+            status.mid_point().x - frame.left, frame.height() - 85))
+        return max(pixel)
+    wait_for("day background", lambda: True if background() >= 200 else None)
+    capture_home("appearance-day-home")
+    open_settings()
+    press(window, "General")
+    def closed_appearance(value):
+        # Windows UIA merges the card title and the selected label into a
+        # single Button. Match the entire name and the actual control role.
+        expected = ["Appearance", "Appearance: " + value]
+        for control in controls(window, lambda name: name.splitlines() == expected):
+            if control.element_info.control_type == "Button" and control.is_enabled():
+                return control
+        return None
+
+    day_picker = wait_for("closed Appearance: Day picker", lambda: closed_appearance("Day"))
+    # The merged rectangle includes the card heading; activate the Flutter
+    # semantics action on the button itself instead of clicking the card center.
+    day_picker.iface_invoke.Invoke()
+    options = {
+        label: wait_for("appearance option " + label, lambda label=label: by_name(window, label))
+        for label in ("Follow System", "Day", "Night")
+    }
+    boxes = [el.rectangle() for el in options.values()]
+    frame = window.rectangle()
+    dropdown = (min(r.left for r in boxes) - frame.left, min(r.top for r in boxes) - frame.top,
+                max(r.right for r in boxes) - frame.left, max(r.bottom for r in boxes) - frame.top)
+    save_evidence(window, "appearance-settings", list(options.values()), [dropdown])
+    click_control(options["Night"])
+    wait_for("closed Appearance: Night picker",
+             lambda: closed_appearance("Night"))
+    press(window, "Home")
+    wait_for("dark directory body", lambda: True if background() <= 60 else None)
+    capture_home("appearance-night-home")
+    point = row_point(False)
+    move(coords=(point.x, point.y))
+    details = wait_for("hover details action", lambda: by_name(window, "Details"))
+    capture_home("appearance-night-hover", [details])
+    details.iface_invoke.Invoke()
+    # The native button name includes the seeded offline device's spoken ID.
+    copy = wait_for("card copy ID", lambda: by_name(
+        window, "nine eight seven six five four three two two. Copy ID"))
+    safe = controls(window, lambda s: s in {"Overview", "Device ID", "Connect", "Transfer file", "Device status"})
+    frame = window.rectangle()
+    card_start = min(el.rectangle().left for el in safe + [copy] if el.rectangle().left > frame.mid_point().x)
+    card_top = wait_for("fixture card ID", lambda: by_name(window, "Device ID")).rectangle().top
+    # Stop above any editable notes/history, retain the synthetic ID and actions.
+    card_bottom = wait_for("card status action", lambda: by_name(window, "Device status")).rectangle().bottom
+    card_rect = (max(0, card_start-frame.left-10), max(0, card_top-frame.top-6),
+                 frame.width()-6, min(frame.height(),card_bottom-frame.top+8))
+    save_evidence(window, "appearance-night-card", safe + [copy], [card_rect])
+    send_keys("{ESC}")
+open_settings()
 press(window, "About")
 source_name = "基于 RustDesk（AGPL-3.0） · Source code"
 wait_for("public source attribution", lambda: by_name(window, source_name))
