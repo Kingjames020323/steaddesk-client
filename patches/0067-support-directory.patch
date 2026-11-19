@@ -1,0 +1,533 @@
+diff --git a/flutter/lib/steaddesk/device_id_widgets.dart b/flutter/lib/steaddesk/device_id_widgets.dart
+index 417405b..45efea9 100644
+--- a/flutter/lib/steaddesk/device_id_widgets.dart
++++ b/flutter/lib/steaddesk/device_id_widgets.dart
+@@ -125,34 +125,28 @@ class DirectoryDeviceIdentity extends StatelessWidget {
+       required this.id,
+       required this.alias,
+       required this.name,
++      this.hovered = false,
+       required this.translate});
+   final String id, alias, name;
++  final bool hovered;
+   final String Function(String) translate;
++  static final _asset = RegExp(r'^M[0-9]+-S[0-9]+-[A-Z0-9._-]+$', caseSensitive: false);
+ 
+   @override
+   Widget build(BuildContext context) {
+-    final title = alias.isNotEmpty ? alias : name;
+-    const titleStyle = TextStyle(fontWeight: FontWeight.w600);
+-    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+-      if (title.isEmpty)
+-        DeviceIdText(id,
+-            translate: translate,
+-            maxLines: 1,
+-            overflow: TextOverflow.ellipsis,
+-            style: titleStyle)
+-      else
+-        Text(title,
+-            maxLines: 1, overflow: TextOverflow.ellipsis, style: titleStyle),
+-      DeviceIdText(id,
+-          translate: translate,
+-          prefix: name.isEmpty ? '' : '$name · ',
+-          maxLines: 1,
+-          overflow: TextOverflow.ellipsis,
+-          style: const TextStyle(
+-              color: Color(0xff4b5563),
+-              fontSize: 12,
+-              fontFeatures: [FontFeature.tabularFigures()])),
+-    ]);
++    final title = [alias, name].map((v) => v.trim()).firstWhere(
++      (v) => v.isNotEmpty && !_asset.hasMatch(v), orElse: () => translate('Device'));
++    final link = TextStyle(decoration: TextDecoration.underline,
++        decorationColor: hovered ? const Color(0xff0a6fa8) : const Color(0xff94a3b8));
++    return Column(mainAxisAlignment: MainAxisAlignment.center,
++      crossAxisAlignment: CrossAxisAlignment.start, children: [
++        Text(title, maxLines: 1, overflow: TextOverflow.ellipsis,
++          style: link.copyWith(fontWeight: FontWeight.w600)),
++        DeviceIdText(id, translate: translate, maxLines: 1,
++          overflow: TextOverflow.ellipsis, style: link.copyWith(
++            fontSize: 12, color: const Color(0xff4b5563), fontFamily: 'Cascadia Mono',
++            fontFamilyFallback: const ['Consolas', 'monospace'])),
++      ]);
+   }
+ }
+ 
+diff --git a/flutter/lib/steaddesk/directory_row.dart b/flutter/lib/steaddesk/directory_row.dart
+new file mode 100644
+index 0000000..cd2a7c6
+--- /dev/null
++++ b/flutter/lib/steaddesk/directory_row.dart
+@@ -0,0 +1,187 @@
++import 'package:flutter/material.dart';
++import 'package:flutter/services.dart';
++import 'device_id_widgets.dart';
++import 'support_device.dart';
++
++class DirectoryColumns extends StatelessWidget {
++  const DirectoryColumns(this.device, this.status, this.model, {super.key});
++  final Widget device, status, model;
++
++  @override
++  Widget build(BuildContext context) => Padding(
++      padding: const EdgeInsets.symmetric(horizontal: 12),
++      child: LayoutBuilder(builder: (context, size) {
++        final showModel =
++            MediaQuery.sizeOf(context).width >= 1180 && size.maxWidth >= 700;
++        return DefaultTextStyle.merge(
++            maxLines: 1,
++            softWrap: false,
++            overflow: TextOverflow.ellipsis,
++            child: Row(children: [
++              Expanded(flex: 6, child: device),
++              const SizedBox(width: 12),
++              Expanded(flex: 2, child: status),
++              if (showModel) ...[
++                const SizedBox(width: 12),
++                Expanded(flex: 2, child: model)
++              ],
++            ]));
++      }));
++}
++
++class DirectoryRow extends StatefulWidget {
++  const DirectoryRow(
++      {super.key,
++      required this.device,
++      required this.translate,
++      required this.onConnect,
++      required this.onDetails,
++      required this.onTransfer,
++      required this.more});
++  final SupportDevice device;
++  final String Function(String) translate;
++  final VoidCallback onConnect, onDetails, onTransfer;
++  final Widget more;
++  @override
++  State<DirectoryRow> createState() => _DirectoryRowState();
++}
++
++class _DirectoryFocusNode extends FocusNode {}
++
++class _DirectoryRowState extends State<DirectoryRow> {
++  final node = _DirectoryFocusNode();
++
++  @override
++  void dispose() {
++    node.dispose();
++    super.dispose();
++  }
++
++  bool hovered = false, focused = false;
++
++  KeyEventResult _key(FocusNode node, KeyEvent event) {
++    if (!node.hasPrimaryFocus ||
++        event is! KeyDownEvent && event is! KeyRepeatEvent) {
++      return KeyEventResult.ignored;
++    }
++    final key = event.logicalKey;
++    if (key == LogicalKeyboardKey.arrowDown ||
++        key == LogicalKeyboardKey.arrowUp) {
++      final list = Scrollable.maybeOf(context);
++      final rows = node.enclosingScope!.traversalDescendants
++          .where((candidate) =>
++              candidate is _DirectoryFocusNode &&
++              candidate.context != null &&
++              Scrollable.maybeOf(candidate.context!) == list)
++          .toList()
++        ..sort((a, b) => a.rect.top.compareTo(b.rect.top));
++      final current = rows.indexOf(node);
++      final next = current + (key == LogicalKeyboardKey.arrowDown ? 1 : -1);
++      if (current >= 0 && next >= 0 && next < rows.length) {
++        rows[next].requestFocus();
++        Scrollable.ensureVisible(rows[next].context!);
++      }
++    } else if (key == LogicalKeyboardKey.enter ||
++        key == LogicalKeyboardKey.numpadEnter) {
++      if (event is KeyDownEvent && widget.device.online == true) {
++        widget.onConnect();
++      }
++    } else if (key == LogicalKeyboardKey.space) {
++      if (event is KeyDownEvent) widget.onDetails();
++    } else {
++      return KeyEventResult.ignored;
++    }
++    return KeyEventResult.handled;
++  }
++
++  @override
++  Widget build(BuildContext context) {
++    final d = widget.device;
++    final tr = widget.translate;
++    final online = d.online == true;
++    final active = hovered || focused;
++    const blue = Color(0xff0a6fa8);
++    final label = FittedBox(
++        fit: BoxFit.scaleDown,
++        child: Text(tr(online ? 'Connect' : 'Details'), maxLines: 1));
++    const actionShape = RoundedRectangleBorder(
++        borderRadius: BorderRadius.all(Radius.circular(6)));
++    final primary = online
++        ? FilledButton(
++            onPressed: widget.onConnect,
++            style: FilledButton.styleFrom(
++                shape: actionShape,
++                padding: const EdgeInsets.symmetric(horizontal: 10),
++                backgroundColor: blue,
++                foregroundColor: Colors.white),
++            child: label)
++        : OutlinedButton(
++            onPressed: widget.onDetails,
++            style: OutlinedButton.styleFrom(
++                shape: actionShape,
++                padding: const EdgeInsets.symmetric(horizontal: 10),
++                foregroundColor: blue),
++            child: label);
++    // J26 will supply confirmed operator presence. Online state alone cannot
++    // establish that another operator is controlling this device.
++    return Focus(
++        focusNode: node,
++        onFocusChange: (v) => setState(() => focused = v),
++        onKeyEvent: _key,
++        child: MouseRegion(
++            onEnter: (_) => setState(() => hovered = true),
++            onExit: (_) => setState(() => hovered = false),
++            child: GestureDetector(
++                behavior: HitTestBehavior.opaque,
++                onDoubleTap: widget.onConnect,
++                onTap: widget.onDetails,
++                child: Container(
++                  height: 56,
++                  color: active ? const Color(0xfff3f4f6) : Colors.transparent,
++                  child: DirectoryColumns(
++                      Row(children: [
++                        Expanded(
++                            child: DirectoryDeviceIdentity(
++                                id: d.id,
++                                alias: d.alias,
++                                name: d.name,
++                                hovered: active,
++                                translate: tr)),
++                        const SizedBox(width: 4),
++                        Visibility(
++                            visible: active,
++                            maintainSize: true,
++                            maintainAnimation: true,
++                            maintainState: true,
++                            child: ExcludeFocus(
++                                excluding: !active,
++                                child: Row(
++                                    mainAxisSize: MainAxisSize.min,
++                                    children: [
++                                      ConstrainedBox(
++                                          constraints: const BoxConstraints(
++                                              maxWidth: 100),
++                                          child: primary),
++                                      IconButton(
++                                          tooltip: tr('Transfer file'),
++                                          onPressed: widget.onTransfer,
++                                          icon: const Icon(
++                                              Icons.folder_open_outlined,
++                                              size: 18)),
++                                      widget.more,
++                                    ]))),
++                      ]),
++                      Text(
++                          tr(d.online == null
++                              ? 'Unknown'
++                              : online
++                                  ? 'Online'
++                                  : 'Offline'),
++                          style: TextStyle(
++                              color: online
++                                  ? const Color(0xff16803d)
++                                  : const Color(0xff4b5563))),
++                      Text(d.model.isEmpty ? '—' : d.model)),
++                ))));
++  }
++}
+diff --git a/flutter/lib/steaddesk/support_directory.dart b/flutter/lib/steaddesk/support_directory.dart
+index ed7b369..3e21cfb 100644
+--- a/flutter/lib/steaddesk/support_directory.dart
++++ b/flutter/lib/steaddesk/support_directory.dart
+@@ -556,11 +556,10 @@ class _DirectoryState extends State<_Directory> {
+                                                           : const Color(
+                                                               0xff4b5563)))))
+                                   ])),
+-                              _columns(
++                              SizedBox(height: 36, child: DirectoryColumns(
+                                   Text(translate('Device')),
+                                   Text(translate('Status')),
+-                                  Text(translate('Model')),
+-                                  Text(translate('Actions'))),
++                                  Text(translate('Model')))),
+                               const Divider(
+                                   height: 1, color: Color(0xffe5e7eb)),
+                               Expanded(
+@@ -681,79 +680,15 @@ class _DirectoryState extends State<_Directory> {
+     ]);
+   }
+ 
+-  Widget _columns(Widget device, Widget status, Widget model, Widget action) =>
+-      Padding(
+-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+-          child: LayoutBuilder(builder: (_, constraints) {
+-            final width = constraints.maxWidth;
+-            // Keep the model hidden when automatic rail collapse frees space.
+-            final showModel =
+-                MediaQuery.sizeOf(context).width >= 1180 && width >= 700;
+-            final actionWidth = (width * .14).clamp(84.0, 144.0).toDouble();
+-            final free = width - actionWidth - (showModel ? 36 : 24);
+-            final statusWidth =
+-                math.max(64.0, free * 8 / (showModel ? 38 : 28));
+-            return DefaultTextStyle.merge(
+-              maxLines: 1,
+-              softWrap: false,
+-              overflow: TextOverflow.ellipsis,
+-              child: Row(children: [
+-                Expanded(flex: 2, child: device),
+-                const SizedBox(width: 12),
+-                SizedBox(width: statusWidth, child: status),
+-                if (showModel) ...[
+-                  const SizedBox(width: 12),
+-                  Expanded(child: model),
+-                ],
+-                const SizedBox(width: 12),
+-                SizedBox(width: actionWidth, child: action),
+-              ]),
+-            );
+-          }));
+-
+   Widget _row(_Entry row) {
+     final d = row.device;
+-    final status = d.online == null
+-        ? 'Unknown'
+-        : d.online!
+-            ? 'Online'
+-            : 'Offline';
+     final child = _DeviceMenu(
+-        row: row,
+-        directory: this,
+-        child: InkWell(
+-            onDoubleTap: () => _connect(row),
+-            onTap: () => _openCard(row),
+-            hoverColor: const Color(0xfff3f4f6),
+-            child: _columns(
+-                DirectoryDeviceIdentity(
+-                    id: d.id,
+-                    alias: d.alias,
+-                    name: d.name,
+-                    translate: translate),
+-                Text(translate(status),
+-                    style: TextStyle(
+-                        color: d.online == true
+-                            ? const Color(0xff16a34a)
+-                            : const Color(0xff4b5563))),
+-                Text(d.model.isEmpty ? '—' : d.model,
+-                    maxLines: 1, overflow: TextOverflow.ellipsis),
+-                Align(
+-                    alignment: Alignment.centerLeft,
+-                    child: TextButton(
+-                        style: TextButton.styleFrom(
+-                            padding: const EdgeInsets.symmetric(horizontal: 8)),
+-                        onPressed: () =>
+-                            d.online == true ? _connect(row) : _openCard(row),
+-                        child: FittedBox(
+-                            fit: BoxFit.scaleDown,
+-                            child: Text(
+-                                translate(
+-                                    d.online == true ? 'Connect' : 'Details'),
+-                                maxLines: 1,
+-                                softWrap: false,
+-                                overflow: TextOverflow.visible,
+-                                style: const TextStyle(color: _blue))))))));
++      row: row, directory: this,
++      child: DirectoryRow(key: ValueKey(d.id), device: d, translate: translate,
++        onConnect: () => _connect(row), onDetails: () => _openCard(row),
++        onTransfer: () => _connect(row, transfer: true),
++        more: _DeviceMenu(row: row, directory: this, openOnTap: true,
++                          child: const Icon(Icons.more_horiz, size: 18))));
+     if (widget.page != SupportPage.devices || account.isEmpty) return child;
+     return Draggable<_DraggedDevice>(
+         data: _DraggedDevice(account, d.id),
+diff --git a/flutter/lib/steaddesk/support_home.dart b/flutter/lib/steaddesk/support_home.dart
+index 2c65879..cc06545 100644
+--- a/flutter/lib/steaddesk/support_home.dart
++++ b/flutter/lib/steaddesk/support_home.dart
+@@ -1,3 +1,4 @@
++import 'directory_row.dart';
+ import 'device_id.dart';
+ import 'recent_search.dart';
+ import 'device_id_widgets.dart';
+diff --git a/flutter/test/steaddesk/device_id_test.dart b/flutter/test/steaddesk/device_id_test.dart
+index 57b8f99..df7abbf 100644
+--- a/flutter/test/steaddesk/device_id_test.dart
++++ b/flutter/test/steaddesk/device_id_test.dart
+@@ -86,12 +86,12 @@ void main() {
+             id: ten, alias: '', subtitle: 'Fixture', translate: translate),
+       ]))));
+       expect(find.text('0 123 456 789'), findsNWidgets(2));
+-      expect(find.text('Fixture · 987 654 321'), findsOneWidget);
++      expect(find.text('987 654 321'), findsOneWidget);
+       expect(find.text('1234567890'), findsOneWidget);
+       final spoken = entry.value;
+       expect(find.bySemanticsLabel(spoken), findsNWidgets(2));
+       final descending = entry.value.split(' ').reversed.take(9).join(' ');
+-      expect(find.bySemanticsLabel('Fixture · $descending'), findsOneWidget);
++      expect(find.bySemanticsLabel(descending), findsOneWidget);
+       expect(find.bySemanticsLabel('0 123 456 789'), findsNothing);
+       semantics.dispose();
+     });
+diff --git a/flutter/test/steaddesk/directory_row_test.dart b/flutter/test/steaddesk/directory_row_test.dart
+new file mode 100644
+index 0000000..cc83000
+--- /dev/null
++++ b/flutter/test/steaddesk/directory_row_test.dart
+@@ -0,0 +1,147 @@
++import 'dart:io';
++import 'dart:ui' as ui;
++import 'package:flutter/gestures.dart';
++import 'package:flutter/material.dart';
++import 'package:flutter/rendering.dart';
++import 'package:flutter/services.dart';
++import 'package:flutter_test/flutter_test.dart';
++import 'package:flutter_hbb/steaddesk/directory_row.dart';
++import 'package:flutter_hbb/steaddesk/support_device.dart';
++
++void main() {
++  testWidgets('directory mouse, keyboard, presence and responsive layout',
++      (t) async {
++    final capture = GlobalKey();
++    String action = '';
++    final font = Platform.isWindows
++        ? File(r'C:\Windows\Fonts\segoeui.ttf')
++        : File('/System/Library/Fonts/Supplemental/Arial.ttf');
++    if (font.existsSync()) {
++      final loader = FontLoader('DirectoryTestFont')
++        ..addFont(Future.value(ByteData.sublistView(font.readAsBytesSync())));
++      await loader.load();
++    }
++    final mono = File(Platform.isWindows
++        ? r'C:\Windows\Fonts\consola.ttf'
++        : '/System/Library/Fonts/Supplemental/Courier New.ttf');
++    if (mono.existsSync()) {
++      await (FontLoader('Cascadia Mono')
++            ..addFont(
++                Future.value(ByteData.sublistView(mono.readAsBytesSync()))))
++          .load();
++    }
++    await (FontLoader('MaterialIcons')
++          ..addFont(rootBundle.load('fonts/MaterialIcons-Regular.otf')))
++        .load();
++    t.view.devicePixelRatio = 1;
++    t.view.physicalSize = const Size(1280, 400);
++    addTearDown(t.view.resetPhysicalSize);
++    addTearDown(t.view.resetDevicePixelRatio);
++    final devices = [
++      for (final online in [true, false])
++        SupportDevice(
++            id: online ? '987654321' : '987654322',
++            alias: online ? 'Front counter' : 'Office',
++            hostnames: ['M0001-S01-SUNMI1', 'SUNMI-Demo'],
++            platform: 'Android',
++            groupName: '',
++            online: online),
++    ];
++    await t.pumpWidget(MaterialApp(
++        theme: ThemeData(fontFamily: 'DirectoryTestFont'),
++        home: Scaffold(
++            body: Center(
++                child: RepaintBoundary(
++                    key: capture,
++                    child: Material(
++                        child: SizedBox(
++                            height: 160,
++                            child: Column(children: [
++                              const SizedBox(
++                                  height: 36,
++                                  child: DirectoryColumns(Text('Device'),
++                                      Text('Status'), Text('Model'))),
++                              for (final d in devices)
++                                DirectoryRow(
++                                    device: d,
++                                    translate: (s) => s,
++                                    onDetails: () => action = 'details ${d.id}',
++                                    onConnect: () => action = 'connect ${d.id}',
++                                    onTransfer: () =>
++                                        action = 'transfer ${d.id}',
++                                    more: IconButton(
++                                        onPressed: () => action = 'menu',
++                                        icon: const Icon(Icons.more_horiz))),
++                            ]))))))));
++    void expectActionCorners(Finder button) {
++      final action = t.widget<ButtonStyleButton>(button);
++      final shape = action.style?.shape?.resolve({});
++      expect(shape, isA<RoundedRectangleBorder>());
++      expect((shape as RoundedRectangleBorder).borderRadius,
++          BorderRadius.circular(6));
++    }
++
++    Future<void> shot(String name) async {
++      final dir = Platform.environment['STEADDESK_DIRECTORY_SHOTS'];
++      if (dir == null) return;
++      await t.runAsync(() async {
++        final obj =
++            capture.currentContext!.findRenderObject() as RenderRepaintBoundary;
++        final image = await obj.toImage();
++        final bytes = await image.toByteData(format: ui.ImageByteFormat.png);
++        Directory(dir).createSync(recursive: true);
++        File('$dir/$name.png').writeAsBytesSync(bytes!.buffer.asUint8List());
++        image.dispose();
++      });
++    }
++
++    expect(find.text('M0001-S01-SUNMI1'), findsNothing);
++    expect(find.text('Connect').hitTestable(), findsNothing);
++    await shot('default');
++    final mouse = await t.createGesture(kind: PointerDeviceKind.mouse);
++    await mouse.addPointer(location: Offset.zero);
++    final front = find.text('Front counter'), office = find.text('Office');
++    final before = t.getTopLeft(front);
++    await mouse.moveTo(t.getCenter(front));
++    await t.pumpAndSettle();
++    expect(t.getTopLeft(front), before);
++    expect(find.text('Connect'), findsOneWidget);
++    expectActionCorners(find.widgetWithText(FilledButton, 'Connect'));
++    await shot('hover-online');
++    await t.tap(find.byTooltip('Transfer file').hitTestable());
++    await t.pump(const Duration(milliseconds: 350));
++    expect(action, 'transfer 987654321');
++    await mouse.moveTo(t.getCenter(office));
++    await t.pumpAndSettle();
++    expect(find.text('Details'), findsOneWidget);
++    expectActionCorners(find.widgetWithText(OutlinedButton, 'Details'));
++    await shot('hover-offline');
++    await t.tap(find.text('Details'));
++    await t.pump(const Duration(milliseconds: 350));
++    expect(action, 'details 987654322');
++    await mouse.moveTo(Offset.zero);
++    await t.pumpAndSettle();
++    final firstRow = find.byType(DirectoryRow).first;
++    final focus = t.widget<Focus>(find.descendant(of: firstRow, matching: find.byType(Focus)).first);
++    focus.focusNode!.requestFocus();
++    await t.pumpAndSettle();
++    await t.sendKeyEvent(LogicalKeyboardKey.arrowDown);
++    await t.pumpAndSettle();
++    await t.sendKeyEvent(LogicalKeyboardKey.space);
++    expect(action, 'details 987654322');
++    action = '';
++    await t.sendKeyEvent(LogicalKeyboardKey.enter);
++    expect(action, '');
++    await t.sendKeyEvent(LogicalKeyboardKey.arrowUp);
++    await t.pumpAndSettle();
++    await t.sendKeyEvent(LogicalKeyboardKey.enter);
++    expect(action, 'connect 987654321');
++    await shot('keyboard-selected');
++    t.view.physicalSize = const Size(540, 400);
++    await t.pumpAndSettle();
++    expect(find.text('Model'), findsNothing);
++    expect(t.takeException(), isNull);
++    await shot('narrow');
++    await mouse.removePointer();
++  });
++}
