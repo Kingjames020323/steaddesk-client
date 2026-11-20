@@ -1,0 +1,643 @@
+diff --git a/flutter/lib/steaddesk/ops_health.dart b/flutter/lib/steaddesk/ops_health.dart
+index 742c4f0..f40b73c 100644
+--- a/flutter/lib/steaddesk/ops_health.dart
++++ b/flutter/lib/steaddesk/ops_health.dart
+@@ -309,9 +309,10 @@ class HealthStore extends ChangeNotifier {
+   }
+ 
+   Future<Map<String, dynamic>> check(String device,
+-      {required bool Function() visible}) async {
++      {required bool Function() visible, String? category}) async {
+     if (!visible()) throw const HealthFailure(401);
+-    final queued = await _fetch('POST', 'devices/$device/checks', {});
++    final queued = await _fetch('POST', 'devices/$device/checks',
++        {if (category != null) 'category': category});
+     final id = queued['id'] as String;
+     final elapsed = Stopwatch()..start();
+     while (elapsed.elapsed < const Duration(minutes: 3, seconds: 15)) {
+diff --git a/flutter/lib/steaddesk/ops_health_host.dart b/flutter/lib/steaddesk/ops_health_host.dart
+index cc282af..d207c55 100644
+--- a/flutter/lib/steaddesk/ops_health_host.dart
++++ b/flutter/lib/steaddesk/ops_health_host.dart
+@@ -201,8 +201,7 @@ class _OpsHealthHostState extends State<OpsHealthHost> {
+                       HealthDeviceView(
+                           key: ValueKey((store, widget.device)),
+                           store: store,
+-                          id: widget.device!,
+-                          checks: widget.surface == HealthSurface.card));
++                          id: widget.device!));
+               }
+             });
+       });
+diff --git a/flutter/lib/steaddesk/ops_health_widgets.dart b/flutter/lib/steaddesk/ops_health_widgets.dart
+index 9b03614..4b69229 100644
+--- a/flutter/lib/steaddesk/ops_health_widgets.dart
++++ b/flutter/lib/steaddesk/ops_health_widgets.dart
+@@ -1,8 +1,33 @@
+ import 'package:flutter/material.dart';
+ import 'ops_health.dart';
+ import 'quick/result_line.dart';
++import 'check_categories.dart';
+ import 'quick/support_detail.dart';
+ 
++String _checkGroup(String group, String language) {
++  final labels = switch (language.toLowerCase().split(RegExp('[-_]')).first) {
++    'zh' => const {
++        'printers': '打印机',
++        'payment': '刷卡机',
++        'devices': '店内设备',
++        '': '未分类'
++      },
++    'es' => const {
++        'printers': 'Impresoras',
++        'payment': 'Terminales de pago',
++        'devices': 'Equipos de la tienda',
++        '': 'Sin clasificar'
++      },
++    _ => const {
++        'printers': 'Printers',
++        'payment': 'Card terminals',
++        'devices': 'Store devices',
++        '': 'Unclassified'
++      },
++  };
++  return labels[group]!;
++}
++
+ String reasonText(String rule) =>
+     const {
+       'merchant_stopped': '商户手动停止',
+@@ -17,8 +42,17 @@ class HealthDeviceView extends StatefulWidget {
+   final HealthStore store;
+   final String id;
+   final bool checks;
++  final List<String> categories;
++  final Map<String, String> itemTypes;
++  final String language;
+   const HealthDeviceView(
+-      {super.key, required this.store, required this.id, this.checks = false});
++      {super.key,
++      required this.store,
++      required this.id,
++      this.checks = false,
++      this.categories = const [],
++      this.itemTypes = const {},
++      this.language = 'zh'});
+   @override
+   State<HealthDeviceView> createState() => _HealthDeviceViewState();
+ }
+@@ -29,6 +63,7 @@ class _HealthDeviceViewState extends State<HealthDeviceView> {
+   bool busy = false;
+   int epoch = 0;
+   int? resultScope;
++  Map<String, String> resultTypes = {};
+   @override
+   void didUpdateWidget(HealthDeviceView old) {
+     super.didUpdateWidget(old);
+@@ -40,8 +75,8 @@ class _HealthDeviceViewState extends State<HealthDeviceView> {
+     }
+   }
+ 
+-  Future<void> run() async {
+-    if (busy) return;
++  Future<void> run(String category) async {
++    if (busy || !widget.categories.contains(category)) return;
+     final run = ++epoch, store = widget.store, id = widget.id;
+     final scope = store.scopeRevision;
+     bool visible() =>
+@@ -50,20 +85,22 @@ class _HealthDeviceViewState extends State<HealthDeviceView> {
+         scope == store.scopeRevision &&
+         store.active &&
+         store.devices.containsKey(id) &&
+-        (store.storeFeatures == null || store.healthPeers.contains(id));
++        (store.storeFeatures == null || store.quickPeers.contains(id));
+     setState(() {
+       busy = true;
+       error = null;
+       result = null;
+       resultScope = scope;
++      resultTypes = Map.of(widget.itemTypes);
+     });
+     try {
+-      final done = await store.check(id, visible: visible);
++      final done = await store.check(id, visible: visible, category: category);
+       if (visible()) setState(() => result = done);
+     } catch (e) {
+       if (visible()) {
+-        setState(() => error =
+-            (e is HealthFailure ? e : const HealthFailure(0)).toString());
++        setState(() => error = e is HealthFailure && e.status == 429
++            ? '这台设备的同一分类每分钟最多检查一次。'
++            : (e is HealthFailure ? e : const HealthFailure(0)).toString());
+       }
+     } finally {
+       if (mounted && epoch == run) setState(() => busy = false);
+@@ -93,38 +130,59 @@ class _HealthDeviceViewState extends State<HealthDeviceView> {
+             row?.updated?.toLocal().toString().split('.').first ?? '—';
+         final reasons =
+             level == 'unknown' ? '' : row!.reasons.map(reasonText).join('、');
++        final groups = <String, List<Map<String, dynamic>>>{};
++        if (widget.checks && resultScope == store.scopeRevision) {
++          for (final item in (result?['results'] as List? ?? [])
++              .whereType<Map<String, dynamic>>()) {
++            final type = resultTypes[item['inventory_id']];
++            final group = type != null ? checkCategoryForType(type) : '';
++            (groups[group] ??= []).add(item);
++          }
++        }
+         return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+-          Text('设备健康 · $label${reasons.isEmpty ? '' : ' · $reasons'}',
+-              style: TextStyle(color: color, fontWeight: FontWeight.w600)),
+-          Text('最后更新 $updated', style: Theme.of(context).textTheme.bodySmall),
++          if (!widget.checks) ...[
++            Text('设备健康 · $label${reasons.isEmpty ? '' : ' · $reasons'}',
++                style: TextStyle(color: color, fontWeight: FontWeight.w600)),
++            Text('最后更新 $updated', style: Theme.of(context).textTheme.bodySmall),
++          ],
+           if (widget.checks)
+-            TextButton(
+-                onPressed: !busy && row != null && store.available ? run : null,
+-                child: Text(busy ? '检查中…' : 'ping 全部')),
++            Wrap(children: [
++              for (final category in widget.categories)
++                TextButton(
++                    onPressed: !busy && row != null && store.available
++                        ? () => run(category)
++                        : null,
++                    child: Text(checkCategoryLabel(category, widget.language))),
++            ]),
++          if (widget.checks && busy) const LinearProgressIndicator(),
+           if (row != null &&
+               widget.checks &&
+               resultScope == store.scopeRevision) ...[
+             if (error != null) Text(error!),
+             if (result?['state'] == 'cancelled') const Text('检查已取消。'),
+             if (result?['state'] == 'timeout') const Text('检查超时。'),
+-            for (final item in (result?['results'] as List? ?? [])
+-                .cast<Map<String, dynamic>>())
+-              QuickCheckResultLine(
+-                  item, supportCheckLabels[item['outcome']] ?? '未知',
+-                  showIp: true,
+-                  onDetails: () => showStoreCheckDetails(
+-                      context,
+-                      store,
+-                      device,
+-                      SupportCheckSource.agent,
+-                      item,
+-                      result!,
+-                      () =>
+-                          mounted &&
+-                          widget.store == store &&
+-                          widget.id == device &&
+-                          resultScope == store.scopeRevision &&
+-                          widget.checks)),
++            for (final group in ['printers', 'payment', 'devices', ''])
++              if (groups[group] case final items?) ...[
++                Text(_checkGroup(group, widget.language),
++                    style: Theme.of(context).textTheme.titleSmall),
++                for (final item in items)
++                  QuickCheckResultLine(
++                      item, supportCheckLabels[item['outcome']] ?? '未知',
++                      showIp: true,
++                      onDetails: () => showStoreCheckDetails(
++                          context,
++                          store,
++                          device,
++                          SupportCheckSource.agent,
++                          item,
++                          result!,
++                          () =>
++                              mounted &&
++                              widget.store == store &&
++                              widget.id == device &&
++                              resultScope == store.scopeRevision &&
++                              widget.checks)),
++              ],
+           ]
+         ]);
+       });
+diff --git a/flutter/lib/steaddesk/quick/support.dart b/flutter/lib/steaddesk/quick/support.dart
+index 806f8df..6dea0b4 100644
+--- a/flutter/lib/steaddesk/quick/support.dart
++++ b/flutter/lib/steaddesk/quick/support.dart
+@@ -4,6 +4,8 @@ import '../ops_health.dart';
+ import 'check.dart';
+ import 'result_line.dart';
+ import 'managed_inventory.dart';
++import '../check_categories.dart';
++import '../ops_health_widgets.dart' show HealthDeviceView;
+ 
+ const supportQuickEnabled = true;
+ Widget storeInventory(HealthStore store, String device,
+@@ -26,6 +28,7 @@ class _StoreView extends StatefulWidget {
+ class _StoreViewState extends State<_StoreView> {
+   List<Json> entries = [];
+   List<InventoryDraft> suggestions = [];
++  List<String> categories = [];
+   Json policy = {};
+   String get language => widget.language.isEmpty
+       ? Localizations.localeOf(context).languageCode
+@@ -57,6 +60,7 @@ class _StoreViewState extends State<_StoreView> {
+       policy = {};
+       entries = [];
+       suggestions = [];
++      categories = [];
+     });
+     try {
+       final data = await Future.wait([
+@@ -71,6 +75,11 @@ class _StoreViewState extends State<_StoreView> {
+             throw const FormatException();
+           }
+           policy = data[0];
++          final offered = data[1]['categories'];
++          if (offered is List && policy['allowed'] == true) {
++            categories = availableCheckCategories(entries.map((row) => row['type'] as String))
++                .where(offered.contains).toList();
++          }
+           if (policy['can_edit'] == true &&
+               validId(policy['store_id']) &&
+               data[1]['store_id'] == policy['store_id']) {
+@@ -174,6 +183,16 @@ class _StoreViewState extends State<_StoreView> {
+                     onPressed: entries.length < 32 ? () => edit() : null,
+                     icon: const Icon(Icons.add),
+                     label: const Text('新增设备'))),
++          if (current && categories.isNotEmpty)
++            HealthDeviceView(
++              key: ValueKey((widget.store, widget.device, scopeRevision)),
++              store: widget.store,
++              id: widget.device,
++              checks: true,
++              categories: categories,
++              language: language,
++              itemTypes: {for (final row in entries) row['id'] as String: row['type'] as String},
++            ),
+           if (editable && suggestions.isNotEmpty) ...[
+             Text(inventoryLabel('suggestions', language),
+                 style: Theme.of(context).textTheme.titleMedium),
+diff --git a/flutter/lib/steaddesk/toolbar/actions.dart b/flutter/lib/steaddesk/toolbar/actions.dart
+index 99206d3..c046dda 100644
+--- a/flutter/lib/steaddesk/toolbar/actions.dart
++++ b/flutter/lib/steaddesk/toolbar/actions.dart
+@@ -3,6 +3,7 @@ import 'dart:math' as math;
+ import 'dart:typed_data';
+ import 'package:crypto/crypto.dart';
+ import 'package:uuid/uuid.dart';
++import '../check_categories.dart';
+ 
+ typedef ToolbarJson = Map<String, dynamic>;
+ typedef ToolbarRequest = Future<ToolbarJson>
+@@ -37,14 +38,18 @@ String toolbarSessionRoute(
+ const chunkSize = 32768;
+ Future<void> submitToolbarAction(ToolbarRequest request, String route,
+     ToolbarAction action, bool Function() current,
+-    {String? ticket, Uint8List? png}) async {
++    {String? ticket, Uint8List? png, String? category}) async {
+   void check() {
+     if (!current()) throw const FormatException('会话或登录状态已变化。');
+   }
+ 
+   check();
++  if (category != null && (action != ToolbarAction.quick || !checkCategoryIds.contains(category))) {
++    throw const FormatException('无效的检查分类。');
++  }
+   final body = <String, dynamic>{
+     'action': action.wire,
++    if (category != null) 'category': category,
+     if (ticket != null) 'ticket_id': ticket,
+   };
+   if (action == ToolbarAction.screenshot) {
+diff --git a/flutter/lib/steaddesk/toolbar/category_menu.dart b/flutter/lib/steaddesk/toolbar/category_menu.dart
+new file mode 100644
+index 0000000..860c169
+--- /dev/null
++++ b/flutter/lib/steaddesk/toolbar/category_menu.dart
+@@ -0,0 +1,48 @@
++import 'package:flutter/material.dart';
++import '../check_categories.dart';
++import 'actions.dart';
++
++class CategoryToolbarPopup extends StatelessWidget {
++  final List<String> categories;
++  final String language, tooltip;
++  final bool enabled;
++  final Widget child;
++  final PopupMenuItemBuilder<Object> itemBuilder;
++  final ValueChanged<Object> onSelected;
++  final ValueChanged<String> onQuick;
++  const CategoryToolbarPopup(
++      {super.key,
++      required this.categories,
++      required this.language,
++      required this.tooltip,
++      required this.enabled,
++      required this.child,
++      required this.itemBuilder,
++      required this.onSelected,
++      required this.onQuick});
++  @override
++  Widget build(BuildContext context) => PopupMenuButton<Object>(
++        enabled: enabled,
++        tooltip: tooltip,
++        child: child,
++        onSelected: (value) {
++          if (value is String && checkCategoryIds.contains(value)) {
++            if (categories.contains(value)) onQuick(value);
++          } else {
++            onSelected(value);
++          }
++        },
++        itemBuilder: (context) => [
++          for (final entry in itemBuilder(context))
++            if (entry is PopupMenuItem<Object> &&
++                entry.value == ToolbarAction.quick)
++              for (final category in categories)
++                PopupMenuItem<Object>(
++                    value: category,
++                    enabled: entry.enabled,
++                    child: Text(checkCategoryLabel(category, language)))
++            else
++              entry,
++        ],
++      );
++}
+diff --git a/flutter/lib/steaddesk/toolbar/host.dart b/flutter/lib/steaddesk/toolbar/host.dart
+index 165a477..e3404cd 100644
+--- a/flutter/lib/steaddesk/toolbar/host.dart
++++ b/flutter/lib/steaddesk/toolbar/host.dart
+@@ -14,6 +14,8 @@ import '../fixed/support_dialogs.dart';
+ import '../quick/result_line.dart';
+ import '../quick/support_detail.dart';
+ import 'actions.dart';
++import '../check_categories.dart';
++import 'category_menu.dart';
+ import 'frame.dart';
+ export 'frame.dart' show ToolbarFrame;
+ part 'archive.dart';
+@@ -96,6 +98,7 @@ class _ToolbarState extends State<_Toolbar> {
+   String? route, ticket, error;
+   bool authorized = false, reading = false, busy = false;
+   List<ToolbarJson> history = [];
++  List<String> quickCategories = [];
+   List<FixedOption>? options;
+   String? supportPeer;
+   late final Timer timer;
+@@ -180,6 +183,8 @@ class _ToolbarState extends State<_Toolbar> {
+       if (current && !busy) {
+         final actions = List<ToolbarJson>.from(result['actions'] as List);
+         setState(() {
++          final offered = result['quick_categories'];
++          quickCategories = offered is List ? checkCategoryIds.where(offered.contains).toList() : [];
+           if (!authorized) error = null;
+           authorized = true;
+           history = actions
+@@ -219,7 +224,7 @@ class _ToolbarState extends State<_Toolbar> {
+     }
+   }
+ 
+-  Future<void> run(ToolbarAction action) async {
++  Future<void> run(ToolbarAction action, {String? category}) async {
+     if (!widget.read || !authorized || !current || busy) return;
+     final allowed = widget.screenshotAllowed;
+     bool valid() =>
+@@ -238,7 +243,7 @@ class _ToolbarState extends State<_Toolbar> {
+           ? await widget.frame.capture(valid)
+           : null;
+       await submitToolbarAction(request, route!, action, valid,
+-          ticket: ticket, png: png);
++          ticket: ticket, png: png, category: category);
+     } catch (e) {
+       if (mounted) setState(() => error = message(e));
+     } finally {
+@@ -362,7 +367,13 @@ class _ToolbarState extends State<_Toolbar> {
+   @override
+   Widget build(BuildContext context) {
+     final ready = authorized && current && !busy;
+-    final menu = PopupMenuButton<Object>(
++    final savedLanguage = bind.mainGetLocalOption(key: 'lang');
++    final language = savedLanguage.isEmpty ? Localizations.localeOf(context).languageCode : savedLanguage;
++    final menu = CategoryToolbarPopup(
++        categories: quickCategories, language: language,
++        onQuick: (category) {
++          if (quickCategories.contains(category)) run(ToolbarAction.quick, category: category);
++        },
+         enabled: ready,
+         tooltip: '会话快捷操作',
+         onSelected: (value) {
+@@ -396,7 +407,7 @@ class _ToolbarState extends State<_Toolbar> {
+                     ? widget.fixed
+                     : widget.read)) ...[
+               Text(
+-                  '${_actionLabel(row['action'])} · ${_states[row['state']] ?? row['state']}'),
++                  '${row['action'] == 'quick_check' && checkCategoryIds.contains(row['category']) ? checkCategoryLabel(row['category'], language) : _actionLabel(row['action'])} · ${_states[row['state']] ?? row['state']}'),
+               Text(
+                   "${row['case_kind'] == 'pending' ? '待补结案' : '关联工单'} · ${row['case_id']}"),
+               if (row['target_label'] is String)
+diff --git a/flutter/test/steaddesk/category_support_test.dart b/flutter/test/steaddesk/category_support_test.dart
+new file mode 100644
+index 0000000..e36efae
+--- /dev/null
++++ b/flutter/test/steaddesk/category_support_test.dart
+@@ -0,0 +1,163 @@
++import 'package:flutter/material.dart';
++import 'package:flutter_test/flutter_test.dart';
++import 'package:flutter_hbb/steaddesk/ops_health.dart';
++import 'package:flutter_hbb/steaddesk/check_categories.dart';
++import 'package:flutter_hbb/steaddesk/quick/check.dart' show Json;
++import 'package:flutter_hbb/steaddesk/quick/support.dart';
++import 'package:flutter_hbb/steaddesk/toolbar/actions.dart';
++import 'package:flutter_hbb/steaddesk/toolbar/category_menu.dart';
++
++class _Api extends Fake implements HealthApi {
++  List<String>? capabilities = checkCategoryIds;
++  final categories = <String>[];
++  final kinds = ['printer', 'payment', 'kds'];
++  late final entries = [
++    for (int i = 0; i < kinds.length; i++)
++      {
++        'id': 'r$i',
++        'name': 'Fixture $i',
++        'ip': '10.2.1.${i + 1}',
++        'type': kinds[i],
++        'model': ''
++      },
++  ];
++  @override
++  Future<Json> request(String method, String route, [Json? body]) async {
++    if (method == 'GET' && route.endsWith('/check-policy')) {
++      return {'store_id': 'demo', 'can_edit': false, 'allowed': true};
++    }
++    if (method == 'GET' && route.endsWith('/inventory')) {
++      return {
++        'entries': entries,
++        if (capabilities != null) 'categories': capabilities
++      };
++    }
++    if (method == 'POST' && route.endsWith('/checks')) {
++      expect(body!.keys, ['category']);
++      categories.add(body['category']);
++      return {'id': 'job'};
++    }
++    if (method == 'GET' && route.endsWith('/checks/job')) {
++      return {
++        'id': 'job',
++        'state': 'completed',
++        'category': categories.last,
++        'results': [
++          for (final row in entries)
++            if (categories.last == 'all' ||
++                checkCategoryForType(row['type']!) == categories.last)
++              {
++                'inventory_id': row['id'],
++                'name': row['name'],
++                'ip': row['ip'],
++                'outcome': 'reachable',
++                'latency_ms': 3
++              }
++        ]
++      };
++    }
++    throw StateError('Unexpected request');
++  }
++}
++
++void main() {
++  testWidgets(
++      'device inventory sends the chosen category, groups rows and hides absent categories',
++      (t) async {
++    final api = _Api();
++    final store = HealthStore(api, isCurrent: () => true)..available = true;
++    store.devices['demo'] = DeviceHealth.from(
++        {'device_id': 'demo', 'status': 'normal', 'reasons': []});
++    await t.pumpWidget(MaterialApp(
++        home:
++            Scaffold(body: storeInventory(store, 'demo', language: 'es-MX'))));
++    await t.pumpAndSettle();
++    for (final category in checkCategoryIds) {
++      final button =
++          find.widgetWithText(TextButton, checkCategoryLabel(category, 'es'));
++      expect(button, findsOneWidget);
++      await t.ensureVisible(button);
++      await t.tap(button);
++      await t.pumpAndSettle();
++      expect(api.categories.last, category);
++    }
++    for (final group in [
++      'Impresoras',
++      'Terminales de pago',
++      'Equipos de la tienda'
++    ]) {
++      expect(find.text(group), findsOneWidget);
++    }
++    api.entries.removeWhere((r) => r['type'] == 'payment');
++    final reload = find.text('刷新设备表');
++    await t.ensureVisible(reload);
++    await t.tap(reload);
++    await t.pumpAndSettle();
++    expect(find.text('Revisar terminales de pago'), findsNothing);
++    api.capabilities = null;
++    await t.tap(reload);
++    await t.pumpAndSettle();
++    expect(find.text('Revisar todo'), findsNothing);
++    expect(api.categories, checkCategoryIds);
++  });
++  testWidgets(
++      'session popup expands only approved categories, retains viewer gate and posts no targets',
++      (t) async {
++    final bodies = <Json>[];
++    var operator = true;
++    Future<void> show(List<String> categories) async {
++      await t.pumpWidget(MaterialApp(
++          home: Scaffold(
++              body: CategoryToolbarPopup(
++        categories: categories,
++        language: 'en_US',
++        tooltip: 'Actions',
++        enabled: true,
++        child: const Text('Menu'),
++        onSelected: (_) => fail('Unexpected legacy action'),
++        onQuick: (category) => submitToolbarAction((method, path,
++                [body]) async {
++          expect(method, 'POST');
++          expect(path, 'toolbar/demo/session');
++          bodies.add(body!);
++          return {};
++        }, 'toolbar/demo/session', ToolbarAction.quick, () => operator,
++            category: category),
++        itemBuilder: (_) => [
++          PopupMenuItem<Object>(
++              value: ToolbarAction.quick,
++              enabled: operator,
++              child: const Text('Legacy quick check')),
++          const PopupMenuItem<Object>(
++              value: ToolbarAction.logs, child: Text('Logs')),
++        ],
++      ))));
++      await t.pumpAndSettle();
++      await t.tap(find.text('Menu'));
++      await t.pumpAndSettle();
++    }
++
++    await show(['printers', 'all']);
++    expect(find.text('Check card terminals'), findsNothing);
++    expect(find.text('Logs'), findsOneWidget);
++    await t.tap(find.text('Check printers'));
++    await t.pumpAndSettle();
++    expect(bodies, [
++      {'action': 'quick_check', 'category': 'printers'}
++    ]);
++    operator = false;
++    await show(['all']);
++    expect(
++        t
++            .widget<PopupMenuItem<Object>>(
++                find.widgetWithText(PopupMenuItem<Object>, 'Check all'))
++            .enabled,
++        isFalse);
++    await t.tapAt(const Offset(780, 580));
++    await t.pumpAndSettle();
++    await show([]);
++    expect(find.text('Check all'), findsNothing);
++    expect(find.text('Legacy quick check'), findsNothing);
++    expect(bodies, hasLength(1));
++  });
++}
+diff --git a/flutter/test/steaddesk/ops_health_test.dart b/flutter/test/steaddesk/ops_health_test.dart
+index 1151fa6..c5d1939 100644
+--- a/flutter/test/steaddesk/ops_health_test.dart
++++ b/flutter/test/steaddesk/ops_health_test.dart
+@@ -57,6 +57,7 @@ class FakeApi implements HealthApi {
+         'results': [
+           {
+             'name': '测试打印机',
++            'inventory_id': 'demo',
+             'ip': '192.168.50.1',
+             'outcome': jobState == 'timeout' ? 'timeout' : 'reachable',
+             'latency_ms': jobState == 'timeout' ? null : 12
+@@ -175,19 +176,22 @@ void main() {
+     await tester.pumpWidget(MaterialApp(
+         home: Scaffold(
+             body: HealthDeviceView(
+-                store: store, id: '123456789', checks: true))));
+-    expect(find.textContaining('商户手动停止'), findsOneWidget);
+-    expect(find.textContaining('2026'), findsOneWidget);
++                store: store,
++                id: '123456789',
++                checks: true,
++                categories: const ['printers', 'all'],
++                itemTypes: const {'demo': 'printer'}))));
++    expect(find.text('检查打印机'), findsOneWidget);
+     for (final state in ['completed', 'timeout']) {
+       api.jobState = state;
+-      await tester.tap(find.text('ping 全部'));
++      await tester.tap(find.text('全部检查').first);
+       await tester.pumpAndSettle();
+       expect(find.textContaining('192.168.50.1'), findsOneWidget);
+       expect(find.textContaining(state == 'timeout' ? '超时' : '12 ms'),
+           findsWidgets);
+     }
+     api.failure = 429;
+-    await tester.tap(find.text('ping 全部'));
++    await tester.tap(find.text('全部检查').first);
+     await tester.pumpAndSettle();
+     expect(find.textContaining('每分钟'), findsOneWidget);
+     store.dispose();

@@ -1,0 +1,612 @@
+diff --git a/flutter/lib/steaddesk/check_categories.dart b/flutter/lib/steaddesk/check_categories.dart
+new file mode 100644
+index 0000000..4cdf69f
+--- /dev/null
++++ b/flutter/lib/steaddesk/check_categories.dart
+@@ -0,0 +1,39 @@
++const checkCategoryIds = ['printers', 'payment', 'devices', 'all'];
++
++String checkCategoryForType(String type) => switch (type) {
++      'printer' => 'printers',
++      'payment' => 'payment',
++      _ => 'devices',
++    };
++
++List<String> availableCheckCategories(Iterable<String> types) {
++  final categories = types.map(checkCategoryForType).toSet();
++  return [
++    for (final id in checkCategoryIds)
++      if (categories.contains(id) || (id == 'all' && categories.isNotEmpty)) id,
++  ];
++}
++
++String checkCategoryLabel(String category, String language) {
++  final labels = switch (language.toLowerCase().split(RegExp('[-_]')).first) {
++    'zh' => const {
++        'printers': '检查打印机',
++        'payment': '检查刷卡机',
++        'devices': '检查店内设备',
++        'all': '全部检查',
++      },
++    'es' => const {
++        'printers': 'Revisar impresoras',
++        'payment': 'Revisar terminales de pago',
++        'devices': 'Revisar equipos de la tienda',
++        'all': 'Revisar todo',
++      },
++    _ => const {
++        'printers': 'Check printers',
++        'payment': 'Check card terminals',
++        'devices': 'Check store devices',
++        'all': 'Check all',
++      },
++  };
++  return labels[category]!;
++}
+diff --git a/flutter/lib/steaddesk/help_signer.dart b/flutter/lib/steaddesk/help_signer.dart
+index 50f0398..46d1195 100644
+--- a/flutter/lib/steaddesk/help_signer.dart
++++ b/flutter/lib/steaddesk/help_signer.dart
+@@ -24,7 +24,7 @@ class MerchantHelpSigner {
+ 
+   Map<String, String> signQuickCheck(
+       String operation, int keyVersion, Map<String, dynamic> body) {
+-    if (!const {'identity', 'inventory', 'report', 'features'}.contains(operation)) {
++    if (!const {'identity', 'inventory', 'start', 'report', 'features'}.contains(operation)) {
+       throw ArgumentError('Unsupported merchant check operation');
+     }
+     return _quickCheckCall(operation, keyVersion, body);
+diff --git a/flutter/lib/steaddesk/quick/check.dart b/flutter/lib/steaddesk/quick/check.dart
+index 66a3789..971fa88 100644
+--- a/flutter/lib/steaddesk/quick/check.dart
++++ b/flutter/lib/steaddesk/quick/check.dart
+@@ -2,6 +2,8 @@ import 'dart:async';
+ import 'dart:convert';
+ import 'dart:io';
+ 
++import '../check_categories.dart';
++
+ typedef Json = Map<String, dynamic>;
+ typedef CheckScope = ({Uri origin, String device, String binding});
+ typedef CheckOutcome = ({
+@@ -107,6 +109,7 @@ class MerchantChecks {
+             ? (() => DateTime.now().millisecondsSinceEpoch)
+             : (() => clock() * 1000);
+ 
++  List<String> approvedCategories = const [];
+   DateTime? approvedUntil;
+   String delivery = 'Check report pending upload.';
+   static final _busy = <String>{};
+@@ -123,6 +126,7 @@ class MerchantChecks {
+       lock = await File('$path.lock').open(mode: FileMode.append);
+       await lock.lock(FileLock.exclusive);
+       approvedUntil = null;
++      approvedCategories = const [];
+       final owner = await scope();
+       Json state = {};
+       if (await journal.exists()) {
+@@ -138,7 +142,12 @@ class MerchantChecks {
+                 state['device'] == owner.device
+             ? state['last']
+             : null;
++        final previousRates = state['origin'] == owner.origin.origin &&
++                state['device'] == owner.device
++            ? state['category_rates']
++            : null;
+         state = {
++          if (previousRates is Json) 'category_rates': previousRates,
+           if (last is int) 'last': last,
+           'origin': owner.origin.origin,
+           'device': owner.device,
+@@ -178,7 +187,8 @@ class MerchantChecks {
+     return answer;
+   }
+ 
+-  Json _snapshot(dynamic data, CheckScope owner, {bool fresh = false}) {
++  Json _snapshot(dynamic data, CheckScope owner,
++      {bool fresh = false, String category = 'all'}) {
+     final now = clock();
+     if (data is! Json ||
+         data['device_id'] != owner.device ||
+@@ -193,12 +203,22 @@ class MerchantChecks {
+       throw const CheckFailure(
+           'Store approval is missing or the offline inventory expired.');
+     }
++    final entries = inventoryEntries(data['entries']);
++    if (data.containsKey('category') && data['category'] != category ||
++        category != 'all' &&
++            (data['category'] != category ||
++                entries.any(
++                    (row) => checkCategoryForType(row['type']) != category))) {
++      throw const FormatException('设备表分类无效');
++    }
+     return {
++      if (data.containsKey('category')) 'category': data['category'],
++      if (data.containsKey('categories')) 'categories': data['categories'],
+       for (final key in ['device_id', 'store_id', 'allowed', 'revision'])
+         key: data[key],
+       if (data['probe_details'] == true) 'probe_details': true,
+       'expires_at': (data['expires_at'] as int).clamp(now + 1, now + 900),
+-      'entries': inventoryEntries(data['entries'])
++      'entries': entries
+     };
+   }
+ 
+@@ -232,6 +252,22 @@ class MerchantChecks {
+       await _save(state);
+       final snapshot = state['inventory'];
+       if (snapshot != null && (snapshot['entries'] as List).isNotEmpty) {
++        final advertised = snapshot['categories'];
++        if (advertised == null && !snapshot.containsKey('category')) {
++          // Old servers issue only the all-inventory lease.
++          approvedCategories = const ['all'];
++        } else {
++          final local = availableCheckCategories(
++              (snapshot['entries'] as List<Json>)
++                  .map((row) => row['type'] as String));
++          if (snapshot['category'] != 'all' ||
++              advertised is! List ||
++              advertised.length != local.length ||
++              !local.every(advertised.contains)) {
++            throw const FormatException('分类清单无效');
++          }
++          approvedCategories = local;
++        }
+         approvedUntil =
+             DateTime.fromMillisecondsSinceEpoch(snapshot['expires_at'] * 1000);
+       }
+@@ -301,13 +337,22 @@ class MerchantChecks {
+         }
+       });
+ 
+-  Future<List<Json>> run() => _withState((owner, state) async {
++  Future<List<Json>> run([String category = 'all']) =>
++      _withState((owner, state) async {
++        if (!checkCategoryIds.contains(category)) {
++          throw const CheckFailure('Invalid check category.');
++        }
+         if (!await _refresh(owner, state)) {
+           throw const CheckFailure(
+               'Cannot check now. Verify the device configuration and try again.');
+         }
+-        final inventory = _snapshot(state['inventory'], owner);
+-        final last = state['last'] as int?;
++        var inventory = _snapshot(state['inventory'], owner);
++        if (!approvedCategories.contains(category)) {
++          throw const CheckFailure('No registered devices at this store.');
++        }
++        final rates = state['category_rates'] as Json? ?? <String, dynamic>{};
++        final last = (rates[category] ??
++            (category == 'all' ? state['last'] : null)) as int?;
+         if (last != null && rateClock() - last < 60000) {
+           throw const CheckRateLimit();
+         }
+@@ -325,8 +370,30 @@ class MerchantChecks {
+           throw const CheckFailure(
+               'Pending reports are full. Reconnect before checking again.');
+         }
++        final categorized = inventory.containsKey('category');
++        if (categorized) {
++          try {
++            final selected = await _call(owner, 'start',
++                state['version'] as int, {'category': category});
++            if (selected['category'] != category ||
++                selected['store_id'] != inventory['store_id']) {
++              throw const CheckFailure(
++                  'The device identity changed. Start a new check.');
++            }
++            inventory =
++                _snapshot(selected, owner, fresh: true, category: category);
++            if ((inventory['entries'] as List).isEmpty) {
++              throw const CheckFailure('No registered devices at this store.');
++            }
++          } on CheckFailure catch (e) {
++            if (e.status == 429) throw const CheckRateLimit();
++            rethrow;
++          }
++        }
+         final started = clock();
+-        state['last'] = rateClock();
++        rates[category] = rateClock();
++        state['category_rates'] = rates;
++        if (category == 'all') state['last'] = rates[category];
+         await _save(state);
+         final rows = <Json>[], results = <Json>[];
+         for (final entry in inventory['entries'] as List<Json>) {
+@@ -351,6 +418,7 @@ class MerchantChecks {
+         }
+         await _same(owner);
+         final report = {
++          if (categorized) 'category': category,
+           'revision': inventory['revision'],
+           'observed_at': started,
+           'results': results
+diff --git a/flutter/lib/steaddesk/quick/http.dart b/flutter/lib/steaddesk/quick/http.dart
+index 869ef89..cbaf10a 100644
+--- a/flutter/lib/steaddesk/quick/http.dart
++++ b/flutter/lib/steaddesk/quick/http.dart
+@@ -15,7 +15,7 @@ Future<Json> signedQuickCall(CheckScope scope, String op, int version,
+   }
+   final route = switch (op) {
+     'identity' => 'update-identity',
+-    'inventory' => 'check-inventory',
++    'inventory' || 'start' => 'check-inventory',
+     'features' => 'store-features',
+     'report' => 'check-reports',
+     _ => throw StateError('Unknown check operation')
+@@ -25,11 +25,12 @@ Future<Json> signedQuickCall(CheckScope scope, String op, int version,
+     ..connectionTimeout = const Duration(seconds: 4)
+     ..findProxy = (_) => 'DIRECT';
+   Future<Json> send() async {
+-    final req = await client.openUrl(op == 'report' ? 'POST' : 'GET',
+-        scope.origin.resolve('/ops/v1/device/$route'));
++    final post = op == 'report' || op == 'start';
++    final req = await client.openUrl(
++        post ? 'POST' : 'GET', scope.origin.resolve('/ops/v1/device/$route'));
+     req.followRedirects = false;
+     headers.forEach((k, v) => req.headers.set(k, v));
+-    if (op == 'report') {
++    if (post) {
+       req.headers.contentType = ContentType.json;
+       final bytes = utf8.encode(jsonEncode(body));
+       req.contentLength = bytes.length;
+diff --git a/flutter/lib/steaddesk/quick/merchant.dart b/flutter/lib/steaddesk/quick/merchant.dart
+index 9b0acad..7e6d53e 100644
+--- a/flutter/lib/steaddesk/quick/merchant.dart
++++ b/flutter/lib/steaddesk/quick/merchant.dart
+@@ -7,6 +7,7 @@ import '../../models/native_model.dart' show PlatformFFI;
+ import '../../models/platform_model.dart' show bind;
+ import '../help/merchant_help_client.dart' show configuredHelpOrigin;
+ import 'check.dart';
++import '../check_categories.dart';
+ import 'probe.dart';
+ import 'result_line.dart';
+ import 'merchant_detail.dart';
+@@ -79,7 +80,8 @@ class _MerchantQuickState extends State<MerchantQuickEntry>
+     if (state == null || state == AppLifecycleState.resumed) schedule();
+   }
+ 
+-  void schedule({bool run = false}) {
++  void schedule({String? category}) {
++    final run = category != null;
+     if (run && (!visible || busy)) return;
+     final ticket = ++generation;
+     if (!run) expiry?.cancel();
+@@ -100,7 +102,7 @@ class _MerchantQuickState extends State<MerchantQuickEntry>
+         final checks = client ??= await widget.open();
+         if (!mounted || ticket != generation) return;
+         if (run) {
+-          result = await checks.run();
++          result = await checks.run(category);
+           message = checks.delivery;
+         } else {
+           await checks.sync();
+@@ -170,11 +172,19 @@ class _MerchantQuickState extends State<MerchantQuickEntry>
+   Widget build(BuildContext context) => !visible
+       ? const SizedBox.shrink()
+       : Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+-          TextButton.icon(
+-              onPressed: busy ? null : () => schedule(run: true),
+-              icon: const Icon(Icons.network_check),
+-              label: Text(widget.label(
+-                  busy ? 'Checking registered devices…' : 'Quick check'))),
++          Wrap(children: [
++            for (final category
++                in client?.approvedCategories ?? const <String>[])
++              TextButton.icon(
++                  onPressed: busy ? null : () => schedule(category: category),
++                  icon: const Icon(Icons.network_check),
++                  label: Text(checkCategoryLabel(
++                      category,
++                      widget.language.isEmpty
++                          ? Platform.localeName
++                          : widget.language))),
++          ]),
++          if (busy) Text(widget.label('Checking registered devices…')),
+           if (notice != null) Text(widget.label(notice!)),
+           if (rows.any((r) => r['type'] == 'payment'))
+             Text(widget.label('Payment devices use ping only.')),
+diff --git a/flutter/test/steaddesk/merchant_quick_gate_test.dart b/flutter/test/steaddesk/merchant_quick_gate_test.dart
+index 511dbc8..9023a83 100644
+--- a/flutter/test/steaddesk/merchant_quick_gate_test.dart
++++ b/flutter/test/steaddesk/merchant_quick_gate_test.dart
+@@ -21,10 +21,11 @@ class _Checks extends MerchantChecks {
+   Future<void> sync() async {
+     reads++;
+     approvedUntil = await fetch();
++    approvedCategories = approvedUntil == null ? [] : ['devices', 'all'];
+   }
+ 
+   @override
+-  Future<List<Json>> run() async {
++  Future<List<Json>> run([String category = 'all']) async {
+     await sync();
+     if (approvedUntil == null) throw const CheckFailure('unavailable');
+     return [];
+@@ -52,7 +53,7 @@ void main() {
+         return null;
+       });
+       await mount(t, checks);
+-      expect(find.text('Quick check'), findsNothing);
++      expect(find.text('Check all'), findsNothing);
+       for (var i = 0; i < 3; i++) {
+         await t.pump(const Duration(minutes: 1));
+       }
+@@ -67,23 +68,23 @@ void main() {
+     final first = Completer<DateTime?>();
+     final checks = _Checks(() => first.future);
+     await mount(t, checks);
+-    expect(find.text('Quick check'), findsNothing);
++    expect(find.text('Check all'), findsNothing);
+     t.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+     first.complete(DateTime.now().add(const Duration(minutes: 15)));
+     await t.pump();
+-    expect(find.text('Quick check'), findsNothing);
++    expect(find.text('Check all'), findsNothing);
+     final second = Completer<DateTime?>();
+     checks.fetch = () => second.future;
+     t.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+     await t.pump();
+-    expect(find.text('Quick check'), findsNothing);
++    expect(find.text('Check all'), findsNothing);
+     second.complete(DateTime.now().add(const Duration(minutes: 15)));
+     await t.pumpAndSettle();
+-    expect(find.text('Quick check'), findsOneWidget);
++    expect(find.text('Check all'), findsOneWidget);
+     checks.fetch = () async => null;
+-    await t.tap(find.text('Quick check'));
++    await t.tap(find.text('Check all'));
+     await t.pumpAndSettle();
+-    expect(find.text('Quick check'), findsNothing);
++    expect(find.text('Check all'), findsNothing);
+     await t.pump(const Duration(minutes: 16));
+     expect(checks.reads, 3);
+     await t.pumpWidget(const SizedBox.shrink());
+@@ -95,13 +96,16 @@ void main() {
+     final checks =
+         _Checks(() async => DateTime.now().add(const Duration(minutes: 5)));
+     await mount(t, checks);
+-    expect(find.text('Quick check'), findsOneWidget);
++    expect(find.text('Check all'), findsOneWidget);
++    expect(find.text('Check store devices'), findsOneWidget);
++    expect(find.text('Check printers'), findsNothing);
++    expect(find.text('Check card terminals'), findsNothing);
+     await t.pump(const Duration(minutes: 1));
+     expect(checks.reads, 1);
+     checks.fetch = () async => null;
+     await t.pump(const Duration(minutes: 5));
+     await t.pump();
+-    expect(find.text('Quick check'), findsNothing);
++    expect(find.text('Check all'), findsNothing);
+     await t.pump(const Duration(minutes: 10));
+     expect(checks.reads, 2);
+     await t.pumpWidget(const SizedBox.shrink());
+diff --git a/flutter/test/steaddesk/quick_category_merchant_test.dart b/flutter/test/steaddesk/quick_category_merchant_test.dart
+new file mode 100644
+index 0000000..f717a8b
+--- /dev/null
++++ b/flutter/test/steaddesk/quick_category_merchant_test.dart
+@@ -0,0 +1,142 @@
++import 'dart:io';
++
++import 'package:flutter_test/flutter_test.dart';
++import 'package:flutter_hbb/steaddesk/check_categories.dart';
++import 'package:flutter_hbb/steaddesk/quick/check.dart';
++import 'package:flutter_hbb/steaddesk/quick/probe.dart';
++
++void main() {
++  final owner = (
++    origin: Uri.https('fixture.invalid'),
++    device: '123456789',
++    binding: 'test'
++  );
++  const kinds = [
++    'printer',
++    'payment',
++    'host',
++    'secondary',
++    'kiosk',
++    'order_display',
++    'kds',
++    'tablet',
++    'other',
++    'legacy_oven'
++  ];
++  final entries = <Json>[
++    for (var i = 0; i < kinds.length; i++)
++      {
++        'id': 'i_$i',
++        'name': kinds[i],
++        'model': 'fixture',
++        'type': kinds[i],
++        'ip': '192.168.7.${i + 1}',
++        'no_ping': kinds[i] == 'payment'
++      },
++  ];
++  late Directory dir;
++  late MerchantChecks checks;
++  late List<String> starts, probes, connections;
++  late List<Json> reports;
++  var now = 1800000000;
++  String? substitute;
++  bool denyStart = false;
++  setUp(() async {
++    dir = await Directory.systemTemp.createTemp('merchant-categories');
++    now = 1800000000;
++    substitute = null;
++    denyStart = false;
++    starts = [];
++    probes = [];
++    connections = [];
++    reports = [];
++    checks = MerchantChecks(File('${dir.path}/checks'), () async => owner,
++        (actual, op, version, body) async {
++      expect(actual, owner);
++      if (op == 'identity') return {'key_version': 3};
++      if (op == 'report') {
++        reports.add(body);
++        return {'state': 'completed', 'id': 'r_123'};
++      }
++      final cat = op == 'start' ? body['category'] as String : 'all';
++      if (op == 'start') {
++        starts.add(cat);
++        expect(body, {'category': cat});
++        if (denyStart) throw const CheckFailure('limited', 429);
++      } else {
++        expect(op, 'inventory');
++        expect(body, isEmpty);
++      }
++      final selected = (op == 'start' ? substitute : null) ?? cat;
++      return {
++        'device_id': owner.device,
++        'store_id': 's_42',
++        'allowed': true,
++        'probe_details': true,
++        'expires_at': now + 900,
++        'revision': 'a' * 64,
++        'category': cat,
++        'categories': checkCategoryIds,
++        'entries': entries
++            .where((e) =>
++                selected == 'all' ||
++                checkCategoryForType(e['type']) == selected)
++            .toList()
++      };
++    },
++        (row) => checkRegisteredDevice(row, ping: (ip) async {
++              probes.add(row['type']);
++              return 'timeout';
++            }, connect: (ip, port) async {
++              connections.add('$ip:$port');
++              return 'unreachable';
++            }),
++        clock: () => now);
++  });
++  tearDown(() => dir.delete(recursive: true));
++
++  test(
++      'each start sends only category, probes its lease and reports under that category',
++      () async {
++    await checks.sync();
++    expect(checks.approvedCategories, checkCategoryIds);
++    expect(starts, isEmpty);
++    for (final category in checkCategoryIds) {
++      probes.clear();
++      connections.clear();
++      final rows = await checks.run(category);
++      expect(
++          probes,
++          kinds.where(
++              (k) => category == 'all' || checkCategoryForType(k) == category));
++      expect(
++          connections,
++          ['printers', 'all'].contains(category)
++              ? ['192.168.7.1:9100', '192.168.7.1:515', '192.168.7.1:631']
++              : isEmpty);
++      if (category == 'payment') expect(rows.single['outcome'], 'undetectable');
++      expect(reports.last['category'], category);
++      expect((reports.last['results'] as List).map((r) => r['id']),
++          rows.map((r) => r['id']));
++      await expectLater(checks.run(category), throwsA(isA<CheckRateLimit>()));
++    }
++    expect(starts, checkCategoryIds);
++    now += 60;
++    await checks.run('printers');
++    expect(starts.last, 'printers');
++  });
++  test('wrong-category lease, unknown category and server quota never probe',
++      () async {
++    await expectLater(checks.run('unexpected'), throwsA(isA<CheckFailure>()));
++    expect(starts, isEmpty);
++    substitute = 'printers';
++    await expectLater(checks.run('payment'), throwsFormatException);
++    expect(probes, isEmpty);
++    expect(reports, isEmpty);
++    substitute = null;
++    denyStart = true;
++    await expectLater(checks.run('devices'), throwsA(isA<CheckRateLimit>()));
++    expect(probes, isEmpty);
++    expect(checks.approvedUntil, isNotNull);
++  });
++}
+diff --git a/src/steaddesk_check_signer.rs b/src/steaddesk_check_signer.rs
+index 34994b6..db13ad4 100644
+--- a/src/steaddesk_check_signer.rs
++++ b/src/steaddesk_check_signer.rs
+@@ -20,6 +20,8 @@ struct Input {
+ #[derive(Deserialize, Serialize)]
+ #[serde(deny_unknown_fields)]
+ struct Report {
++    #[serde(skip_serializing_if = "Option::is_none")]
++    category: Option<String>,
+     observed_at: u64,
+     results: Vec<Row>,
+     revision: String,
+@@ -38,6 +40,10 @@ struct Row {
+     ports: Option<BTreeMap<String, String>>,
+ }
+ 
++fn check_category(value: &str) -> bool {
++    matches!(value, "printers" | "payment" | "devices" | "all")
++}
++
+ fn probe_outcome(value: &str) -> bool {
+     matches!(value, "reachable" | "unreachable" | "timeout" | "unknown" | "not_attempted")
+ }
+@@ -58,9 +64,14 @@ fn proof(input: Input, device: &str, stamp: u64, nonce: &str) -> Option<Vec<u8>>
+         "inventory" if key_version > 0 && body == json!({}) => {
+             ("GET", "/ops/v1/device/check-inventory", body)
+         }
++        "start" if key_version > 0 && body.as_object()?.len() == 1
++            && check_category(body.get("category")?.as_str()?) => {
++            ("POST", "/ops/v1/device/check-inventory", body)
++        }
+         "report" if key_version > 0 => {
+             let report: Report = serde_json::from_value(body.clone()).ok()?;
+-            if report.observed_at == 0
++            if report.category.as_deref().map_or(false, |s| !check_category(s))
++                || report.observed_at == 0
+                 || report.revision.len() != 64
+                 || !report
+                     .revision
+@@ -111,7 +122,7 @@ fn proof(input: Input, device: &str, stamp: u64, nonce: &str) -> Option<Vec<u8>>
+ }
+ 
+ fn headers(input: Input) -> Option<Vec<u8>> {
+-    if !cfg!(steaddesk_qc_merchant) && matches!(input.operation.as_str(), "inventory" | "report") {
++    if !cfg!(steaddesk_qc_merchant) && matches!(input.operation.as_str(), "inventory" | "start" | "report") {
+         return None;
+     }
+     sodiumoxide::init().ok()?;
+@@ -195,6 +206,31 @@ mod tests {
+             "d2b1cbcf7970e701c5ec7262da9d1dbdc013d5e338cc305f50d318b7d2c347e6"
+         );
+     }
++    #[test]
++    fn category_lease_and_report_sign_only_fixed_server_operations() {
++        let report = json!({"observed_at": 1, "revision": "a".repeat(64),
++            "results": [{"id": "i", "latency_ms": 1, "outcome": "reachable"}]});
++        for category in ["printers", "payment", "devices", "all"] {
++            let body = json!({"category": category});
++            let bytes = canonical("start", 1, body.clone()).unwrap();
++            let envelope: Value = serde_json::from_slice(&bytes[b"SteadDesk-fleet-v1\0".len()..]).unwrap();
++            assert_eq!(envelope[0], "POST");
++            assert_eq!(envelope[1], "/ops/v1/device/check-inventory");
++            assert_eq!(envelope[2], body);
++            let mut body = report.clone();
++            body["category"] = json!(category);
++            assert!(canonical("report", 1, body).is_some());
++        }
++        for bad in [json!({}), json!({"category":"printers","ip":"10.0.0.1"}),
++                    json!({"category":"printers","ports":[1]}), json!({"category":"any"})] {
++            assert!(canonical("start", 1, bad).is_none());
++        }
++        assert!(canonical("start", 0, json!({"category":"all"})).is_none());
++        let mut bad = report;
++        bad["category"] = json!("unrecognized");
++        assert!(canonical("report", 1, bad).is_none());
++    }
++
+     #[test]
+     fn measured_report_interoperability_and_fixed_port_scope() {
+         let report = json!({
