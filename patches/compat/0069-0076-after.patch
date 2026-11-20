@@ -1,0 +1,47 @@
+diff --git a/flutter/lib/steaddesk/session_surface.dart b/flutter/lib/steaddesk/session_surface.dart
+--- a/flutter/lib/steaddesk/session_surface.dart
++++ b/flutter/lib/steaddesk/session_surface.dart
+@@ -237,7 +241,8 @@
+       final matches = controls.where((item) => item.action == action);
+       return MenuButton(
+           ffi: ffi,
+-          child: Text(translate(label)),
++          child: action == SessionAction.transfer && ffi.remoteRole?.viewOnly == true
++              ? Tooltip(message: '只看模式', child: Text(translate(label))) : Text(translate(label)),
+           onPressed: matches.isEmpty ? null : matches.first.onPressed);
+     }
+ 
+@@ -248,6 +253,7 @@
+           subtitle: session.ready ? subtitle : '',
+           translate: translate),
+       status: Row(children: [
++        if (ffi.remoteRole case final role?) RoleHeader(role),
+         if (session.ready)
+           Obx(() => ConnectionTypeState.find(session.id).secure.value !=
+                   ConnectionType.strSecure
+@@ -477,7 +483,7 @@
+         !model.viewOnly &&
+         versionCmp(model.pi.version, '1.2.7') >= 0;
+     return SessionAndroidNavigation(
+-        label: translate,
++        label: (label) => ffi.remoteRole?.viewOnly == true ? '只看模式' : translate(label),
+         enabled: enabled,
+         back: input.onMobileBack,
+         home: input.onMobileHome,
+@@ -487,7 +493,7 @@
+         power: PowerMenuButton(
+             visible:
+                 isWindows && supportPowerMenuEnabled && model.isPeerAndroid,
+-            tooltip: translate('Power menu'),
++            tooltip: ffi.remoteRole?.viewOnly == true ? '只看模式' : translate('Power menu'),
+             enabled: enabled,
+             activeConnection: () {
+               if (!model.isPeerAndroid ||
+@@ -497,6 +503,7 @@
+               return bind.sessionGetConnSessionId(sessionId: ffi.sessionId);
+             },
+             send: (connection, count) async {
++              if (ffi.remoteRole?.viewOnly == true) return;
+               final peer = input.id;
+               final session = ffi.sessionId.toString();
+               if (model.pi.platformAdditions['steaddesk_counted_power_menu'] ==

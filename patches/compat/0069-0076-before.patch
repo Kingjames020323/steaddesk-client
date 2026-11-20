@@ -1,0 +1,47 @@
+diff --git a/flutter/lib/steaddesk/session_surface.dart b/flutter/lib/steaddesk/session_surface.dart
+--- a/flutter/lib/steaddesk/session_surface.dart
++++ b/flutter/lib/steaddesk/session_surface.dart
+@@ -259,8 +255,7 @@
+       final matches = controls.where((item) => item.action == action);
+       return MenuButton(
+           ffi: ffi,
+-          child: action == SessionAction.transfer && ffi.remoteRole?.viewOnly == true
+-              ? Tooltip(message: '只看模式', child: Text(translate(label))) : Text(translate(label)),
++          child: Text(translate(label)),
+           onPressed: matches.isEmpty ? null : matches.first.onPressed);
+     }
+ 
+@@ -293,7 +288,6 @@
+                             mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                             children: [
+                               Row(children: [
+-                                if (ffi.remoteRole case final role?) RoleHeader(role),
+                                 if (session.ready)
+                                   Obx(() => ConnectionTypeState.find(session.id)
+                                               .secure
+@@ -559,7 +553,7 @@
+         versionCmp(model.pi.version, '1.2.7') >= 0;
+     Widget key(String label, IconData icon, VoidCallback press) => Expanded(
+         child: IconButton(
+-            tooltip: ffi.remoteRole?.viewOnly == true ? '只看模式' : translate(label),
++            tooltip: translate(label),
+             padding: EdgeInsets.zero,
+             constraints: const BoxConstraints(),
+             color: _ocean,
+@@ -577,7 +571,7 @@
+           key('Volume up', Icons.volume_up_outlined, input.onMobileVolumeUp),
+           PowerMenuButton(
+               visible: isWindows && supportPowerMenuEnabled && model.isPeerAndroid,
+-              tooltip: ffi.remoteRole?.viewOnly == true ? '只看模式' : translate('Power menu'),
++              tooltip: translate('Power menu'),
+               enabled: enabled,
+               activeConnection: () {
+                 if (!model.isPeerAndroid || !model.keyboard || model.viewOnly ||
+@@ -585,7 +579,6 @@
+                 return bind.sessionGetConnSessionId(sessionId: ffi.sessionId);
+               },
+               send: (connection, count) async {
+-                if (ffi.remoteRole?.viewOnly == true) return;
+                 final peer = input.id;
+                 final session = ffi.sessionId.toString();
+                 if (model.pi.platformAdditions['steaddesk_counted_power_menu'] == true) {
