@@ -1,0 +1,3825 @@
+diff --git a/flutter/lib/desktop/pages/file_manager_page.dart b/flutter/lib/desktop/pages/file_manager_page.dart
+index abdab4b..488a940 100644
+--- a/flutter/lib/desktop/pages/file_manager_page.dart
++++ b/flutter/lib/desktop/pages/file_manager_page.dart
+@@ -24,6 +24,7 @@ import 'package:flutter_hbb/web/dummy.dart'
+ 
+ import '../../consts.dart';
+ import '../../steaddesk/windows_volumes.dart';
++import '../../steaddesk/file_transfer_v10.dart';
+ import '../../steaddesk/merchant_build.dart' show merchantEdition;
+ import '../../desktop/widgets/material_mod_popup_menu.dart' as mod_menu;
+ import '../../common.dart';
+@@ -179,7 +180,7 @@ class _FileManagerPageState extends State<FileManagerPage>
+                   Flexible(flex: 2, child: statusList()),
+                 ])
+               : Theme(
+-                  data: MyTheme.lightTheme,
++                  data: merchantEdition ? MyTheme.lightTheme : Theme.of(context),
+                   child: _TransferWorkspace(
+                     local: FileManagerView(
+                         model.localController, _ffi, _mouseFocusScope),
+@@ -436,7 +437,7 @@ class FileManagerView extends StatelessWidget {
+ 
+   @override
+   Widget build(BuildContext context) {
+-    if (controller.isLocal) return _pane;
++    if (controller.isLocal || !isWeb) return _pane;
+     return Obx(() {
+       final scope = controller.fileScope.value;
+       if (scope == null) return _pane;
+diff --git a/flutter/lib/desktop/pages/remote_page.dart b/flutter/lib/desktop/pages/remote_page.dart
+index 854be93..a355fe5 100644
+--- a/flutter/lib/desktop/pages/remote_page.dart
++++ b/flutter/lib/desktop/pages/remote_page.dart
+@@ -16,6 +16,7 @@ import '../../common/widgets/dialog.dart';
+ import '../../common/widgets/toolbar.dart';
+ import '../../models/model.dart';
+ import '../../steaddesk/metrics_api.dart';
++import '../../steaddesk/support_appearance.dart';
+ import 'package:flutter_hbb/steaddesk/toolbar_api.dart';
+ import '../../steaddesk/dialogs.dart' show steadUsesChinese;
+ import '../../steaddesk/reconnect_overlay.dart';
+@@ -770,8 +771,8 @@ class _RemotePageState extends State<RemotePage>
+     Widget bodyWidget() {
+       final canvas = Container(
+           color: _supportSession
+-              ? const Color(0xffeaf4f9)
+-              : kColorCanvas, // TODO(U-01): use shared theme.
++              ? context.shade(const Color(0xffeaf4f9), Night.window)
++              : kColorCanvas,
+           child: RawKeyFocusScope(
+               focusNode: _rawKeyFocusNode,
+               onFocusChange: (bool imageFocused) {
+diff --git a/flutter/lib/desktop/widgets/remote_toolbar.dart b/flutter/lib/desktop/widgets/remote_toolbar.dart
+index bacdf85..0e09129 100644
+--- a/flutter/lib/desktop/widgets/remote_toolbar.dart
++++ b/flutter/lib/desktop/widgets/remote_toolbar.dart
+@@ -36,6 +36,7 @@ import '../../steaddesk/merchant_build.dart' show casesEnabled, opsHealthEnabled
+ import '../../steaddesk/ops_health_host.dart';
+ import '../../steaddesk/power_menu.dart';
+ import '../../steaddesk/session_rail.dart';
++import '../../steaddesk/session_chrome.dart';
+ import '../../steaddesk/ops_health.dart' show OpsHealthHttp, HealthFailure;
+ import '../../steaddesk/toolbar/actions.dart' show toolbarSessionRoute;
+ import 'package:flutter_hbb/steaddesk/toolbar_api.dart';
+@@ -3206,12 +3207,12 @@ class _SubmenuButton extends StatelessWidget {
+ 
+   @override
+   Widget build(BuildContext context) {
+-    return SubmenuButton(
++    return SessionCommandMenu(
+       key: key,
+       child: child,
+-      menuChildren:
++      items:
+           menuChildren.map((e) => _buildPointerTrackWidget(e, ffi)).toList(),
+-      menuStyle: _ToolbarTheme.defaultMenuStyle(context),
++      style: _ToolbarTheme.defaultMenuStyle(context),
+     );
+   }
+ }
+@@ -3231,7 +3232,7 @@ class MenuButton extends StatelessWidget {
+ 
+   @override
+   Widget build(BuildContext context) {
+-    return MenuItemButton(
++    return SessionCommand(
+         key: key,
+         onPressed: onPressed != null
+             ? () {
+diff --git a/flutter/lib/models/file_model.dart b/flutter/lib/models/file_model.dart
+index d870fd2..d403d0c 100644
+--- a/flutter/lib/models/file_model.dart
++++ b/flutter/lib/models/file_model.dart
+@@ -653,7 +653,7 @@ class FileController {
+     final transferJobs = <(Entry, int)>[];
+     final transferJobIds = <int>[];
+     for (var from in items.items) {
+-      final jobID = jobController.addTransferJob(from, isRemoteToLocal);
++      final jobID = jobController.addTransferJob(from, isRemoteToLocal, destinationDirectory: toPath);
+       transferJobs.add((from, jobID));
+       transferJobIds.add(jobID);
+     }
+@@ -1072,10 +1072,11 @@ class JobController {
+   }
+ 
+   // return jobID
+-  int addTransferJob(Entry from, bool isRemoteToLocal) {
++  int addTransferJob(Entry from, bool isRemoteToLocal, {String destinationDirectory = ''}) {
+     final jobID = JobController.jobID.next();
+     jobTable.add(JobProgress()
+       ..type = JobType.transfer
++      ..destinationDirectory = destinationDirectory
+       ..fileName = path.basename(from.path)
+       ..jobName = from.path
+       ..totalSize = from.size
+@@ -1325,10 +1326,14 @@ class JobController {
+       }
+ 
+       // Add to job table if not auto start on desktop.
++      final destination = isRemote ? to : remote;
++      final windowsPath = RegExp(r'^(?:[a-zA-Z]:[\\/]|\\\\)').hasMatch(destination);
+       String fileName = path.basename(isRemote ? remote : to);
+       final jobProgress = JobProgress()
+         ..type = JobType.transfer
+         ..fileName = fileName
++        ..destinationDirectory = windowsPath || destination.startsWith('/')
++            ? PathUtil.dirname(destination, windowsPath) : ''
+         ..jobName = isRemote ? remote : to
+         ..id = currJobId
+         ..isRemoteToLocal = isRemote
+@@ -1783,6 +1788,7 @@ class JobProgress {
+   // to-do use enum
+   var isRemoteToLocal = false;
+   var jobName = "";
++  var destinationDirectory = "";
+   var fileName = "";
+   var remote = "";
+   var to = "";
+@@ -1803,6 +1809,7 @@ class JobProgress {
+     speed = 0;
+     finishedSize = 0;
+     jobName = "";
++    destinationDirectory = "";
+     fileName = "";
+     fileCount = 0;
+     remote = "";
+diff --git a/flutter/lib/steaddesk/cases/case_dialog.dart b/flutter/lib/steaddesk/cases/case_dialog.dart
+index 83c926a..d7478f0 100644
+--- a/flutter/lib/steaddesk/cases/case_dialog.dart
++++ b/flutter/lib/steaddesk/cases/case_dialog.dart
+@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
+ import 'package:flutter/services.dart';
+ 
+ import '../theme.dart';
++import '../support_appearance.dart';
+ import 'package:flutter_hbb/steaddesk/toolbar_api.dart';
+ import 'case_store.dart';
+ import 'team_notes.dart';
+@@ -39,7 +40,7 @@ Future<void> showCaseCloseDialog(
+     context: context,
+     useRootNavigator: false,
+     barrierDismissible: false,
+-    barrierColor: const Color(0x590E3A52),
++    barrierColor: context.shade(const Color(0x590E3A52), Colors.black54),
+     builder: (_) => _CaseCloseDialog(
+       store: store,
+       account: account,
+@@ -92,8 +93,12 @@ class _CaseCloseDialogState extends State<_CaseCloseDialog> {
+   late DateTime? due =
+       DateTime.tryParse(widget.record['follow_up']?['due'] as String? ?? '');
+ 
+-  final categoryNodes = {for (final key in caseCategoryLabels.keys) key: FocusNode()};
+-  final resultNodes = {for (final key in caseResultLabels.keys) key: FocusNode()};
++  final categoryNodes = {
++    for (final key in caseCategoryLabels.keys) key: FocusNode()
++  };
++  final resultNodes = {
++    for (final key in caseResultLabels.keys) key: FocusNode()
++  };
+   final ownerNode = FocusNode(),
+       dateNode = FocusNode(),
+       colleagueNode = FocusNode(),
+@@ -190,7 +195,9 @@ class _CaseCloseDialogState extends State<_CaseCloseDialog> {
+     final index = key.keyId - LogicalKeyboardKey.digit1.keyId;
+     final pad = key.keyId - LogicalKeyboardKey.numpad1.keyId;
+     final digit = index >= 0 && index < 8 ? index : pad;
+-    if (digit < 0 || digit >= caseCategoryLabels.length) return KeyEventResult.ignored;
++    if (digit < 0 || digit >= caseCategoryLabels.length) {
++      return KeyEventResult.ignored;
++    }
+     selectCategory(caseCategoryLabels.keys.elementAt(digit));
+     return KeyEventResult.handled;
+   }
+@@ -276,22 +283,25 @@ class _CaseCloseDialogState extends State<_CaseCloseDialog> {
+   String _date(DateTime day) =>
+       '${day.year}-${day.month.toString().padLeft(2, '0')}-${day.day.toString().padLeft(2, '0')}';
+ 
+-  static const _muted =
+-      TextStyle(fontSize: 12, color: SteadDeskTheme.secondaryText);
++  TextStyle get _muted => TextStyle(fontSize: 12, color: context.supportMuted);
+ 
+   Widget _heading(String title, {bool requiredField = false, String? hint}) =>
+       Padding(
+           padding: const EdgeInsets.only(bottom: 8),
+           child: Text.rich(TextSpan(
+             text: title,
+-            style: const TextStyle(
++            style: TextStyle(
+                 fontSize: 13,
+                 fontWeight: FontWeight.w600,
+-                color: SteadDeskTheme.bodyHighContrast),
++                color:
++                    context.shade(SteadDeskTheme.bodyHighContrast, Night.text)),
+             children: [
+               if (requiredField && caseFieldsRequired)
+-                const TextSpan(
+-                    text: ' *', style: TextStyle(color: SteadDeskTheme.danger)),
++                TextSpan(
++                    text: ' *',
++                    style: TextStyle(
++                        color:
++                            context.shade(SteadDeskTheme.danger, Night.error))),
+               if (hint != null)
+                 TextSpan(
+                     text: '  $hint',
+@@ -315,16 +325,21 @@ class _CaseCloseDialogState extends State<_CaseCloseDialog> {
+                   shape: RoundedRectangleBorder(
+                       borderRadius: BorderRadius.circular(6)),
+                   side: BorderSide(
+-                      color: selected
+-                          ? SteadDeskTheme.action
+-                          : SteadDeskTheme.divider,
+-                      width: selected ? 2 : 1),
++                      color: context.shade(
++                          selected
++                              ? SteadDeskTheme.action
++                              : SteadDeskTheme.divider,
++                          Night.line),
++                      width: selected && !context.night ? 2 : 1),
+                   backgroundColor: selected
+-                      ? SteadDeskTheme.brandSurface
+-                      : SteadDeskTheme.page,
+-                  foregroundColor: selected
+-                      ? SteadDeskTheme.action
+-                      : SteadDeskTheme.bodyHighContrast,
++                      ? context.shade(
++                          SteadDeskTheme.brandSurface, Night.selection)
++                      : context.shade(SteadDeskTheme.page, Colors.transparent),
++                  foregroundColor: context.shade(
++                      selected
++                          ? SteadDeskTheme.action
++                          : SteadDeskTheme.bodyHighContrast,
++                      Night.text),
+                   textStyle: Theme.of(context).textTheme.labelLarge?.copyWith(
+                       fontSize: 13,
+                       fontWeight:
+@@ -346,16 +361,17 @@ class _CaseCloseDialogState extends State<_CaseCloseDialog> {
+       margin: const EdgeInsets.only(top: 12),
+       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+       decoration: BoxDecoration(
+-          color: const Color(0xFFFFF7E6),
++          color: context.shade(const Color(0xFFFFF7E6), Night.panel),
+           borderRadius: BorderRadius.circular(8)),
+       child: Wrap(
+           spacing: 10,
+           runSpacing: 8,
+           crossAxisAlignment: WrapCrossAlignment.center,
+           children: [
+-            const Text('跟进',
++            Text('跟进',
+                 style: TextStyle(
+-                    color: SteadDeskTheme.attentionText,
++                    color: context.shade(
++                        SteadDeskTheme.attentionText, Night.warning),
+                     fontWeight: FontWeight.w600)),
+             SizedBox(
+                 width: 100,
+@@ -431,6 +447,15 @@ class _CaseCloseDialogState extends State<_CaseCloseDialog> {
+ 
+   Widget _note() {
+     final appends = widget.record['appends'] as List? ?? [];
++    final phrases = TeamNotes(
++        admin: widget.admin,
++        request: widget.quickNotes,
++        insert: (phrase) {
++          final value = note.text.isEmpty ? phrase : '${note.text}\n$phrase';
++          note.value = TextEditingValue(
++              text: value,
++              selection: TextSelection.collapsed(offset: value.length));
++        });
+     return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+       _heading('备注',
+           hint: !appendOnly && original.isNotEmpty ? '已带入随手记' : null),
+@@ -445,16 +470,30 @@ class _CaseCloseDialogState extends State<_CaseCloseDialog> {
+           maxLines: 4,
+           style: const TextStyle(fontSize: 13),
+           decoration: InputDecoration(
++              filled: context.night ? true : null,
++              fillColor: context.night ? Night.panel : null,
++              enabledBorder: context.night
++                  ? OutlineInputBorder(
++                      borderRadius: BorderRadius.circular(6),
++                      borderSide: const BorderSide(color: Night.line))
++                  : null,
+               hintText: appendOnly ? '追加说明（原备注已锁定）' : '填写处理步骤',
+               border:
+                   OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+               isDense: true)),
+       const SizedBox(height: 8),
+-      TeamNotes(admin: widget.admin, request: widget.quickNotes, insert: (phrase) {
+-        final value = note.text.isEmpty ? phrase : '${note.text}\n$phrase';
+-        note.value = TextEditingValue(text: value,
+-            selection: TextSelection.collapsed(offset: value.length));
+-      }),
++      if (context.night)
++        OutlinedButtonTheme(
++          data: OutlinedButtonThemeData(
++              style: OutlinedButton.styleFrom(
++                  foregroundColor: Night.text,
++                  side: const BorderSide(color: Night.line),
++                  shape: RoundedRectangleBorder(
++                      borderRadius: BorderRadius.circular(4)))),
++          child: phrases,
++        )
++      else
++        phrases,
+     ]);
+   }
+ 
+@@ -470,13 +509,26 @@ class _CaseCloseDialogState extends State<_CaseCloseDialog> {
+       padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
+       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+         _heading('问题类型', requiredField: true, hint: '按 1–8 选择'),
+-        Wrap(spacing: 8, runSpacing: 8, children: [
+-          for (final (i, entry) in caseCategoryLabels.entries.indexed)
+-            _choice('${i + 1} ${entry.value}', category == entry.key,
+-                lockedFields ? null : () => selectCategory(entry.key),
+-                focus: categoryNodes[entry.key],
+-                autofocus: !categoryNodes[entry.key]!.skipTraversal),
+-        ]),
++        LayoutBuilder(
++            builder: (context, bounds) =>
++                Wrap(spacing: 8, runSpacing: 8, children: [
++                  for (final (i, entry) in caseCategoryLabels.entries.indexed)
++                    SizedBox(
++                        width: context.night &&
++                                bounds.maxWidth >= 500 &&
++                                MediaQuery.textScalerOf(context).scale(13) <= 15
++                            ? (bounds.maxWidth - 24) / 4
++                            : null,
++                        child: _choice(
++                            '${i + 1} ${entry.value}',
++                            category == entry.key,
++                            lockedFields
++                                ? null
++                                : () => selectCategory(entry.key),
++                            focus: categoryNodes[entry.key],
++                            autofocus:
++                                !categoryNodes[entry.key]!.skipTraversal)),
++                ])),
+         const SizedBox(height: 16),
+         _heading('结果', requiredField: true),
+         Wrap(spacing: 8, runSpacing: 8, children: [
+@@ -497,14 +549,17 @@ class _CaseCloseDialogState extends State<_CaseCloseDialog> {
+         const SizedBox(height: 16),
+         _note(),
+         if (toolbarEnabled)
+-          toolbarCaseAttachments(account: widget.account,
+-              peer: widget.record['device_id'] ?? '', caseId: widget.record['id'],
+-              ticket: widget.record['help_id'], origin: widget.record['help_origin']),
++          toolbarCaseAttachments(
++              account: widget.account,
++              peer: widget.record['device_id'] ?? '',
++              caseId: widget.record['id'],
++              ticket: widget.record['help_id'],
++              origin: widget.record['help_origin']),
+         if (facts.isNotEmpty)
+           ExpansionTile(
+               tilePadding: EdgeInsets.zero,
+               dense: true,
+-              title: const Text('自动记录', style: _muted),
++              title: Text('自动记录', style: _muted),
+               expandedAlignment: Alignment.centerLeft,
+               children: [
+                 Align(
+@@ -534,14 +589,19 @@ class _CaseCloseDialogState extends State<_CaseCloseDialog> {
+     return Focus(
+         focusNode: formFocus,
+         child: Dialog(
+-          backgroundColor: SteadDeskTheme.page,
++          backgroundColor: context.shade(SteadDeskTheme.page, Night.overlay),
++          elevation: context.night ? 0 : null,
+           surfaceTintColor: Colors.transparent,
+           insetPadding:
+               const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+-          shape:
+-              RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
++          shape: RoundedRectangleBorder(
++              borderRadius: BorderRadius.circular(context.night ? 8 : 14),
++              side: context.night
++                  ? const BorderSide(color: Night.strong)
++                  : BorderSide.none),
+           child: SizedBox(
+               width: 600,
++              height: context.night ? 640 : null,
+               child: Column(
+                   mainAxisSize: MainAxisSize.min,
+                   crossAxisAlignment: CrossAxisAlignment.stretch,
+@@ -554,10 +614,12 @@ class _CaseCloseDialogState extends State<_CaseCloseDialog> {
+                               Text('结案 · $name',
+                                   maxLines: 2,
+                                   overflow: TextOverflow.ellipsis,
+-                                  style: const TextStyle(
+-                                      fontSize: 18,
++                                  style: TextStyle(
++                                      fontSize: context.night ? 16 : 18,
+                                       fontWeight: FontWeight.w700,
+-                                      color: SteadDeskTheme.bodyHighContrast)),
++                                      color: context.shade(
++                                          SteadDeskTheme.bodyHighContrast,
++                                          Night.text))),
+                               if (subtitle.isNotEmpty)
+                                 Padding(
+                                     padding: const EdgeInsets.only(top: 4),
+@@ -567,11 +629,14 @@ class _CaseCloseDialogState extends State<_CaseCloseDialog> {
+                                             fontFeatures:
+                                                 SteadDeskTheme.tabularDigits))),
+                             ])),
+-                    const Divider(height: 1),
++                    Divider(
++                        height: 1, color: context.night ? Night.weak : null),
+                     Flexible(
++                        fit: context.night ? FlexFit.tight : FlexFit.loose,
+                         child:
+                             AbsorbPointer(absorbing: busy, child: _fields())),
+-                    const Divider(height: 1),
++                    Divider(
++                        height: 1, color: context.night ? Night.weak : null),
+                     Padding(
+                         padding: const EdgeInsets.symmetric(
+                             horizontal: 24, vertical: 14),
+@@ -582,15 +647,22 @@ class _CaseCloseDialogState extends State<_CaseCloseDialog> {
+                                 Semantics(
+                                     liveRegion: true,
+                                     child: Text(error!,
+-                                        style: const TextStyle(
+-                                            color: SteadDeskTheme.danger))),
++                                        style: TextStyle(
++                                            color: context.shade(
++                                                SteadDeskTheme.danger,
++                                                Night.error)))),
+                               Row(children: [
+                                 Expanded(
+                                     child: isDraft
+-                                        ? const Text('稍后补会进入「待补结案」',
+-                                            style: _muted)
++                                        ? Text('稍后补会进入「待补结案」', style: _muted)
+                                         : const SizedBox.shrink()),
+                                 OutlinedButton(
++                                    style: context.night
++                                        ? OutlinedButton.styleFrom(
++                                            foregroundColor: Night.muted,
++                                            side: BorderSide.none,
++                                          )
++                                        : null,
+                                     onPressed: busy
+                                         ? null
+                                         : () => _submit(later: true),
+@@ -598,8 +670,10 @@ class _CaseCloseDialogState extends State<_CaseCloseDialog> {
+                                 const SizedBox(width: 10),
+                                 ElevatedButton(
+                                     style: ElevatedButton.styleFrom(
+-                                        backgroundColor: SteadDeskTheme.action,
+-                                        foregroundColor: Colors.white,
++                                        backgroundColor: context.supportAccent,
++                                        foregroundColor: context.shade(
++                                            Colors.white, Night.window),
++                                        elevation: context.night ? 0 : null,
+                                         shape: RoundedRectangleBorder(
+                                             borderRadius:
+                                                 BorderRadius.circular(8))),
+diff --git a/flutter/lib/steaddesk/cases/history_ui.dart b/flutter/lib/steaddesk/cases/history_ui.dart
+index 8367ca6..bfb3422 100644
+--- a/flutter/lib/steaddesk/cases/history_ui.dart
++++ b/flutter/lib/steaddesk/cases/history_ui.dart
+@@ -2,12 +2,23 @@ import 'package:flutter/material.dart';
+ import 'package:flutter/services.dart';
+ 
+ import '../theme.dart';
++import '../support_appearance.dart';
+ import 'case_dialog.dart' show caseCategoryLabels, caseResultLabels;
+ 
+-const _caption = TextStyle(fontSize: 12, color: SteadDeskTheme.secondaryText);
+-const _label = TextStyle(
+-    fontSize: 13, fontWeight: FontWeight.w600, color: SteadDeskTheme.heading);
+-const _text = TextStyle(fontSize: 13, color: SteadDeskTheme.body);
++extension _HistoryAppearance on BuildContext {
++  TextStyle get caption => TextStyle(fontSize: 12, color: supportMuted);
++  TextStyle get label => TextStyle(
++      fontSize: 13,
++      fontWeight: FontWeight.w600,
++      color: shade(SteadDeskTheme.heading, Night.text));
++  TextStyle get body =>
++      TextStyle(fontSize: 13, color: shade(SteadDeskTheme.body, Night.text));
++  ButtonStyle get linkStyle => TextButton.styleFrom(
++      foregroundColor: shade(SteadDeskTheme.action, Night.muted),
++      minimumSize: const Size(0, 32),
++      padding: const EdgeInsets.symmetric(horizontal: 4),
++      tapTargetSize: MaterialTapTargetSize.shrinkWrap);
++}
+ 
+ String _daysAgo(String ended, DateTime now) {
+   final local = DateTime.parse(ended).toLocal();
+@@ -78,36 +89,41 @@ class _CaseHistorySidebarState extends State<CaseHistorySidebar> {
+           OutlinedButton(
+               style: OutlinedButton.styleFrom(
+                   alignment: Alignment.centerLeft,
+-                  foregroundColor: SteadDeskTheme.heading,
+-                  backgroundColor: Colors.white.withOpacity(.72),
++                  foregroundColor:
++                      context.shade(SteadDeskTheme.heading, Night.text),
++                  backgroundColor:
++                      context.shade(Colors.white.withOpacity(.72), Night.panel),
+                   padding: const EdgeInsets.symmetric(horizontal: 10),
+-                  side: const BorderSide(color: Color(0xff9ec5d7)),
++                  side: BorderSide(
++                      color:
++                          context.shade(const Color(0xff9ec5d7), Night.strong)),
+                   shape: RoundedRectangleBorder(
+                       borderRadius: BorderRadius.circular(10))),
+               onPressed: widget.onOpen,
+-              child: const Row(children: [
+-                Expanded(child: Text('历史报告', style: _label)),
++              child: Row(children: [
++                Expanded(child: Text('历史报告', style: context.label)),
+                 Icon(Icons.chevron_right,
+-                    size: 18, color: SteadDeskTheme.action)
++                    size: 18, color: context.supportAccent)
+               ])),
+           const SizedBox(height: 4),
+           Text(
+               latest == null
+                   ? '暂无记录'
+                   : '上次：${caseCategoryLabels[latest['category']] ?? '未填写'} · ${caseResultLabels[latest['result']] ?? '未填写'} · ${_daysAgo(latest['ended_at'], widget.clock?.call() ?? DateTime.now())}',
+-              style: _caption),
++              style: context.caption),
+           if (latest != null)
+             Text(
+                 alert
+                     ? '$repeat问题 30 天 ${summary['repeat_count']} 次'
+                     : '近 30 天 ${summary['count_30d'] ?? 0} 次',
+                 style: alert
+-                    ? _caption.copyWith(
+-                        color: SteadDeskTheme.attentionText,
++                    ? context.caption.copyWith(
++                        color: context.shade(
++                            SteadDeskTheme.attentionText, Night.warning),
+                         fontWeight: FontWeight.w600)
+-                    : _caption),
++                    : context.caption),
+           const Divider(height: 22),
+-          const Text('随手记', style: _label),
++          Text('随手记', style: context.label),
+           const SizedBox(height: 6),
+           TextField(
+               controller: note,
+@@ -115,18 +131,24 @@ class _CaseHistorySidebarState extends State<CaseHistorySidebar> {
+               minLines: 4,
+               maxLines: 7,
+               keyboardType: TextInputType.multiline,
+-              style: _text,
++              style: context.body,
+               decoration: InputDecoration(
++                  enabledBorder: context.night
++                      ? OutlineInputBorder(
++                          borderRadius: BorderRadius.circular(6),
++                          borderSide: const BorderSide(color: Night.line))
++                      : null,
+                   hintText: '记录处理过程…',
+-                  hintStyle: _caption,
++                  hintStyle: context.caption,
+                   filled: true,
+-                  fillColor: Colors.white.withOpacity(.72),
++                  fillColor:
++                      context.shade(Colors.white.withOpacity(.72), Night.panel),
+                   isDense: true,
+                   contentPadding: const EdgeInsets.all(10),
+                   border: OutlineInputBorder(
+                       borderRadius: BorderRadius.circular(9)))),
+           const SizedBox(height: 4),
+-          const Text('结案时自动填进备注', style: _caption),
++          Text('结案时自动填进备注', style: context.caption),
+         ]));
+   }
+ }
+@@ -186,91 +208,108 @@ class _CaseHistoryDrawerState extends State<CaseHistoryDrawer> {
+         : ' · 平均 ${(totalSeconds / recent.length / 60).round()} 分钟';
+     final stats =
+         '近 30 天 ${recent.length} 次 · 未解决 ${recent.where((row) => row['result'] == 'unresolved').length}$avg';
++    final tabs = Wrap(children: [
++      _tab('本设备', scope == 'device', () => setState(() => store = false)),
++      _tab('本门店', scope == 'store',
++          canStore ? () => setState(() => store = true) : null),
++    ]);
++    final pinnedNote = Container(
++        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
++        decoration: BoxDecoration(
++            color: context.shade(const Color(0xfffff7e6), Colors.transparent),
++            border: context.night
++                ? const Border.symmetric(
++                    horizontal: BorderSide(color: Night.weak))
++                : Border.all(color: const Color(0xfffcd9a5)),
++            borderRadius: context.night ? null : BorderRadius.circular(8)),
++        child:
++            Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
++          Row(children: [
++            Expanded(
++                child: Text('设备备注（置顶）',
++                    style: TextStyle(
++                        color: context.shade(
++                            SteadDeskTheme.attentionText, Night.muted),
++                        fontSize: 12,
++                        fontWeight: FontWeight.w600))),
++            TextButton(
++                style: context.linkStyle,
++                onPressed: widget.onEditDevice,
++                child: const Text('编辑'))
++          ]),
++          ConstrainedBox(
++              constraints: const BoxConstraints(maxHeight: 68),
++              child: SingleChildScrollView(
++                  child: Text(note.isEmpty ? '暂无设备备注' : note,
++                      style: context.body))),
++        ]));
++    final filters = Wrap(
++        alignment: WrapAlignment.spaceBetween,
++        spacing: context.night ? 6 : 0,
++        crossAxisAlignment: WrapCrossAlignment.center,
++        children: [
++          DropdownButton<String>(
++              value: category ?? '',
++              style:
++                  Theme.of(context).textTheme.bodyMedium?.merge(context.body),
++              underline: const SizedBox.shrink(),
++              items: [
++                const DropdownMenuItem(value: '', child: Text('全部类型')),
++                for (final item in caseCategoryLabels.entries)
++                  DropdownMenuItem(value: item.key, child: Text(item.value))
++              ],
++              onChanged: (v) => setState(() => category = v == '' ? null : v)),
++          TextButton.icon(
++              style: context.linkStyle,
++              onPressed: () => setState(() => unresolved = !unresolved),
++              icon: Icon(
++                  unresolved ? Icons.check_box : Icons.check_box_outline_blank,
++                  size: 16),
++              label: const Text('只看未解决')),
++        ]);
+     final header = Padding(
+         padding: const EdgeInsets.fromLTRB(18, 8, 18, 0),
+         child:
+             Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+           Row(children: [
+-            const Expanded(
++            Expanded(
+                 child: Text('历史报告',
+                     style: TextStyle(
+-                        fontSize: 18,
++                        fontSize: context.night ? 13 : 18,
+                         fontWeight: FontWeight.w700,
+-                        color: SteadDeskTheme.heading))),
++                        color: context.shade(
++                            SteadDeskTheme.heading, Night.text)))),
+             IconButton(
+                 tooltip: '关闭历史报告',
+                 onPressed: widget.onClose,
+                 icon: const Icon(Icons.close, size: 19))
+           ]),
+-          Text(stats, style: _text),
++          Text(stats, style: context.night ? context.caption : context.body),
+           const SizedBox(height: 4),
+-          const Text('只显示本机记录，团队共享记录上线后自动合并', style: _caption),
+-          Wrap(children: [
+-            _tab('本设备', scope == 'device', () => setState(() => store = false)),
+-            _tab('本门店', scope == 'store',
+-                canStore ? () => setState(() => store = true) : null),
+-          ]),
+-          Container(
+-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+-              decoration: BoxDecoration(
+-                  color: const Color(0xfffff7e6),
+-                  border: Border.all(color: const Color(0xfffcd9a5)),
+-                  borderRadius: BorderRadius.circular(8)),
+-              child: Column(
+-                  crossAxisAlignment: CrossAxisAlignment.stretch,
+-                  children: [
+-                    Row(children: [
+-                      const Expanded(
+-                          child: Text('设备备注（置顶）',
+-                              style: TextStyle(
+-                                  color: SteadDeskTheme.attentionText,
+-                                  fontSize: 12,
+-                                  fontWeight: FontWeight.w600))),
+-                      TextButton(
+-                          style: _linkStyle,
+-                          onPressed: widget.onEditDevice,
+-                          child: const Text('编辑'))
+-                    ]),
+-                    ConstrainedBox(
+-                        constraints: const BoxConstraints(maxHeight: 68),
+-                        child: SingleChildScrollView(
+-                            child: Text(note.isEmpty ? '暂无设备备注' : note,
+-                                style: _text))),
+-                  ])),
+-          Wrap(
+-              alignment: WrapAlignment.spaceBetween,
+-              crossAxisAlignment: WrapCrossAlignment.center,
+-              children: [
+-                DropdownButton<String>(
+-                    value: category ?? '',
+-                    style: Theme.of(context).textTheme.bodyMedium?.merge(_text),
+-                    underline: const SizedBox.shrink(),
+-                    items: [
+-                      const DropdownMenuItem(value: '', child: Text('全部类型')),
+-                      for (final item in caseCategoryLabels.entries)
+-                        DropdownMenuItem(
+-                            value: item.key, child: Text(item.value))
+-                    ],
+-                    onChanged: (v) =>
+-                        setState(() => category = v == '' ? null : v)),
+-                TextButton.icon(
+-                    style: _linkStyle,
+-                    onPressed: () => setState(() => unresolved = !unresolved),
+-                    icon: Icon(
+-                        unresolved
+-                            ? Icons.check_box
+-                            : Icons.check_box_outline_blank,
+-                        size: 16),
+-                    label: const Text('只看未解决')),
+-              ])
++          Text('只显示本机记录，团队共享记录上线后自动合并', style: context.caption),
++          if (context.night) ...[
++            const Divider(height: 1, color: Night.weak),
++            Wrap(
++                alignment: WrapAlignment.spaceBetween,
++                crossAxisAlignment: WrapCrossAlignment.center,
++                children: [
++                  tabs,
++                  filters,
++                ]),
++            pinnedNote,
++          ] else ...[
++            tabs,
++            pinnedNote,
++            filters
++          ],
+         ]));
+     final timeline = SliverPadding(
+         padding: const EdgeInsets.symmetric(horizontal: 18),
+         sliver: visible.isEmpty
+-            ? const SliverToBoxAdapter(
++            ? SliverToBoxAdapter(
+                 child: Padding(
+                     padding: EdgeInsets.all(16),
+-                    child: Center(child: Text('暂无记录', style: _caption))))
++                    child: Center(child: Text('暂无记录', style: context.caption))))
+             : SliverList(
+                 delegate: SliverChildBuilderDelegate((context, i) {
+                 final row = visible[i];
+@@ -302,8 +341,11 @@ class _CaseHistoryDrawerState extends State<CaseHistoryDrawer> {
+                 builder: (context, x, child) => FractionalTranslation(
+                     translation: Offset(x, 0), child: child),
+                 child: Material(
+-                    elevation: 8,
+-                    color: Colors.white,
++                    elevation: context.night ? 0 : 8,
++                    color: context.shade(Colors.white, Night.overlay),
++                    shape: context.night
++                        ? const Border(right: BorderSide(color: Night.strong))
++                        : null,
+                     child: LayoutBuilder(builder: (context, box) {
+                       // Keep the pinned note visible at desktop height. Short viewports and
+                       // large accessibility text can scroll the header along with the list.
+@@ -328,8 +370,9 @@ class _CaseHistoryDrawerState extends State<CaseHistoryDrawer> {
+       child: TextButton(
+           onPressed: press,
+           style: TextButton.styleFrom(
+-              foregroundColor:
+-                  selected ? SteadDeskTheme.action : SteadDeskTheme.body),
++              foregroundColor: context.shade(
++                  selected ? SteadDeskTheme.action : SteadDeskTheme.body,
++                  selected ? Night.text : Night.muted)),
+           child: Text(label,
+               style: TextStyle(
+                   fontSize: 13,
+@@ -337,12 +380,6 @@ class _CaseHistoryDrawerState extends State<CaseHistoryDrawer> {
+                   decoration: selected ? TextDecoration.underline : null))));
+ }
+ 
+-final _linkStyle = TextButton.styleFrom(
+-    foregroundColor: SteadDeskTheme.action,
+-    minimumSize: const Size(0, 32),
+-    padding: const EdgeInsets.symmetric(horizontal: 4),
+-    tapTargetSize: MaterialTapTargetSize.shrinkWrap);
+-
+ class _Entry extends StatefulWidget {
+   const _Entry(
+       {super.key,
+@@ -395,69 +432,100 @@ class _EntryState extends State<_Entry> {
+         .difference(DateTime.parse(row['started_at']));
+     final result = row['result'];
+     final resultColor = result == 'resolved'
+-        ? SteadDeskTheme.badgeText
++        ? context.shade(SteadDeskTheme.badgeText, Night.online)
+         : result == 'unresolved' || result == 'onsite'
+-            ? SteadDeskTheme.attentionText
+-            : SteadDeskTheme.secondaryText;
++            ? context.shade(SteadDeskTheme.attentionText, Night.warning)
++            : context.supportMuted;
++    final metadata = Row(children: [
++      Expanded(
++          child: Text('${_localTime(row['ended_at'])} · ${row['agent']}',
++              style: context.caption)),
++      Text('${elapsed.inMinutes} 分钟', style: context.caption)
++    ]);
++    final heading = LayoutBuilder(builder: (context, bounds) {
++      final heading = TextSpan(
++          style: context.night ? context.caption : context.body,
++          children: [
++            TextSpan(
++                text: caseCategoryLabels[row['category']] ?? '未填写',
++                style: context.label),
++            const TextSpan(text: ' · '),
++            TextSpan(
++                text: caseResultLabels[result] ?? '未填写',
++                style: context.body.copyWith(color: resultColor)),
++            if (note.trim().isNotEmpty) TextSpan(text: ' · $note'),
++          ]);
++      final painter = TextPainter(
++          text: heading,
++          textDirection: Directionality.of(context),
++          textScaler: MediaQuery.textScalerOf(context),
++          maxLines: 1,
++          ellipsis: '…')
++        ..layout(maxWidth: bounds.maxWidth);
++      final toggle = note.trim().isNotEmpty && painter.didExceedMaxLines;
++      painter.dispose();
++      return Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
++        Expanded(
++            child: Text.rich(heading,
++                maxLines: expanded || !toggle ? null : 1,
++                overflow: expanded || !toggle
++                    ? TextOverflow.visible
++                    : TextOverflow.ellipsis)),
++        if (toggle)
++          TextButton(
++              style: context.linkStyle,
++              onPressed: () => setState(() => expanded = !expanded),
++              child: Text(widget
++                  .translate(expanded ? 'Collapse note' : 'Expand note'))),
++      ]);
++    });
++    final actions = Wrap(spacing: 8, children: [
++      TextButton(
++          style: context.linkStyle,
++          onPressed: note.isEmpty
++              ? null
++              : () => Clipboard.setData(ClipboardData(text: note)),
++          child: const Text('复制处理步骤')),
++      TextButton(
++          style: context.linkStyle,
++          onPressed: writing ? null : () => setState(() => writing = true),
++          child: const Text('追加说明')),
++    ]);
+     return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+-      const Divider(height: 1),
++      Divider(height: 1, color: context.night ? Night.weak : null),
+       Padding(
+           padding: const EdgeInsets.symmetric(vertical: 10),
+           child:
+               Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+-            Row(children: [
+-              Expanded(
+-                  child: Text(
+-                      '${_localTime(row['ended_at'])} · ${row['agent']}',
+-                      style: _caption)),
+-              Text('${elapsed.inMinutes} 分钟', style: _caption)
+-            ]),
++            if (!context.night) metadata,
+             if (widget.showDevice)
+-              Text(row['display_name'] ?? row['device_id'], style: _caption),
+-            const SizedBox(height: 6),
+-            LayoutBuilder(builder: (context, bounds) {
+-              final heading = TextSpan(style: _text, children: [
+-                TextSpan(text: caseCategoryLabels[row['category']] ?? '未填写', style: _label),
+-                const TextSpan(text: ' · '),
+-                TextSpan(text: caseResultLabels[result] ?? '未填写', style: _text.copyWith(color: resultColor)),
+-                if (note.trim().isNotEmpty) TextSpan(text: ' · $note'),
+-              ]);
+-              final painter = TextPainter(text: heading, textDirection: Directionality.of(context),
+-                  textScaler: MediaQuery.textScalerOf(context), maxLines: 1, ellipsis: '…')
+-                ..layout(maxWidth: bounds.maxWidth);
+-              final toggle = note.trim().isNotEmpty && painter.didExceedMaxLines;
+-              painter.dispose();
+-              return Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+-                Expanded(child: Text.rich(heading, maxLines: expanded || !toggle ? null : 1,
+-                    overflow: expanded || !toggle ? TextOverflow.visible : TextOverflow.ellipsis)),
+-                if (toggle) TextButton(style: _linkStyle, onPressed: () => setState(() => expanded = !expanded),
+-                  child: Text(widget.translate(expanded ? 'Collapse note' : 'Expand note'))),
+-              ]);
+-            }),
++              Text(row['display_name'] ?? row['device_id'],
++                  style: context.caption),
++            if (!context.night) const SizedBox(height: 6),
++            heading,
+             for (final append in row['appends'] ?? const [])
+               Container(
+                   margin: const EdgeInsets.only(top: 6),
+                   padding: const EdgeInsets.only(left: 8),
+-                  decoration: const BoxDecoration(
++                  decoration: BoxDecoration(
+                       border: Border(
+                           left: BorderSide(
+-                              color: SteadDeskTheme.divider, width: 2))),
++                              color: context.supportLine, width: 2))),
+                   child: Text(
+                       '追加 · ${_localTime(append['at'])} · ${append['by']}\n${append['text']}',
+-                      style: _caption)),
+-            Wrap(spacing: 8, children: [
+-              TextButton(
+-                  style: _linkStyle,
+-                  onPressed: note.isEmpty
+-                      ? null
+-                      : () => Clipboard.setData(ClipboardData(text: note)),
+-                  child: const Text('复制处理步骤')),
+-              TextButton(
+-                  style: _linkStyle,
+-                  onPressed:
+-                      writing ? null : () => setState(() => writing = true),
+-                  child: const Text('追加说明')),
+-            ]),
++                      style: context.caption)),
++            if (context.night)
++              Wrap(
++                  spacing: 8,
++                  crossAxisAlignment: WrapCrossAlignment.center,
++                  children: [
++                    Text(
++                        '${_localTime(row['ended_at'])} · ${row['agent']} · ${elapsed.inMinutes} 分钟',
++                        style: context.caption),
++                    actions,
++                  ])
++            else
++              actions,
+             if (writing) ...[
+               TextField(
+                   controller: addition,
+@@ -471,7 +539,7 @@ class _EntryState extends State<_Entry> {
+                       border: const OutlineInputBorder())),
+               Row(mainAxisAlignment: MainAxisAlignment.end, children: [
+                 TextButton(
+-                    style: _linkStyle,
++                    style: context.linkStyle,
+                     onPressed: saving
+                         ? null
+                         : () => setState(() {
+@@ -483,7 +551,7 @@ class _EntryState extends State<_Entry> {
+                 ValueListenableBuilder<TextEditingValue>(
+                     valueListenable: addition,
+                     builder: (_, value, __) => TextButton(
+-                        style: _linkStyle,
++                        style: context.linkStyle,
+                         onPressed:
+                             saving || value.text.trim().isEmpty ? null : save,
+                         child: const Text('保存追加'))),
+diff --git a/flutter/lib/steaddesk/device_id_widgets.dart b/flutter/lib/steaddesk/device_id_widgets.dart
+index 55bcd0a..a4690fb 100644
+--- a/flutter/lib/steaddesk/device_id_widgets.dart
++++ b/flutter/lib/steaddesk/device_id_widgets.dart
+@@ -163,8 +163,7 @@ class SessionDeviceTitle extends StatelessWidget {
+ 
+   @override
+   Widget build(BuildContext context) {
+-    const style =
+-        TextStyle(color: Color(0xff0b2e42), fontWeight: FontWeight.w600);
++    final style = TextStyle(color: context.supportInk, fontWeight: FontWeight.w600);
+     return Column(
+         mainAxisAlignment: MainAxisAlignment.center,
+         crossAxisAlignment: CrossAxisAlignment.start,
+@@ -182,7 +181,7 @@ class SessionDeviceTitle extends StatelessWidget {
+             Text(subtitle,
+                 maxLines: 1,
+                 overflow: TextOverflow.ellipsis,
+-                style: const TextStyle(fontSize: 11, color: Color(0xff4b5563))),
++                style: TextStyle(fontSize: 11, color: context.supportMuted)),
+         ]);
+   }
+ }
+diff --git a/flutter/lib/steaddesk/file_transfer.dart b/flutter/lib/steaddesk/file_transfer.dart
+index 72edf9f..5a9c466 100644
+--- a/flutter/lib/steaddesk/file_transfer.dart
++++ b/flutter/lib/steaddesk/file_transfer.dart
+@@ -1,6 +1,6 @@
+ part of '../desktop/pages/file_manager_page.dart';
+ 
+-const _ftRowHeight = 27.0;
++const _ftRowHeight = 28.0;
+ 
+ // Prefer the upstream translation. These page-only labels are absent from its
+ // catalog; follow the same saved language / platform locale when falling back.
+@@ -19,7 +19,8 @@ double _fraction(String key, double fallback) {
+       : fallback;
+ }
+ 
+-Widget _splitter(BuildContext context, Axis axis, ValueChanged<double> move, VoidCallback save) {
++Widget _splitter(BuildContext context, Axis axis, ValueChanged<double> move,
++    VoidCallback save) {
+   final vertical = axis == Axis.vertical;
+   return MouseRegion(
+     cursor: vertical
+@@ -84,7 +85,7 @@ class _TransferWorkspaceState extends State<_TransferWorkspace> {
+ 
+   @override
+   Widget build(BuildContext context) => Material(
+-        color: context.shade(Colors.white,Night.panel),
++        color: context.shade(Colors.white, Night.panel),
+         child: LayoutBuilder(builder: (context, box) {
+           final width = max(1.0, box.maxWidth - 7);
+           final minShare = min(.5, 250 / width);
+@@ -98,24 +99,22 @@ class _TransferWorkspaceState extends State<_TransferWorkspace> {
+                   .clamp(min(36.0, maxQueue), maxQueue)
+                   .toDouble();
+           final jobs = widget.jobs;
+-          return Column(children: [
+-            Expanded(
+-                child: Row(
+-                    crossAxisAlignment: CrossAxisAlignment.stretch,
+-                    children: [
+-                  SizedBox(width: width * share, child: widget.local),
+-                  _splitter(context,
+-                      Axis.vertical,
+-                      (dx) => setState(() {
+-                            split = (share + dx / width)
+-                                .clamp(minShare, 1 - minShare)
+-                                .toDouble();
+-                          }),
+-                      () => bind.mainSetLocalOption(
+-                          key: splitKey, value: split.toString())),
+-                  Expanded(child: widget.remote),
+-                ])),
+-            _splitter(context,
++          return TransferBoard(
++            local: widget.local,
++            remote: widget.remote,
++            localWidth: width * share,
++            separator: _splitter(
++                context,
++                Axis.vertical,
++                (dx) => setState(() {
++                      split = (share + dx / width)
++                          .clamp(minShare, 1 - minShare)
++                          .toDouble();
++                    }),
++                () => bind.mainSetLocalOption(
++                    key: splitKey, value: split.toString())),
++            queueSplitter: _splitter(
++                context,
+                 Axis.horizontal,
+                 (dy) => setState(() {
+                       if (maxQueue < 1 || box.maxHeight < 1) return;
+@@ -131,107 +130,96 @@ class _TransferWorkspaceState extends State<_TransferWorkspace> {
+               bind.mainSetLocalOption(
+                   key: collapsedKey, value: collapsed ? 'Y' : 'N');
+             }),
+-            SizedBox(
+-                height: bar,
+-                child: Row(children: [
+-                  Obx(() => TextButton.icon(
+-                        onPressed: () {
+-                          automatic = false;
+-                          setState(() => collapsed = !collapsed);
+-                          bind.mainSetLocalOption(
+-                              key: collapsedKey, value: collapsed ? 'Y' : 'N');
+-                        },
+-                        icon: Icon(
+-                            collapsed ? Icons.expand_less : Icons.expand_more,
+-                            size: 17),
+-                        label: Text(
+-                            '${_ftLabel("Transfer queue", "传输队列")}  ${jobs.jobTable.length}'),
+-                        style: TextButton.styleFrom(foregroundColor: context.supportAccent),
+-                      )),
+-                  const Spacer(),
+-                  Obx(() => TextButton(
+-                        onPressed: jobs.jobTable
+-                                .any((j) => j.state == JobState.done)
+-                            ? () => jobs.jobTable
+-                                .removeWhere((j) => j.state == JobState.done)
+-                            : null,
+-                        child: Text(_ftLabel('Clear completed', '清除已完成')),
+-                      )),
+-                ])),
+-            if (queueHeight > 0)
+-              SizedBox(
+-                  height: queueHeight,
+-                  child: Obx(() {
+-                    final list = jobs.jobTable.toList();
+-                    if (list.isEmpty)
+-                      return Center(
+-                          child: Text(translate('No transfers in progress')));
+-                    return ListView.builder(
+-                        itemExtent: 32,
+-                        itemCount: list.length,
+-                        itemBuilder: (context, i) {
+-                          final j = list[i];
+-                          return Row(children: [
+-                            Icon(
+-                                j.type != JobType.transfer
+-                                    ? Icons.delete_outline
+-                                    : j.isRemoteToLocal
+-                                        ? Icons.arrow_back
+-                                        : Icons.arrow_forward,
+-                                size: 16,
+-                                color: context.supportAccent),
+-                            const SizedBox(width: 8),
+-                            Expanded(
+-                                child: Tooltip(
+-                                    message: j.jobName,
+-                                    child: Text(j.jobName,
+-                                        maxLines: 1,
+-                                        overflow: TextOverflow.ellipsis))),
+-                            Expanded(
+-                                child: Tooltip(
+-                                    message: j.getStatus(),
+-                                    child: Text(j.getStatus(),
+-                                        maxLines: 1,
+-                                        overflow: TextOverflow.ellipsis))),
+-                            if (j.type == JobType.transfer &&
+-                                j.state == JobState.inProgress)
+-                              SizedBox(
+-                                  width: 96,
+-                                  child: Column(
+-                                      mainAxisAlignment:
+-                                          MainAxisAlignment.center,
+-                                      children: [
+-                                        Text(
+-                                            j.recvJobRes
+-                                                ? '${j.percentText} · ${readableFileSize(j.speed)}/s'
+-                                                : j.percentText,
+-                                            maxLines: 1,
+-                                            overflow: TextOverflow.ellipsis,
+-                                            style:
+-                                                const TextStyle(fontSize: 11)),
+-                                        LinearProgressIndicator(
+-                                            value: j.percent
+-                                                .clamp(0.0, 1.0)
+-                                                .toDouble(),
+-                                            color: const Color(0xFF1FA7E0),
+-                                            backgroundColor: context.supportSelection),
+-                                      ])),
+-                            if (j.state == JobState.paused)
+-                              _tool(context, Icons.play_arrow, translate('Resume'),
+-                                  () => jobs.resumeJob(j.id)),
+-                            _tool(context, Icons.close, translate('Delete'), () {
+-                              jobs.jobTable.remove(j);
+-                              jobs.cancelJob(j.id);
+-                            }),
+-                          ]);
+-                        });
+-                  })),
+-          ]);
++            queueHeight: queueHeight,
++            queueHeader: Obx(() {
++              final active = jobs.jobTable
++                  .where((j) => j.state == JobState.inProgress)
++                  .length;
++              final done =
++                  jobs.jobTable.where((j) => j.state == JobState.done).length;
++              return TransferQueueHeader(
++                  title: _ftLabel('Transfer queue', '传输队列'),
++                  summary:
++                      '$active ${_ftLabel("in progress", "进行中")} · $done ${_ftLabel("completed", "已完成")}',
++                  clearLabel: _ftLabel('Clear completed', '清除已完成'),
++                  collapsed: collapsed,
++                  onToggle: () {
++                    automatic = false;
++                    setState(() => collapsed = !collapsed);
++                    bind.mainSetLocalOption(
++                        key: collapsedKey, value: collapsed ? 'Y' : 'N');
++                  },
++                  onClear: done == 0
++                      ? null
++                      : () => jobs.jobTable
++                          .removeWhere((j) => j.state == JobState.done));
++            }),
++            queueBody: Obx(() {
++              final list = jobs.jobTable.toList();
++              if (list.isEmpty)
++                return Center(
++                    child: Text(translate('No transfers in progress')));
++              return ListView.builder(
++                  itemExtent: 28,
++                  itemCount: list.length,
++                  itemBuilder: (context, i) {
++                    final j = list[i];
++                    String leaf(String path) =>
++                        path
++                            .split(RegExp(r'[\\/]'))
++                            .where((s) => s.isNotEmpty)
++                            .lastOrNull ??
++                        path;
++                    final from = j.isRemoteToLocal
++                        ? _ftLabel('Remote', '远程')
++                        : _ftLabel('Local', '本地');
++                    final to = j.isRemoteToLocal
++                        ? _ftLabel('Local', '本地')
++                        : _ftLabel('Remote', '远程');
++                    final dest = leaf(j.destinationDirectory);
++                    final sending = j.type == JobType.transfer &&
++                        j.state == JobState.inProgress;
++                    return TransferJobRow(
++                        name: leaf(j.jobName),
++                        direction: j.type != JobType.transfer
++                            ? translate('Delete')
++                            : '$from → $to${dest.isEmpty ? "" : " · $dest"}',
++                        status: j.display(),
++                        trailing: sending
++                            ? j.percentText
++                            : j.totalSize > 0
++                                ? readableFileSize(j.totalSize.toDouble())
++                                : '',
++                        progress: sending ? j.percent : null,
++                        detail: [
++                          j.jobName,
++                          j.destinationDirectory,
++                          j.getStatus(),
++                          if (sending && j.recvJobRes)
++                            '${readableFileSize(j.speed)}/s'
++                        ].where((s) => s.isNotEmpty).join(' · '),
++                        actions: Row(mainAxisSize: MainAxisSize.min, children: [
++                          if (j.state == JobState.paused)
++                            _tool(
++                                context,
++                                Icons.play_arrow,
++                                translate('Resume'),
++                                () => jobs.resumeJob(j.id)),
++                          _tool(context, Icons.close, translate('Delete'), () {
++                            jobs.jobTable.remove(j);
++                            jobs.cancelJob(j.id);
++                          }),
++                        ]));
++                  });
++            }),
++          );
+         }),
+       );
+ }
+ 
+-Widget _tool(BuildContext context, IconData icon, String label, VoidCallback? action) => IconButton(
++Widget _tool(BuildContext context, IconData icon, String label,
++        VoidCallback? action) =>
++    IconButton(
+       tooltip: label,
+       onPressed: action,
+       iconSize: 17,
+@@ -316,7 +304,7 @@ class _TransferPaneState extends State<_TransferPane> {
+             parsed.every((n) => n != null && n.isFinite && n >= 0) &&
+             (parsed.fold<double>(0, (sum, n) => sum + n!) - 1).abs() < .001
+         ? parsed.cast<double>()
+-        : [.37, .16, .16, .31];
++        : [.52, .10, .02, .36];
+     if (showComputer) {
+       expanded = bind.mainGetLocalOption(key: computerOption) == 'Y';
+       if (expanded) _loadVolumes();
+@@ -449,6 +437,8 @@ class _TransferPaneState extends State<_TransferPane> {
+     return _viewRows = rows;
+   }
+ 
++  final openedWindowsPlaces = <String, String>{};
++
+   Future<void> _windowsPlace(String name) async {
+     // SHGetKnownFolderPath honors redirected folders on the operator's PC.
+     const ids = {
+@@ -459,7 +449,10 @@ class _TransferPaneState extends State<_TransferPane> {
+     final known = c.isLocal && isWindows
+         ? await PathProviderWindows().getPath(ids[name]!)
+         : null;
+-    if (mounted) await _open(known ?? PathUtil.join(c.homePath, name, true));
++    if (!mounted) return;
++    final target = known ?? PathUtil.join(c.homePath, name, true);
++    openedWindowsPlaces[name] = target;
++    await _open(target);
+   }
+ 
+   Widget _places() => Obx(() {
+@@ -467,18 +460,29 @@ class _TransferPaneState extends State<_TransferPane> {
+         final home = c.homePath;
+         final windows = c.options.value.isWindows;
+         final android = !c.isLocal && widget.ffi.ffiModel.isPeerAndroid;
+-        final places = <(IconData, String, VoidCallback?)>[];
++        final scope = c.fileScope.value;
++        if (scope != null) {
++          return TransferScopedPlaces(
++              scope: scope,
++              currentScope: () => c.fileScope.value,
++              directory: dir.path,
++              label: translate,
++              open: _open);
++        }
++        final places = <Widget>[];
+         if (windows) {
+-          for (final (name, label, icon) in [
+-            ('Desktop', '桌面', Icons.desktop_windows_outlined),
+-            ('Downloads', '下载', Icons.download_outlined),
+-            ('Documents', '文档', Icons.description_outlined),
++          for (final (name, label) in [
++            ('Desktop', '桌面'),
++            ('Downloads', '下载'),
++            ('Documents', '文档'),
+           ]) {
+-            places.add((
+-              icon,
+-              _ftLabel(name, label),
+-              home.isEmpty ? null : () => _windowsPlace(name)
+-            ));
++            places.add(TransferPlace(_ftLabel(name, label),
++                selected: home.isNotEmpty &&
++                    dir.path.toLowerCase() ==
++                        (openedWindowsPlaces[name] ??
++                                PathUtil.join(home, name, true))
++                            .toLowerCase(),
++                onPressed: home.isEmpty ? null : () => _windowsPlace(name)));
+           }
+         } else if (android) {
+           final scoped = home.contains('/Android/data/');
+@@ -489,30 +493,24 @@ class _TransferPaneState extends State<_TransferPane> {
+                       ?.group(0)
+                       ?.replaceFirst(RegExp(r'/$'), '') ??
+                   '/sdcard');
+-          for (final (name, label, path, icon) in [
+-            ('Internal storage', '内部存储', root, Icons.storage),
+-            ('Downloads', '下载', '$root/Download', Icons.download_outlined),
+-            ('Pictures', '图片', '$root/Pictures', Icons.image_outlined),
++          for (final (name, label, path) in [
++            ('Internal storage', '内部存储', root),
++            ('Downloads', '下载', '$root/Download'),
++            ('Pictures', '图片', '$root/Pictures'),
+           ]) {
+-            places.add((
+-              icon,
+-              _ftLabel(name, label),
+-              dir.path.isEmpty ? null : () => _open(path)
+-            ));
++            places.add(TransferPlace(_ftLabel(name, label),
++                selected: dir.path == path,
++                onPressed: dir.path.isEmpty ? null : () => _open(path)));
+           }
+           if (scoped)
+-            places.add((
+-              Icons.folder_outlined,
+-              _ftLabel('App files', '应用文件'),
+-              () => _open(home)
+-            ));
++            places.add(TransferPlace(_ftLabel('App files', '应用文件'),
++                selected: dir.path == home, onPressed: () => _open(home)));
+         }
+         if (showComputer) {
+-          places.add((
+-            expanded ? Icons.expand_more : Icons.chevron_right,
+-            _ftLabel('This PC', '此电脑'),
+-            _toggleComputer
+-          ));
++          places.add(TransferPlace(_ftLabel('This PC', '此电脑'),
++              leading: Icon(expanded ? Icons.expand_more : Icons.chevron_right,
++                  size: 15),
++              onPressed: _toggleComputer));
+           if (expanded) {
+             for (final volume in volumes) {
+               final name = volume.label.isEmpty
+@@ -521,40 +519,20 @@ class _TransferPaneState extends State<_TransferPane> {
+               final letter = volume.root.substring(0, 2);
+               final bytes = volume.freeBytes;
+               final space = bytes == null
+-                  ? ''
+-                  : ' · ${readableFileSize(bytes.toDouble())} ${_ftLabel('free', '可用')}';
+-              places.add((
+-                Icons.storage,
+-                '$name ($letter)$space',
+-                () => _open(volume.root)
+-              ));
++                  ? null
++                  : '${readableFileSize(bytes.toDouble())} ${_ftLabel('free', '可用')}';
++              places.add(TransferPlace('$name ($letter)',
++                  indented: true,
++                  subtitle: space,
++                  selected: dir.path.toLowerCase() == volume.root.toLowerCase(),
++                  onPressed: () => _open(volume.root)));
+             }
+           }
+         }
+         if (places.isEmpty)
+           places.add(
+-              (Icons.home_outlined, translate('Home'), c.goToHomeDirectory));
+-        return ListView(children: [
+-          for (final (icon, label, action) in places)
+-            Tooltip(
+-                message: label,
+-                child: TextButton(
+-                  onPressed: action,
+-                  style: TextButton.styleFrom(
+-                      alignment: Alignment.centerLeft,
+-                      foregroundColor: context.supportAccent,
+-                      padding: const EdgeInsets.symmetric(horizontal: 5)),
+-                  child: Row(children: [
+-                    Icon(icon, size: 15),
+-                    const SizedBox(width: 4),
+-                    Expanded(
+-                        child: Text(label,
+-                            overflow: TextOverflow.ellipsis,
+-                            maxLines: showComputer && expanded ? 3 : 1,
+-                            style: const TextStyle(fontSize: 12)))
+-                  ]),
+-                )),
+-        ]);
++              TransferPlace(translate('Home'), onPressed: c.goToHomeDirectory));
++        return ListView(children: places);
+       });
+ 
+   void _find(List<Entry> rows, String query, {bool next = false}) {
+@@ -627,61 +605,25 @@ class _TransferPaneState extends State<_TransferPane> {
+       e.name,
+       e.isFile ? readableFileSize(e.size.toDouble()) : '',
+       _kind(e),
+-      e.isDrive ? '' : e.lastModified().toString().split('.').first
++      e.isDrive ? '' : e.lastModified().toString().substring(0, 16)
+     ];
+     return Obx(() {
+       final selected = c.selectedItems.items.contains(e);
+-      final row = Material(
+-        color: selected ? context.supportSelection : context.shade(Colors.white,Night.panel),
+-        child: InkWell(
+-          hoverColor: context.supportHover,
++      final row = TransferFileRow(
++          cells: cells,
++          widths: widths,
++          selected: selected,
+           onTap: () {
+             listFocus.requestFocus();
+             widget.select(rows, e);
+           },
+           onDoubleTap: e.isFile ? null : () => _open(e.path),
+-          onSecondaryTapDown: (event) => _contextMenu(e, event.globalPosition),
+-          child: Container(
+-              decoration: BoxDecoration(
+-                  border: Border(bottom: BorderSide(color: context.supportHairline))),
+-              child: Row(
+-                children: [
+-                  for (int i = 0; i < cells.length; i++)
+-                    SizedBox(
+-                        width: widths[i],
+-                        child: Padding(
+-                          padding: const EdgeInsets.symmetric(horizontal: 4),
+-                          child: Row(children: [
+-                            if (i == 0) ...[
+-                              Icon(
+-                                  e.isDrive
+-                                      ? Icons.storage
+-                                      : e.isFile
+-                                          ? Icons.insert_drive_file_outlined
+-                                          : Icons.folder_outlined,
+-                                  size: 15,
+-                                  color: context.supportAccent),
+-                              const SizedBox(width: 4)
+-                            ],
+-                            Expanded(
+-                                child: Tooltip(
+-                                    message: cells[i],
+-                                    child: Text(cells[i],
+-                                        maxLines: 1,
+-                                        overflow: TextOverflow.ellipsis,
+-                                        style: TextStyle(
+-                                            fontSize: 13, color: context.shade(const Color(0xff17324a), Night.text))))),
+-                          ]),
+-                        )),
+-                ],
+-              )),
+-        ),
+-      );
++          onSecondaryTapDown: (event) => _contextMenu(e, event.globalPosition));
+       if (e.isDrive) return row;
+       return Draggable<_TransferDrag>(
+         data: _TransferDrag(c, _dragEntries(e)),
+         feedback: Material(
+-            elevation: 2,
++            elevation: context.night ? 0 : 2,
+             child:
+                 Padding(padding: const EdgeInsets.all(6), child: Text(e.name))),
+         child: row,
+@@ -713,58 +655,31 @@ class _TransferPaneState extends State<_TransferPane> {
+                     onNext: (s) => _find(rows, s, next: true),
+                     onSearch: (s) => _find(rows, s),
+                     child: Column(children: [
+-                      SizedBox(
+-                          height: 28,
+-                          child: Row(children: [
+-                            for (int i = 0; i < columns.length; i++)
+-                              SizedBox(
+-                                  width: widths[i],
+-                                  child: Row(children: [
+-                                    Expanded(
+-                                        child: InkWell(
+-                                            onTap: () => setState(() {
+-                                                  ascending = sort == columns[i]
+-                                                      ? !ascending
+-                                                      : true;
+-                                                  sort = columns[i];
+-                                                }),
+-                                            child: Row(children: [
+-                                              const SizedBox(width: 4),
+-                                              Flexible(
+-                                                  child: Text(
+-                                                      translate(columns[i]
+-                                                          .toString()),
+-                                                      maxLines: 1,
+-                                                      overflow:
+-                                                          TextOverflow.ellipsis,
+-                                                      style: TextStyle(
+-                                                          fontSize: 13,
+-                                                          color: context.supportMuted))),
+-                                              if (sort == columns[i])
+-                                                Icon(
+-                                                    ascending
+-                                                        ? Icons.arrow_drop_up
+-                                                        : Icons.arrow_drop_down,
+-                                                    size: 13,
+-                                                    color: context.supportAccent),
+-                                            ]))),
+-                                    if (i < 3)
+-                                      _splitter(context,
+-                                          Axis.vertical,
+-                                          (dx) => setState(() {
+-                                                final delta = (dx / extra)
+-                                                    .clamp(-shares[i],
+-                                                        shares[i + 1])
+-                                                    .toDouble();
+-                                                shares[i] += delta;
+-                                                shares[i + 1] -= delta;
+-                                              }),
+-                                          () => bind.mainSetLocalOption(
+-                                              key: colsKey,
+-                                              value: shares.join(','))),
+-                                  ])),
+-                          ])),
+-                      Divider(height: 1, color: context.supportLine),
++                      TransferTableHeader(
++                          widths: widths,
++                          labels: [
++                            for (final column in columns)
++                              translate(column.toString())
++                          ],
++                          sortedColumn: columns.indexOf(sort),
++                          ascending: ascending,
++                          onSort: (i) => setState(() {
++                                ascending =
++                                    sort == columns[i] ? !ascending : true;
++                                sort = columns[i];
++                              }),
++                          divider: (i) => _splitter(
++                              context,
++                              Axis.vertical,
++                              (dx) => setState(() {
++                                    final delta = (dx / extra)
++                                        .clamp(-shares[i], shares[i + 1])
++                                        .toDouble();
++                                    shares[i] += delta;
++                                    shares[i + 1] -= delta;
++                                  }),
++                              () => bind.mainSetLocalOption(
++                                  key: colsKey, value: shares.join(',')))),
+                       Expanded(
+                           child: ListView.builder(
+                               controller: scroll,
+@@ -790,93 +705,66 @@ class _TransferPaneState extends State<_TransferPane> {
+       builder: (context, dragging, _) => DropTarget(
+         enable: !c.isLocal,
+         onDragDone: _dropExternal,
+-        child: Container(
+-            color: dragging.isEmpty ? context.shade(Colors.white,Night.panel) : context.supportSelection,
+-            padding: const EdgeInsets.symmetric(horizontal: 6),
+-            child: Column(children: [
+-              SizedBox(
+-                  height: 32,
++        child: ColoredBox(
++            color: dragging.isEmpty ? context.ftCanvas : context.ftSelection,
++            child: TransferPaneFrame(
++              title:
++                  translate(c.isLocal ? 'Local Computer' : 'Remote Computer'),
++              path: TransferPathField(
++                  controller: path,
++                  focusNode: pathFocus,
++                  label: _ftLabel(c.isLocal ? 'Local path' : 'Remote path',
++                      c.isLocal ? '本地路径' : '远程路径'),
++                  onSubmitted: (value) {
++                    listFocus.requestFocus();
++                    _open(value);
++                  }),
++              action: Obx(() => TransferActionButton(
++                  local: c.isLocal,
++                  label: transferLabel,
++                  onPressed: SelectedItems.valid(c.selectedItems.items) &&
++                          c
++                              .getOtherSideDirectoryData()
++                              .directory
++                              .path
++                              .isNotEmpty
++                      ? _transferSelection
++                      : null)),
++              toolsLabel: translate('More'),
++              tools: SingleChildScrollView(
++                  scrollDirection: Axis.horizontal,
+                   child: Row(children: [
+-                    Expanded(
+-                        child: Text(
+-                            translate(c.isLocal
+-                                ? 'Local Computer'
+-                                : 'Remote Computer'),
+-                            maxLines: 1,
+-                            overflow: TextOverflow.ellipsis,
+-                            style: TextStyle(
+-                                fontWeight: FontWeight.w600, color: context.shade(const Color(0xff17324a), Night.text)))),
+-                    Obx(() => TextButton.icon(
+-                          onPressed:
+-                              SelectedItems.valid(c.selectedItems.items) &&
+-                                      c
+-                                          .getOtherSideDirectoryData()
+-                                          .directory
+-                                          .path
+-                                          .isNotEmpty
+-                                  ? _transferSelection
+-                                  : null,
+-                          style: TextButton.styleFrom(foregroundColor: context.supportAccent),
+-                          icon: Icon(
+-                              c.isLocal
+-                                  ? Icons.arrow_forward
+-                                  : Icons.arrow_back,
+-                              size: 16),
+-                          label: Text(transferLabel),
+-                        )),
++                    _tool(
++                        context, Icons.arrow_back, translate('Back'), c.goBack),
++                    _tool(context, Icons.arrow_upward,
++                        translate('Parent directory'), c.goToParentDirectory),
++                    _tool(context, Icons.refresh, translate('Refresh File'),
++                        () {
++                      c.refresh();
++                      if (showComputer && expanded) _loadVolumes();
++                    }),
++                    _tool(context, Icons.create_new_folder_outlined,
++                        translate('Create Folder'), widget.createFolder),
++                    _tool(
++                        context,
++                        Icons.search,
++                        translate('Search'),
++                        () => setState(() {
++                              searching = !searching;
++                              filter = '';
++                            })),
++                    widget.menu,
+                   ])),
+-              Row(children: [
+-                _tool(context, Icons.arrow_back, translate('Back'), c.goBack),
+-                _tool(context, Icons.arrow_upward, translate('Parent directory'),
+-                    c.goToParentDirectory),
+-                Expanded(
+-                    child: TextField(
+-                        controller: path,
+-                        focusNode: pathFocus,
+-                        onEditingComplete: () {},
+-                        onSubmitted: (value) {
+-                          listFocus.requestFocus();
+-                          _open(value);
+-                        },
+-                        maxLines: 1,
+-                        style: const TextStyle(fontSize: 13),
+-                        decoration: const InputDecoration(
+-                            isDense: true,
+-                            contentPadding: EdgeInsets.symmetric(
+-                                horizontal: 5, vertical: 6),
+-                            border: OutlineInputBorder()))),
+-                _tool(context, Icons.refresh, translate('Refresh File'), () {
+-                  c.refresh();
+-                  if (showComputer && expanded) _loadVolumes();
+-                }),
+-                _tool(context, Icons.create_new_folder_outlined,
+-                    translate('Create Folder'), widget.createFolder),
+-                _tool(context,
+-                    Icons.search,
+-                    translate('Search'),
+-                    () => setState(() {
+-                          searching = !searching;
+-                          filter = '';
+-                        })),
+-                widget.menu,
+-              ]),
+-              if (searching)
+-                TextField(
+-                    autofocus: true,
+-                    onChanged: (s) => setState(() => filter = s),
+-                    decoration: InputDecoration(
+-                        isDense: true, hintText: translate('Search'))),
+-              Expanded(
+-                  child: Obx(() => Row(children: [
+-                        if (c.fileScope.value == null) ...[
+-                          SizedBox(
+-                              width: showComputer && expanded ? 138 : 78,
+-                              child: _places()),
+-                          VerticalDivider(width: 1, color: context.supportLine),
+-                        ],
+-                        Expanded(child: _table()),
+-                      ]))),
+-            ])),
++              search: searching
++                  ? TextField(
++                      autofocus: true,
++                      onChanged: (s) => setState(() => filter = s),
++                      decoration: InputDecoration(
++                          isDense: true, hintText: translate('Search')))
++                  : null,
++              places: _places(),
++              table: _table(),
++            )),
+       ),
+     );
+   }
+diff --git a/flutter/lib/steaddesk/file_transfer_v10.dart b/flutter/lib/steaddesk/file_transfer_v10.dart
+new file mode 100644
+index 0000000..0697db7
+--- /dev/null
++++ b/flutter/lib/steaddesk/file_transfer_v10.dart
+@@ -0,0 +1,504 @@
++import 'package:flutter/material.dart';
++
++import '../models/remote_file_scope.dart';
++
++extension TransferSurface on BuildContext {
++  bool get _dark => Theme.of(this).brightness == Brightness.dark;
++  Color get ftCanvas => _dark ? const Color(0xff08090a) : Colors.white;
++  Color get ftPanel =>
++      _dark ? const Color(0xff0f1011) : const Color(0xfff7f8f8);
++  Color get ftInk => _dark ? const Color(0xfff7f8f8) : const Color(0xff0f1011);
++  Color get ftMuted =>
++      _dark ? const Color(0x99f7f8f8) : const Color(0xa30f1011);
++  Color get ftLine => _dark ? const Color(0x14ffffff) : const Color(0x1a08090a);
++  Color get ftHairline =>
++      _dark ? const Color(0x0dffffff) : const Color(0x0f08090a);
++  Color get ftAccent =>
++      _dark ? const Color(0xff1fa7e0) : const Color(0xff0a6fa8);
++  Color get ftSelection =>
++      _dark ? const Color(0xff0c232d) : const Color(0xffe6f5fb);
++}
++
++class TransferBoard extends StatelessWidget {
++  const TransferBoard(
++      {super.key,
++      required this.local,
++      required this.remote,
++      required this.localWidth,
++      required this.separator,
++      required this.queueSplitter,
++      required this.queueHeader,
++      required this.queueBody,
++      required this.queueHeight});
++  final Widget local, remote, separator, queueSplitter, queueHeader, queueBody;
++  final double localWidth, queueHeight;
++
++  @override
++  Widget build(BuildContext context) => Material(
++        color: context.ftCanvas,
++        child: Column(children: [
++          Expanded(
++              child: Row(
++                  crossAxisAlignment: CrossAxisAlignment.stretch,
++                  children: [
++                SizedBox(width: localWidth, child: local),
++                separator,
++                Expanded(child: remote),
++              ])),
++          queueSplitter,
++          ColoredBox(color: context.ftPanel, child: queueHeader),
++          if (queueHeight > 0)
++            SizedBox(
++                height: queueHeight,
++                child: ColoredBox(color: context.ftPanel, child: queueBody)),
++        ]),
++      );
++}
++
++class TransferPlace extends StatelessWidget {
++  const TransferPlace(this.label,
++      {super.key,
++      this.subtitle,
++      this.leading,
++      this.selected = false,
++      this.indented = false,
++      this.onPressed});
++  final String label;
++  final String? subtitle;
++  final Widget? leading;
++  final bool selected, indented;
++  final VoidCallback? onPressed;
++  @override
++  Widget build(BuildContext context) => Semantics(
++      selected: selected,
++      child: Padding(
++        padding: const EdgeInsets.only(bottom: 4),
++        child: TextButton(
++          onPressed: onPressed,
++          style: TextButton.styleFrom(
++              alignment: Alignment.centerLeft,
++              minimumSize: Size(0, subtitle == null ? 28 : 40),
++              padding: EdgeInsets.only(left: indented ? 22 : 8, right: 4),
++              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
++              backgroundColor: selected ? context.ftSelection : null,
++              foregroundColor:
++                  selected || indented ? context.ftInk : context.ftMuted,
++              shape: RoundedRectangleBorder(
++                  borderRadius: BorderRadius.circular(6))),
++          child: Row(children: [
++            if (leading != null) leading!,
++            Flexible(
++                child: Column(
++                    crossAxisAlignment: CrossAxisAlignment.start,
++                    mainAxisSize: MainAxisSize.min,
++                    children: [
++                  Text(label,
++                      maxLines: 1,
++                      overflow: TextOverflow.ellipsis,
++                      style: const TextStyle(fontSize: 13)),
++                  if (subtitle != null)
++                    Text(subtitle!,
++                        maxLines: 1,
++                        overflow: TextOverflow.ellipsis,
++                        style: TextStyle(fontSize: 11, color: context.ftMuted)),
++                ]))
++          ]),
++        ),
++      ));
++}
++
++class TransferPaneFrame extends StatefulWidget {
++  const TransferPaneFrame(
++      {super.key,
++      required this.title,
++      required this.path,
++      required this.action,
++      required this.places,
++      required this.table,
++      this.tools,
++      this.toolsLabel = '',
++      this.search});
++  final String title, toolsLabel;
++  final Widget path, action, places, table;
++  final Widget? tools, search;
++
++  @override
++  State<TransferPaneFrame> createState() => _TransferPaneFrameState();
++}
++
++class _TransferPaneFrameState extends State<TransferPaneFrame> {
++  bool toolsVisible = false;
++  @override
++  Widget build(BuildContext context) => LayoutBuilder(builder: (context, box) {
++        return Column(children: [
++          Container(
++              height: 44,
++              padding: EdgeInsets.symmetric(
++                  horizontal: box.maxWidth >= 430 ? 12 : 4),
++              decoration: BoxDecoration(
++                  color: context.ftPanel,
++                  border: Border(bottom: BorderSide(color: context.ftLine))),
++              child: Row(children: [
++                if (box.maxWidth >= 350) ...[
++                  Text(widget.title,
++                      style: TextStyle(
++                          fontSize: 13,
++                          fontWeight: FontWeight.w600,
++                          color: context.ftInk)),
++                  const SizedBox(width: 10)
++                ],
++                Expanded(child: SizedBox(height: 28, child: widget.path)),
++                const SizedBox(width: 6),
++                widget.action,
++                if (widget.tools != null)
++                  IconButton(
++                      tooltip: widget.toolsLabel,
++                      constraints:
++                          const BoxConstraints.tightFor(width: 24, height: 28),
++                      padding: EdgeInsets.zero,
++                      iconSize: 16,
++                      color: context.ftMuted,
++                      icon: Icon(
++                          toolsVisible ? Icons.expand_less : Icons.more_horiz),
++                      onPressed: () =>
++                          setState(() => toolsVisible = !toolsVisible)),
++              ])),
++          if (toolsVisible && widget.tools != null) widget.tools!,
++          if (widget.search != null) widget.search!,
++          Expanded(
++              child: Row(
++                  crossAxisAlignment: CrossAxisAlignment.stretch,
++                  children: [
++                SizedBox(
++                    width: (box.maxWidth * .27).clamp(70, 168).toDouble(),
++                    child: Padding(
++                        padding: const EdgeInsets.all(8),
++                        child: widget.places)),
++                VerticalDivider(
++                    width: 1, thickness: 1, color: context.ftHairline),
++                Expanded(child: widget.table),
++              ])),
++        ]);
++      });
++}
++
++class TransferPathField extends StatelessWidget {
++  const TransferPathField(
++      {super.key,
++      required this.controller,
++      this.focusNode,
++      required this.label,
++      required this.onSubmitted});
++  final TextEditingController controller;
++  final FocusNode? focusNode;
++  final String label;
++  final ValueChanged<String> onSubmitted;
++  @override
++  Widget build(BuildContext context) {
++    final border = OutlineInputBorder(
++        borderRadius: BorderRadius.circular(6),
++        borderSide: BorderSide(color: context.ftLine));
++    return Semantics(
++        label: label,
++        child: TextField(
++            controller: controller,
++            focusNode: focusNode,
++            onEditingComplete: () {},
++            onSubmitted: onSubmitted,
++            maxLines: 1,
++            style: TextStyle(
++                fontFamily: 'Consolas',
++                fontFamilyFallback: const [
++                  'Cascadia Mono',
++                  'Segoe UI',
++                  'Microsoft YaHei UI',
++                  'monospace'
++                ],
++                fontSize: 12,
++                color: context.ftInk),
++            decoration: InputDecoration(
++                isDense: true,
++                filled: true,
++                fillColor: context.ftCanvas,
++                contentPadding:
++                    const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
++                enabledBorder: border,
++                focusedBorder: border.copyWith(
++                    borderSide: BorderSide(color: context.ftAccent)))));
++  }
++}
++
++class TransferFileRow extends StatelessWidget {
++  const TransferFileRow(
++      {super.key,
++      required this.cells,
++      required this.widths,
++      required this.selected,
++      this.onTap,
++      this.onDoubleTap,
++      this.onSecondaryTapDown});
++  final List<String> cells;
++  final List<double> widths;
++  final bool selected;
++  final VoidCallback? onTap, onDoubleTap;
++  final GestureTapDownCallback? onSecondaryTapDown;
++  @override
++  Widget build(BuildContext context) => Material(
++      color: selected ? context.ftSelection : context.ftCanvas,
++      child: InkWell(
++          onTap: onTap,
++          onDoubleTap: onDoubleTap,
++          onSecondaryTapDown: onSecondaryTapDown,
++          child: Container(
++              height: 28,
++              decoration: BoxDecoration(
++                  border:
++                      Border(bottom: BorderSide(color: context.ftHairline))),
++              child: Row(children: [
++                for (int i = 0; i < cells.length; i++)
++                  SizedBox(
++                      width: widths[i],
++                      child: Padding(
++                          padding: const EdgeInsets.symmetric(horizontal: 6),
++                          child: Tooltip(
++                              message: cells[i],
++                              child: Text(cells[i],
++                                  maxLines: 1,
++                                  overflow: TextOverflow.ellipsis,
++                                  textAlign: i == 1 || i == 3
++                                      ? TextAlign.right
++                                      : TextAlign.left,
++                                  style: TextStyle(
++                                      fontSize: i == 0 ? 13 : 12,
++                                      color: i == 0
++                                          ? context.ftInk
++                                          : context.ftMuted)))))
++              ]))));
++}
++
++class TransferQueueHeader extends StatelessWidget {
++  const TransferQueueHeader(
++      {super.key,
++      required this.title,
++      required this.summary,
++      required this.clearLabel,
++      required this.collapsed,
++      required this.onToggle,
++      required this.onClear});
++  final String title, summary, clearLabel;
++  final bool collapsed;
++  final VoidCallback onToggle;
++  final VoidCallback? onClear;
++  @override
++  Widget build(BuildContext context) => SizedBox(
++      height: 32,
++      child: Padding(
++          padding: const EdgeInsets.symmetric(horizontal: 10),
++          child: Row(children: [
++            TextButton.icon(
++                onPressed: onToggle,
++                icon: Icon(collapsed ? Icons.expand_less : Icons.expand_more,
++                    size: 15),
++                label: Text(title),
++                style: TextButton.styleFrom(
++                    foregroundColor: context.ftInk,
++                    textStyle: Theme.of(context)
++                        .textTheme
++                        .labelMedium
++                        ?.copyWith(fontSize: 13, fontWeight: FontWeight.w600))),
++            const SizedBox(width: 6),
++            Expanded(
++                child: Text(summary,
++                    maxLines: 1,
++                    overflow: TextOverflow.ellipsis,
++                    style: TextStyle(color: context.ftMuted, fontSize: 12))),
++            TextButton(
++                onPressed: onClear,
++                style: TextButton.styleFrom(
++                    foregroundColor: context.ftMuted,
++                    textStyle: Theme.of(context)
++                        .textTheme
++                        .labelMedium
++                        ?.copyWith(fontSize: 12)),
++                child: Text(clearLabel)),
++          ])));
++}
++
++class TransferJobRow extends StatelessWidget {
++  const TransferJobRow(
++      {super.key,
++      required this.name,
++      required this.direction,
++      required this.status,
++      required this.trailing,
++      this.progress,
++      this.actions,
++      this.detail = ''});
++  final String name, direction, status, trailing, detail;
++  final double? progress;
++  final Widget? actions;
++  @override
++  Widget build(BuildContext context) => Container(
++      height: 28,
++      padding: const EdgeInsets.symmetric(horizontal: 16),
++      decoration: BoxDecoration(
++          border: Border(top: BorderSide(color: context.ftHairline))),
++      child: LayoutBuilder(builder: (context, box) {
++        Widget label(String s, {bool primary = false, TextAlign? align}) =>
++            Text(s,
++                maxLines: 1,
++                overflow: TextOverflow.ellipsis,
++                textAlign: align,
++                style: TextStyle(
++                    fontSize: primary ? 13 : 12,
++                    color: primary ? context.ftInk : context.ftMuted));
++        return Tooltip(
++            message: detail.isEmpty ? name : detail,
++            child: Row(children: [
++              Expanded(flex: 14, child: label(name, primary: true)),
++              const SizedBox(width: 8),
++              if (box.maxWidth >= 410) ...[
++                Expanded(flex: 10, child: label(direction)),
++                const SizedBox(width: 12)
++              ],
++              SizedBox(
++                  width: (box.maxWidth * .16).clamp(36, 160).toDouble(),
++                  child: progress == null
++                      ? label(status)
++                      : LinearProgressIndicator(
++                          value: progress!.clamp(0, 1).toDouble(),
++                          minHeight: 4,
++                          color: context.ftAccent,
++                          backgroundColor: context.ftLine,
++                          borderRadius: BorderRadius.circular(2))),
++              SizedBox(
++                  width: 72, child: label(trailing, align: TextAlign.right)),
++              if (actions != null) actions!,
++            ]));
++      }));
++}
++
++class TransferTableHeader extends StatelessWidget {
++  const TransferTableHeader(
++      {super.key,
++      required this.widths,
++      required this.labels,
++      required this.sortedColumn,
++      required this.ascending,
++      required this.onSort,
++      required this.divider});
++  final List<double> widths;
++  final List<String> labels;
++  final int sortedColumn;
++  final bool ascending;
++  final ValueChanged<int> onSort;
++  final Widget Function(int) divider;
++  @override
++  Widget build(BuildContext context) => Container(
++      height: 28,
++      decoration: BoxDecoration(
++          border: Border(bottom: BorderSide(color: context.ftLine))),
++      child: Row(children: [
++        for (int i = 0; i < labels.length; i++)
++          SizedBox(
++              width: widths[i],
++              child: Row(children: [
++                Expanded(
++                    child: InkWell(
++                        onTap: () => onSort(i),
++                        child: Padding(
++                            padding: const EdgeInsets.symmetric(horizontal: 5),
++                            child: Row(
++                                mainAxisAlignment: i == 1 || i == 3
++                                    ? MainAxisAlignment.end
++                                    : MainAxisAlignment.start,
++                                children: [
++                                  Flexible(
++                                      child: Text(labels[i],
++                                          maxLines: 1,
++                                          overflow: TextOverflow.ellipsis,
++                                          style: TextStyle(
++                                              fontSize: 12,
++                                              color: context.ftMuted))),
++                                  if (i == sortedColumn)
++                                    Icon(
++                                        ascending
++                                            ? Icons.arrow_drop_up
++                                            : Icons.arrow_drop_down,
++                                        size: 12,
++                                        color: context.ftAccent),
++                                ])))),
++                if (i < labels.length - 1) divider(i),
++              ])),
++      ]));
++}
++
++class TransferScopedPlaces extends StatelessWidget {
++  const TransferScopedPlaces(
++      {super.key,
++      required this.scope,
++      required this.currentScope,
++      required this.directory,
++      required this.label,
++      required this.open});
++  final RemoteFileScope scope;
++  final RemoteFileScope? Function() currentScope;
++  final String directory;
++  final String Function(String) label;
++  final ValueChanged<String> open;
++
++  @override
++  Widget build(BuildContext context) => ListView(children: [
++        for (final (key, name) in [
++          ('download', 'Download'),
++          ('pictures', 'Pictures'),
++          ('movies', 'Videos'),
++          ('dcim', 'DCIM'),
++          ('logs', 'SteadDesk logs')
++        ])
++          TransferPlace(label(name),
++              selected: directory == scope.availablePath(key),
++              subtitle: scope.requiresGrant(key)
++                  ? label('Device not authorized')
++                  : scope.availablePath(key) == null
++                      ? label('Unavailable')
++                      : null,
++              onPressed: scope.availablePath(key) == null
++                  ? null
++                  : () {
++                      final path = currentScope()?.availablePath(key);
++                      if (path != null) open(path);
++                    }),
++      ]);
++}
++
++class TransferActionButton extends StatelessWidget {
++  const TransferActionButton(
++      {super.key,
++      required this.local,
++      required this.label,
++      required this.onPressed});
++  final bool local;
++  final String label;
++  final VoidCallback? onPressed;
++  @override
++  Widget build(BuildContext context) => TextButton(
++        onPressed: onPressed,
++        style: TextButton.styleFrom(
++            foregroundColor: context.ftAccent,
++            minimumSize: const Size(0, 28),
++            padding: const EdgeInsets.symmetric(horizontal: 4),
++            tapTargetSize: MaterialTapTargetSize.shrinkWrap),
++        child: Row(mainAxisSize: MainAxisSize.min, children: [
++          if (!local) ...[
++            const Icon(Icons.arrow_back, size: 14),
++            const SizedBox(width: 4)
++          ],
++          Text(label),
++          if (local) ...[
++            const SizedBox(width: 4),
++            const Icon(Icons.arrow_forward, size: 14)
++          ],
++        ]),
++      );
++}
+diff --git a/flutter/lib/steaddesk/power_menu.dart b/flutter/lib/steaddesk/power_menu.dart
+index 5cd50f9..3cfe88c 100644
+--- a/flutter/lib/steaddesk/power_menu.dart
++++ b/flutter/lib/steaddesk/power_menu.dart
+@@ -1,5 +1,6 @@
+ import 'dart:async';
+ import 'package:flutter/material.dart';
++import 'support_appearance.dart';
+ 
+ const powerBurstDelay = Duration(milliseconds: 600);
+ const powerNoticeDuration = Duration(milliseconds: 1500);
+@@ -72,7 +73,7 @@ class _PowerMenuButtonState extends State<PowerMenuButton> {
+               padding: EdgeInsets.zero,
+               constraints: const BoxConstraints(),
+               iconSize: 18,
+-              color: const Color(0xff0a6fa8),
++              color: context.supportAccent,
+               icon: const FittedBox(child: Icon(Icons.power_settings_new)),
+               onPressed: widget.enabled ? press : null));
+ }
+@@ -107,8 +108,9 @@ class _PowerNoticeState extends State<PowerNotice> {
+               child: Padding(
+                   padding: const EdgeInsets.all(10),
+                   child: Material(
+-                      color: const Color(0xff173849),
+-                      borderRadius: BorderRadius.circular(6),
++                      color: context.shade(const Color(0xff173849),Night.overlay),
++                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(6),
++                        side: context.night ? const BorderSide(color: Night.line) : BorderSide.none),
+                       child: Padding(
+                           padding: const EdgeInsets.all(8),
+                           child: Text(widget.text,
+diff --git a/flutter/lib/steaddesk/quality_badge.dart b/flutter/lib/steaddesk/quality_badge.dart
+index b129e60..d7c900d 100644
+--- a/flutter/lib/steaddesk/quality_badge.dart
++++ b/flutter/lib/steaddesk/quality_badge.dart
+@@ -1,4 +1,5 @@
+ import 'package:flutter/material.dart';
++import 'support_appearance.dart';
+ 
+ /// The owner expires RTT independently from FPS; null always paints unknown.
+ class QualityBadge extends StatelessWidget {
+@@ -25,12 +26,12 @@ class QualityBadge extends StatelessWidget {
+   Widget build(BuildContext context) {
+     final ms = delay;
+     final color = ms == null
+-        ? const Color(0xff6b7280)
++        ? context.shade(const Color(0xff6b7280), Night.muted)
+         : ms < 80
+-            ? const Color(0xff047857)
++            ? context.shade(const Color(0xff047857), Night.online)
+             : ms <= 200
+-                ? const Color(0xffb45309)
+-                : const Color(0xffb91c1c);
++                ? context.shade(const Color(0xffb45309), Night.warning)
++                : context.shade(const Color(0xffb91c1c), Night.error);
+     final value = ms == null ? unknown : '$ms ms';
+     final label = [if (route != null) route!, value].join(' · ');
+     final screens = display < 0 ? (fps.keys.toList()..sort()) : [display];
+diff --git a/flutter/lib/steaddesk/session_chrome.dart b/flutter/lib/steaddesk/session_chrome.dart
+new file mode 100644
+index 0000000..df9247c
+--- /dev/null
++++ b/flutter/lib/steaddesk/session_chrome.dart
+@@ -0,0 +1,315 @@
++import 'dart:math' as math;
++import 'dart:ui' as ui;
++import 'package:flutter/material.dart';
++import 'support_appearance.dart';
++
++class SessionViewFrame extends StatelessWidget {
++  final Widget header, body;
++  const SessionViewFrame({super.key, required this.header, required this.body});
++  @override
++  Widget build(BuildContext context) => ColoredBox(
++      color: context.shade(const Color(0xffeaf4f9), Night.window),
++      child: Column(children: [header, Expanded(child: body)]));
++}
++
++class SessionHeaderBar extends StatelessWidget {
++  final Widget device, status;
++  final List<Widget> actions;
++  final Widget? recording;
++  final String endLabel;
++  final VoidCallback onEnd;
++  const SessionHeaderBar(
++      {super.key,
++      required this.device,
++      required this.status,
++      required this.actions,
++      this.recording,
++      required this.endLabel,
++      required this.onEnd});
++  @override
++  Widget build(BuildContext context) => MenuButtonTheme(
++      data: MenuButtonThemeData(
++          style: ButtonStyle(
++        foregroundColor: WidgetStateProperty.resolveWith(
++            (states) => states.contains(WidgetState.disabled)
++                ? Night.muted
++                : context.night
++                    ? Night.text
++                    : context.supportAccent),
++        overlayColor: WidgetStatePropertyAll(context.supportHover),
++        shape: WidgetStatePropertyAll(
++            RoundedRectangleBorder(borderRadius: BorderRadius.circular(6))),
++      )),
++      child: Container(
++          height: 52,
++          padding: const EdgeInsets.symmetric(horizontal: 8),
++          decoration: BoxDecoration(
++              color: context.shade(Colors.white, Night.panel),
++              border: Border(bottom: BorderSide(color: context.supportLine))),
++          child: LayoutBuilder(builder: (context, bounds) {
++            final width = math.min(200.0, bounds.maxWidth * .22);
++            return Row(children: [
++              SizedBox(width: width, child: device),
++              Expanded(
++                  child: SingleChildScrollView(
++                      scrollDirection: Axis.horizontal,
++                      child: ConstrainedBox(
++                          constraints: BoxConstraints(
++                              minWidth:
++                                  math.max(0.0, bounds.maxWidth - width - 125)),
++                          child: Row(
++                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
++                              children: [
++                                status,
++                                if (actions.isNotEmpty)
++                                  MenuBar(
++                                      style: const MenuStyle(
++                                          elevation: WidgetStatePropertyAll(0),
++                                          backgroundColor:
++                                              WidgetStatePropertyAll(
++                                                  Colors.transparent),
++                                          padding: WidgetStatePropertyAll(
++                                              EdgeInsets.zero)),
++                                      children: actions),
++                                if (recording != null) recording!,
++                              ])))),
++              const SizedBox(width: 4),
++              FilledButton(
++                  style: FilledButton.styleFrom(
++                      backgroundColor: Night.danger,
++                      foregroundColor: Colors.white,
++                      shape: RoundedRectangleBorder(
++                          borderRadius: BorderRadius.circular(6)),
++                      padding: const EdgeInsets.symmetric(horizontal: 10)),
++                  onPressed: onEnd,
++                  child: Text(endLabel)),
++            ]);
++          })));
++}
++
++/// Session commands receive their native handlers after permission checks.
++class SessionCommand extends StatelessWidget {
++  final Widget? child, trailingIcon;
++  final VoidCallback? onPressed;
++  const SessionCommand(
++      {super.key, required this.child, this.trailingIcon, this.onPressed});
++  @override
++  Widget build(BuildContext context) => MenuItemButton(
++      onPressed: onPressed, trailingIcon: trailingIcon, child: child);
++}
++
++class SessionCommandMenu extends StatelessWidget {
++  final Widget? child;
++  final List<Widget> items;
++  final MenuStyle? style;
++  const SessionCommandMenu(
++      {super.key, required this.child, required this.items, this.style});
++  @override
++  Widget build(BuildContext context) => SubmenuButton(
++      child: child,
++      menuChildren: items,
++      menuStyle: context.night &&
++              context.findAncestorWidgetOfExactType<SessionHeaderBar>() != null
++          ? (style ?? const MenuStyle()).copyWith(
++              elevation: const WidgetStatePropertyAll(0),
++              backgroundColor: const WidgetStatePropertyAll(Night.overlay),
++              side:
++                  const WidgetStatePropertyAll(BorderSide(color: Night.strong)))
++          : style);
++}
++
++class SessionEncryptedBadge extends StatelessWidget {
++  final String label;
++  const SessionEncryptedBadge(this.label, {super.key});
++  @override
++  Widget build(BuildContext context) => Container(
++      padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
++      decoration: BoxDecoration(
++          color:
++              context.shade(const Color(0xffe3f7f1), const Color(0x184ade80)),
++          borderRadius: context.night ? BorderRadius.circular(4) : null),
++      child: Text(label,
++          style: TextStyle(
++              color: context.shade(const Color(0xff0b7a5e), Night.online),
++              fontSize: 12)));
++}
++
++class SessionPanelField extends StatelessWidget {
++  final String label, value;
++  const SessionPanelField(this.label, this.value, {super.key});
++  @override
++  Widget build(BuildContext context) {
++    final title = Text(label,
++        style: TextStyle(
++            fontSize: context.night ? 12 : 11, color: context.supportMuted));
++    final reading = SelectableText(value,
++        style: TextStyle(
++            color: context.supportInk,
++            fontFeatures: const [ui.FontFeature.tabularFigures()]));
++    return Padding(
++        padding: const EdgeInsets.fromLTRB(12, 5, 12, 5),
++        child: context.night
++            ? Row(children: [
++                title,
++                const SizedBox(width: 5),
++                Expanded(
++                    child:
++                        Align(alignment: Alignment.centerRight, child: reading))
++              ])
++            : Column(
++                crossAxisAlignment: CrossAxisAlignment.start,
++                children: [title, reading]));
++  }
++}
++
++class SessionDevicePane extends StatelessWidget {
++  final double width;
++  final bool reduced, compact;
++  final Widget toggle;
++  final String title;
++  final List<Widget> rows;
++  final GestureTapDownCallback? onContextMenu;
++  const SessionDevicePane(
++      {super.key,
++      required this.width,
++      required this.reduced,
++      required this.compact,
++      required this.toggle,
++      required this.title,
++      required this.rows,
++      this.onContextMenu});
++  @override
++  Widget build(BuildContext context) {
++    final night = context.night;
++    final border = night ? BorderRadius.zero : BorderRadius.circular(20);
++    final plain = night || reduced;
++    Widget glow(Alignment at, Color color) => DecoratedBox(
++        decoration: BoxDecoration(
++            gradient: RadialGradient(
++                center: at,
++                radius: .9,
++                colors: [color.withOpacity(.26), color.withOpacity(0)])));
++    final contents = compact
++        ? toggle
++        : SingleChildScrollView(
++            child: Column(
++                mainAxisSize: MainAxisSize.min,
++                crossAxisAlignment: CrossAxisAlignment.stretch,
++                children: [
++                Row(children: [
++                  const SizedBox(width: 12),
++                  Expanded(
++                      child: Text(title,
++                          overflow: TextOverflow.ellipsis,
++                          style: TextStyle(
++                              color: context.supportInk,
++                              fontWeight: FontWeight.w600))),
++                  toggle
++                ]),
++                const Divider(height: 1),
++                ...rows,
++                const SizedBox(height: 10)
++              ]));
++    return Align(
++        alignment: Alignment.topLeft,
++        widthFactor: 1,
++        child: Container(
++            width: width,
++            height: night ? double.infinity : null,
++            margin: night ? EdgeInsets.zero : const EdgeInsets.all(10),
++            decoration: BoxDecoration(
++                borderRadius: border,
++                boxShadow: night
++                    ? null
++                    : const [
++                        BoxShadow(
++                            color: Color(0x240b3c5a),
++                            offset: Offset(0, 10),
++                            blurRadius: 30)
++                      ]),
++            child: GestureDetector(
++                behavior: HitTestBehavior.opaque,
++                onSecondaryTapDown: onContextMenu,
++                child: ClipRRect(
++                    borderRadius: border,
++                    child: Stack(children: [
++                      if (!plain)
++                        Positioned.fill(
++                            child: Stack(fit: StackFit.expand, children: [
++                          glow(Alignment.topLeft, const Color(0xff1fa7e0)),
++                          glow(Alignment.centerRight, const Color(0xff34c3a6)),
++                          glow(Alignment.bottomLeft, context.supportAccent)
++                        ])),
++                      if (!plain)
++                        Positioned.fill(
++                            child: BackdropFilter(
++                                filter:
++                                    ui.ImageFilter.blur(sigmaX: 28, sigmaY: 28),
++                                child: const SizedBox.expand())),
++                      Container(
++                          height: night ? double.infinity : null,
++                          decoration: BoxDecoration(
++                              borderRadius: night ? null : border,
++                              border: night
++                                  ? const Border(
++                                      right: BorderSide(color: Night.line))
++                                  : Border.all(color: const Color(0xc7ffffff)),
++                              color: plain
++                                  ? context.shade(
++                                      const Color(0xffe8f4fa), Night.panel)
++                                  : null,
++                              gradient: plain
++                                  ? null
++                                  : const LinearGradient(
++                                      begin: Alignment.topLeft,
++                                      end: Alignment.bottomRight,
++                                      colors: [
++                                          Color(0x9effffff),
++                                          Color(0x6bffffff)
++                                        ])),
++                          child: contents)
++                    ])))));
++  }
++}
++
++class SessionAndroidNavigation extends StatelessWidget {
++  final String Function(String) label;
++  final bool enabled;
++  final VoidCallback back, home, apps, quieter, louder;
++  final Widget power;
++  const SessionAndroidNavigation(
++      {super.key,
++      required this.label,
++      required this.enabled,
++      required this.back,
++      required this.home,
++      required this.apps,
++      required this.quieter,
++      required this.louder,
++      required this.power});
++  @override
++  Widget build(BuildContext context) {
++    Widget key(String name, IconData icon, VoidCallback press) => Expanded(
++        child: IconButton(
++            tooltip: label(name),
++            padding: EdgeInsets.zero,
++            constraints: const BoxConstraints(),
++            color: context.night ? Night.muted : context.supportAccent,
++            iconSize: 18,
++            icon: FittedBox(child: Icon(icon)),
++            onPressed: enabled ? press : null));
++    return Material(
++        color: context.shade(Colors.white, Night.panel),
++        shape: context.night
++            ? const Border(top: BorderSide(color: Night.line))
++            : null,
++        child: Row(children: [
++          key('Back', Icons.arrow_back, back),
++          key('Home', Icons.home_outlined, home),
++          key('Recent apps', Icons.filter_none, apps),
++          key('Volume down', Icons.volume_down_outlined, quieter),
++          key('Volume up', Icons.volume_up_outlined, louder),
++          power
++        ]));
++  }
++}
+diff --git a/flutter/lib/steaddesk/session_surface.dart b/flutter/lib/steaddesk/session_surface.dart
+index 7144350..a0cd8c0 100644
+--- a/flutter/lib/steaddesk/session_surface.dart
++++ b/flutter/lib/steaddesk/session_surface.dart
+@@ -1,7 +1,5 @@
+ part of '../desktop/widgets/remote_toolbar.dart';
+ 
+-// TODO(U-01): Replace the inline session colors with the shared theme tokens.
+-const _surface = Color(0xffeaf4f9);
+ const _danger = Color(0xffdc2626);
+ const _numbers = TextStyle(fontFeatures: [ui.FontFeature.tabularFigures()]);
+ 
+@@ -77,26 +75,11 @@ class _SessionSurfaceState extends State<SessionSurface> {
+     final android = widget.ready && model.isPeerAndroid && !locked;
+     Widget layout(Widget? history, Widget? drawer, Widget? toolbar, Widget? actions) => Obx(() {
+       final grabbed = ffi.inputModel.relativeMouseMode.value;
+-      return ColoredBox(
+-          color: context.shade(_surface, Night.window),
+-          child: Column(children: [
+-            IgnorePointer(
++      return SessionViewFrame(
++            header: IgnorePointer(
+                 ignoring: grabbed,
+-                child: MenuButtonTheme(
+-                    data: MenuButtonThemeData(
+-                        style: ButtonStyle(
+-                            foregroundColor: MaterialStateProperty.resolveWith(
+-                                (states) =>
+-                                    states.contains(MaterialState.disabled)
+-                                        ? const Color(0xff9ca3af)
+-                                        : context.supportAccent),
+-                            overlayColor: const MaterialStatePropertyAll(
+-                                Color(0xfff3f4f6)),
+-                            shape: MaterialStatePropertyAll(
+-                                RoundedRectangleBorder(
+-                                    borderRadius: BorderRadius.circular(6))))),
+-                    child: _SessionHeader(session: widget, toolbar: toolbar))),
+-            Expanded(child: Builder(builder: (context) {
++                child: _SessionHeader(session: widget, toolbar: toolbar)),
++            body: Builder(builder: (context) {
+               final hasPanel = widget.ready || recovering || history != null;
+               final useHover = isWindows && !merchantEdition;
+               Widget devicePanel(_PanelMode mode, {bool preview = false}) =>
+@@ -155,12 +138,11 @@ class _SessionSurfaceState extends State<SessionSurface> {
+               if (!useHover) return Row(children: [devicePanel(panel), Expanded(child: canvas)]);
+               final pinned = panel == _PanelMode.expanded;
+               return SessionRail(pinned: pinned,
+-                expandedWidth: math.min(history == null ? 194.0 : 252.0, MediaQuery.sizeOf(context).width * .25) + 20,
+-                collapsedWidth: panel == _PanelMode.hidden ? 18 : 64,
++                expandedWidth: context.night ? math.min(248.0, MediaQuery.sizeOf(context).width * .28) : math.min(history == null ? 194.0 : 252.0, MediaQuery.sizeOf(context).width * .25) + 20,
++                collapsedWidth: panel == _PanelMode.hidden ? 18 : (context.night ? 44 : 64),
+                 panel: (expanded) => devicePanel(expanded ? _PanelMode.expanded : panel,
+                     preview: expanded && !pinned), canvas: canvas);
+-            }))
+-          ]));
++            }));
+     });
+     Widget withToolbar(Widget? history, Widget? drawer) {
+       final frame = widget.toolbarFrame;
+@@ -259,106 +241,50 @@ class _SessionHeader extends StatelessWidget {
+           onPressed: matches.isEmpty ? null : matches.first.onPressed);
+     }
+ 
+-    return Container(
+-        height: 52,
+-        padding: const EdgeInsets.symmetric(horizontal: 8),
+-        decoration: BoxDecoration(
+-            color: context.shade(Colors.white,Night.panel),
+-            border: Border(bottom: BorderSide(color: context.supportLine))),
+-        child: LayoutBuilder(builder: (context, bounds) {
+-          return Row(children: [
+-            SizedBox(
+-                width: math.min(200.0, bounds.maxWidth * .22),
+-                child: SessionDeviceTitle(
+-                    id: session.id,
+-                    alias: alias.isNotEmpty ? alias : localAlias,
+-                    subtitle: session.ready ? subtitle : '',
+-                    translate: translate)),
+-            Expanded(
+-                child: SingleChildScrollView(
+-                    scrollDirection: Axis.horizontal,
+-                    child: ConstrainedBox(
+-                        constraints: BoxConstraints(
+-                            minWidth: math.max(
+-                                0.0,
+-                                bounds.maxWidth -
+-                                    math.min(200.0, bounds.maxWidth * .22) -
+-                                    125)),
+-                        child: Row(
+-                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+-                            children: [
+-                              Row(children: [
+-                                if (session.ready)
+-                                  Obx(() => ConnectionTypeState.find(session.id)
+-                                              .secure
+-                                              .value !=
+-                                          ConnectionType.strSecure
+-                                      ? const SizedBox.shrink()
+-                                      : Container(
+-                                          padding: const EdgeInsets.symmetric(
+-                                              horizontal: 5, vertical: 2),
+-                                          color: const Color(0xffe3f7f1),
+-                                          child: Text(translate('Encrypted'),
+-                                              style: const TextStyle(
+-                                                  color: Color(0xff0b7a5e),
+-                                                  fontSize: 12)))),
+-                                if (ffi.sessionQuality != null)
+-                                  _SessionQualityBadge(ffi: ffi)
+-                                else if (session.ready)
+-                                  _Latency(ffi: ffi),
+-                              ]),
+-                              if (controlsEnabled)
+-                                MenuBar(
+-                                    style: const MenuStyle(
+-                                        elevation: MaterialStatePropertyAll(0),
+-                                        backgroundColor:
+-                                            MaterialStatePropertyAll(
+-                                                Colors.transparent),
+-                                        padding: MaterialStatePropertyAll(
+-                                            EdgeInsets.zero)),
+-                                    children: [
+-                                      if (toolbar != null) toolbar!,
+-                                      primary(SessionAction.transfer,
+-                                          'Transfer file'),
+-                                      _ChatMenu(
+-                                          id: session.id,
+-                                          ffi: ffi,
+-                                          label: 'Chat'),
+-                                      primary(SessionAction.screenshot,
+-                                          'Take screenshot'),
+-                                      if (ffi.sessionQuality != null)
+-                                        _QualityMenu(ffi: ffi, id: session.id),
+-                                      _DisplayMenu(
+-                                          id: session.id,
+-                                          ffi: ffi,
+-                                          state: session.state,
+-                                          label: 'Display',
+-                                          setFullscreen: (v) =>
+-                                              stateGlobal.setFullscreen(v)),
+-                                      _SubmenuButton(
+-                                          ffi: ffi,
+-                                          child: Text(translate('Tools')),
+-                                          menuChildren: tools),
+-                                    ]),
+-                              if (session.ready && recording.start)
+-                                _RecordingTime(model: recording),
+-                            ])))),
+-            const SizedBox(width: 4),
+-            FilledButton(
+-                style: FilledButton.styleFrom(
+-                    backgroundColor: _danger,
+-                    foregroundColor: Colors.white,
+-                    shape: RoundedRectangleBorder(
+-                        borderRadius: BorderRadius.circular(6)),
+-                    padding: const EdgeInsets.symmetric(horizontal: 10)),
+-                onPressed: () async {
+-                  if (await showConnEndAuditDialogCloseCanceled(ffi: ffi))
+-                    return;
+-                  closeConnection(id: session.id);
+-                },
+-                child: Text(translate('End session'))),
+-          ]);
+-        }));
++    return SessionHeaderBar(
++      device: SessionDeviceTitle(
++          id: session.id,
++          alias: alias.isNotEmpty ? alias : localAlias,
++          subtitle: session.ready ? subtitle : '',
++          translate: translate),
++      status: Row(children: [
++        if (session.ready)
++          Obx(() => ConnectionTypeState.find(session.id).secure.value !=
++                  ConnectionType.strSecure
++              ? const SizedBox.shrink()
++              : SessionEncryptedBadge(translate('Encrypted'))),
++        if (ffi.sessionQuality != null)
++          _SessionQualityBadge(ffi: ffi)
++        else if (session.ready)
++          _Latency(ffi: ffi),
++      ]),
++      actions: [
++        if (controlsEnabled) ...[
++          if (toolbar != null) toolbar!,
++          primary(SessionAction.transfer, 'Transfer file'),
++          _ChatMenu(id: session.id, ffi: ffi, label: 'Chat'),
++          primary(SessionAction.screenshot, 'Take screenshot'),
++          if (ffi.sessionQuality != null)
++            _QualityMenu(ffi: ffi, id: session.id),
++          _DisplayMenu(
++              id: session.id,
++              ffi: ffi,
++              state: session.state,
++              label: 'Display',
++              setFullscreen: (v) => stateGlobal.setFullscreen(v)),
++          _SubmenuButton(
++              ffi: ffi, child: Text(translate('Tools')), menuChildren: tools),
++        ]
++      ],
++      recording: session.ready && recording.start
++          ? _RecordingTime(model: recording)
++          : null,
++      endLabel: translate('End session'),
++      onEnd: () async {
++        if (await showConnEndAuditDialogCloseCanceled(ffi: ffi)) return;
++        closeConnection(id: session.id);
++      },
++    );
+   }
+ }
+ 
+@@ -509,7 +435,7 @@ class _RecordingTimeState extends State<_RecordingTime> {
+     final t = widget.model.elapsed.elapsed;
+     return Text(
+         '● ${translate("Recording in progress")} ${t.inMinutes}:${(t.inSeconds % 60).toString().padLeft(2, "0")}',
+-        style: _numbers.copyWith(color: _danger));
++        style: _numbers.copyWith(color: context.shade(_danger,Night.error)));
+   }
+ }
+ 
+@@ -547,50 +473,45 @@ class _AndroidKeys extends StatelessWidget {
+   Widget build(BuildContext context) {
+     final model = Provider.of<FfiModel>(context);
+     final input = ffi.inputModel;
+-    final _ocean = context.supportAccent;
+     final enabled = model.keyboard &&
+         !model.viewOnly &&
+         versionCmp(model.pi.version, '1.2.7') >= 0;
+-    Widget key(String label, IconData icon, VoidCallback press) => Expanded(
+-        child: IconButton(
+-            tooltip: translate(label),
+-            padding: EdgeInsets.zero,
+-            constraints: const BoxConstraints(),
+-            color: _ocean,
+-            iconSize: 18,
+-            icon: FittedBox(child: Icon(icon)),
+-            onPressed: enabled ? press : null));
+-    return Material(
+-        color: context.shade(Colors.white,Night.panel),
+-        child: Row(children: [
+-          key('Back', Icons.arrow_back, input.onMobileBack),
+-          key('Home', Icons.home_outlined, input.onMobileHome),
+-          key('Recent apps', Icons.filter_none, input.onMobileApps),
+-          key('Volume down', Icons.volume_down_outlined,
+-              input.onMobileVolumeDown),
+-          key('Volume up', Icons.volume_up_outlined, input.onMobileVolumeUp),
+-          PowerMenuButton(
+-              visible: isWindows && supportPowerMenuEnabled && model.isPeerAndroid,
+-              tooltip: translate('Power menu'),
+-              enabled: enabled,
+-              activeConnection: () {
+-                if (!model.isPeerAndroid || !model.keyboard || model.viewOnly ||
+-                    model.reconnectInputLocked) return '';
+-                return bind.sessionGetConnSessionId(sessionId: ffi.sessionId);
+-              },
+-              send: (connection, count) async {
+-                final peer = input.id;
+-                final session = ffi.sessionId.toString();
+-                if (model.pi.platformAdditions['steaddesk_counted_power_menu'] == true) {
+-                  await bind.sessionRequestPowerMenu(sessionId: ffi.sessionId, count: count);
+-                } else {
+-                  // Previous merchants support one menu through the established transport.
+-                  await input.onMobilePower();
+-                }
+-                if (context.mounted && bind.sessionGetConnSessionId(sessionId: ffi.sessionId) == connection) sent(count);
+-                unawaited(_recordPowerRequest(peer, session, connection, count));
+-              }),
+-        ]));
++    return SessionAndroidNavigation(
++        label: translate,
++        enabled: enabled,
++        back: input.onMobileBack,
++        home: input.onMobileHome,
++        apps: input.onMobileApps,
++        quieter: input.onMobileVolumeDown,
++        louder: input.onMobileVolumeUp,
++        power: PowerMenuButton(
++            visible:
++                isWindows && supportPowerMenuEnabled && model.isPeerAndroid,
++            tooltip: translate('Power menu'),
++            enabled: enabled,
++            activeConnection: () {
++              if (!model.isPeerAndroid ||
++                  !model.keyboard ||
++                  model.viewOnly ||
++                  model.reconnectInputLocked) return '';
++              return bind.sessionGetConnSessionId(sessionId: ffi.sessionId);
++            },
++            send: (connection, count) async {
++              final peer = input.id;
++              final session = ffi.sessionId.toString();
++              if (model.pi.platformAdditions['steaddesk_counted_power_menu'] ==
++                  true) {
++                await bind.sessionRequestPowerMenu(
++                    sessionId: ffi.sessionId, count: count);
++              } else {
++                // Previous merchants support one menu through the established transport.
++                await input.onMobilePower();
++              }
++              if (context.mounted &&
++                  bind.sessionGetConnSessionId(sessionId: ffi.sessionId) ==
++                      connection) sent(count);
++              unawaited(_recordPowerRequest(peer, session, connection, count));
++            }));
+   }
+ }
+ 
+@@ -648,137 +569,59 @@ class _DevicePanel extends StatelessWidget {
+                   onPressed: () => change(_PanelMode.expanded))));
+     final reduced = context.night || MediaQuery.disableAnimationsOf(context) ||
+         bind.mainGetOptionSync(key: kOptionAllowAlwaysSoftwareRender) == 'Y';
+-    final border = BorderRadius.circular(20);
+-    Widget glow(Alignment at, Color color) => DecoratedBox(
+-        decoration: BoxDecoration(
+-            gradient: RadialGradient(
+-                center: at,
+-                radius: .9,
+-                colors: [color.withOpacity(.26), color.withOpacity(0)])));
+-    Widget field(String label, String value) => Padding(
+-        padding: const EdgeInsets.fromLTRB(12, 5, 12, 5),
+-        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+-          Text(translate(label),
+-              style: TextStyle(fontSize: 11, color: context.supportMuted)),
+-          SelectableText(value, style: _numbers.copyWith(color: context.supportInk)),
+-        ]));
++    Widget field(String label, String value) =>
++        SessionPanelField(translate(label), value);
+     final compact = mode == _PanelMode.compact;
+     final width = compact
+         ? 44.0
+-        : math.min(history == null ? 194.0 : 252.0, MediaQuery.sizeOf(context).width * .25);
+-    return Align(
+-        alignment: Alignment.topLeft,
+-        widthFactor: 1,
+-        child: Container(
+-            width: width,
+-            margin: const EdgeInsets.all(10),
+-            decoration: BoxDecoration(borderRadius: border, boxShadow: const [
+-              BoxShadow(
+-                  color: Color(0x240b3c5a),
+-                  offset: Offset(0, 10),
+-                  blurRadius: 30)
+-            ]),
+-            child: GestureDetector(
+-                behavior: HitTestBehavior.opaque,
+-                onSecondaryTapDown: (event) =>
+-                    menu(context, event.globalPosition),
+-                child: ClipRRect(
+-                    borderRadius: border,
+-                    child: Stack(children: [
+-                      if (!reduced)
+-                        Positioned.fill(
+-                            child: Stack(fit: StackFit.expand, children: [
+-                          glow(Alignment.topLeft, const Color(0xff1fa7e0)),
+-                          glow(Alignment.centerRight, const Color(0xff34c3a6)),
+-                          glow(Alignment.bottomLeft, context.supportAccent),
+-                        ])),
+-                      if (!reduced)
+-                        Positioned.fill(
+-                            child: BackdropFilter(
+-                                filter:
+-                                    ui.ImageFilter.blur(sigmaX: 28, sigmaY: 28),
+-                                child: const SizedBox.expand())),
+-                      Container(
+-                          decoration: BoxDecoration(
+-                              borderRadius: border,
+-                              border:
+-                                  Border.all(color: const Color(0xc7ffffff)),
+-                              color: reduced ? context.shade(const Color(0xffe8f4fa),Night.panel) : null,
+-                              gradient: reduced
+-                                  ? null
+-                                  : const LinearGradient(
+-                                      begin: Alignment.topLeft,
+-                                      end: Alignment.bottomRight,
+-                                      colors: [
+-                                          Color(0x9effffff),
+-                                          Color(0x6bffffff)
+-                                        ])),
+-                          child: compact
+-                              ? expand
+-                              : SingleChildScrollView(
+-                                  child: Column(
+-                                      mainAxisSize: MainAxisSize.min,
+-                                      crossAxisAlignment:
+-                                          CrossAxisAlignment.stretch,
+-                                      children: [
+-                                      Row(children: [
+-                                        const SizedBox(width: 12),
+-                                        Expanded(
+-                                            child: Text(
+-                                                translate('Device status'),
+-                                                overflow: TextOverflow.ellipsis,
+-                                                style: TextStyle(
+-                                                    color: context.supportInk,
+-                                                    fontWeight:
+-                                                        FontWeight.w600))),
+-                                        IconButton(
+-                                            tooltip:
+-                                                translate(pinPreview ? 'Pin panel' : 'Collapse panel'),
+-                                            icon:
+-                                                const Icon(Icons.chevron_left),
+-                                            onPressed: () =>
+-                                                change(pinPreview ? _PanelMode.expanded : _PanelMode.compact))
+-                                      ]),
+-                                      const Divider(height: 1),
+-                                      if (pi.platform.isNotEmpty)
+-                                        field('Platform', pi.platform),
+-                                      if (model.isPeerAndroid &&
+-                                          pi.hostname.isNotEmpty)
+-                                        field('Device model', pi.hostname),
+-                                      AnimatedBuilder(
+-                                          animation: ffi.canvasModel,
+-                                          builder: (context, _) {
+-                                            final rect = model.rect;
+-                                            return rect == null || rect.isEmpty
+-                                                ? const SizedBox.shrink()
+-                                                : field('Resolution',
+-                                                    '${rect.width.toInt()} × ${rect.height.toInt()}');
+-                                          }),
+-                                      Obx(() {
+-                                        final value =
+-                                            ConnectionTypeState.find(ffi.id)
+-                                                .direct
+-                                                .value;
+-                                        if (value != ConnectionType.strDirect &&
+-                                            value !=
+-                                                ConnectionType.strIndirect) {
+-                                          return const SizedBox.shrink();
+-                                        }
+-                                        return field(
+-                                            'Connection type',
+-                                            translate(value ==
+-                                                    ConnectionType.strDirect
+-                                                ? 'Direct connection'
+-                                                : 'Relay connection'));
+-                                      }),
+-                                      if (pi.version.isNotEmpty)
+-                                        field('SteadDesk version', pi.version),
+-                                      if (opsHealthEnabled)
+-                                        OpsHealthHost(HealthSurface.sidebar, device: ffi.id),
+-                                      if (actions != null) actions!,
+-                                      if (history != null) history!,
+-                                      const SizedBox(height: 10),
+-                                    ]))),
+-                    ])))));
++        : context.night
++            ? math.min(248.0, MediaQuery.sizeOf(context).width * .28)
++            : math.min(history == null ? 194.0 : 252.0,
++                MediaQuery.sizeOf(context).width * .25);
++    return SessionDevicePane(
++      width: width,
++      reduced: reduced,
++      compact: compact,
++      title: translate('Device status'),
++      onContextMenu: (event) => menu(context, event.globalPosition),
++      toggle: compact
++          ? expand
++          : IconButton(
++              tooltip: translate(pinPreview ? 'Pin panel' : 'Collapse panel'),
++              icon: const Icon(Icons.chevron_left),
++              onPressed: () => change(
++                  pinPreview ? _PanelMode.expanded : _PanelMode.compact)),
++      rows: [
++        if (pi.platform.isNotEmpty) field('Platform', pi.platform),
++        if (model.isPeerAndroid && pi.hostname.isNotEmpty)
++          field('Device model', pi.hostname),
++        AnimatedBuilder(
++            animation: ffi.canvasModel,
++            builder: (context, _) {
++              final rect = model.rect;
++              return rect == null || rect.isEmpty
++                  ? const SizedBox.shrink()
++                  : field('Resolution',
++                      '${rect.width.toInt()} × ${rect.height.toInt()}');
++            }),
++        Obx(() {
++          final value = ConnectionTypeState.find(ffi.id).direct.value;
++          if (value != ConnectionType.strDirect &&
++              value != ConnectionType.strIndirect) {
++            return const SizedBox.shrink();
++          }
++          return field(
++              'Connection type',
++              translate(value == ConnectionType.strDirect
++                  ? 'Direct connection'
++                  : 'Relay connection'));
++        }),
++        if (pi.version.isNotEmpty) field('SteadDesk version', pi.version),
++        if (opsHealthEnabled)
++          OpsHealthHost(HealthSurface.sidebar, device: ffi.id),
++        if (actions != null) actions!,
++        if (history != null) history!,
++      ],
++    );
+   }
+ }
+diff --git a/flutter/test/steaddesk/j25c_capture.dart b/flutter/test/steaddesk/j25c_capture.dart
+new file mode 100644
+index 0000000..fa6b8c5
+--- /dev/null
++++ b/flutter/test/steaddesk/j25c_capture.dart
+@@ -0,0 +1,65 @@
++import 'dart:io';
++import 'dart:ui' as ui;
++
++import 'package:flutter/material.dart';
++import 'package:flutter/rendering.dart';
++import 'package:flutter/services.dart';
++import 'package:flutter_test/flutter_test.dart';
++
++// Register actual system faces in the widget-test engine, which otherwise uses
++// the Ahem square-glyph font. These files are not bundled in the product.
++Future<void> loadJ25Fonts() async {
++  final cjk = [
++    if (Platform.environment['STEADDESK_J25_FONT'] case final String path) path,
++    if (Platform.isWindows) ...[
++      r'C:\Windows\Fonts\msyh.ttc',
++      r'C:\Windows\Fonts\simsun.ttc',
++      r'C:\Windows\Fonts\msjh.ttc',
++      r'C:\Windows\Fonts\meiryo.ttc',
++    ],
++    if (Platform.isMacOS) '/System/Library/Fonts/STHeiti Light.ttc',
++  ].map(File.new).where((f) => f.existsSync());
++  if (cjk.isEmpty && Platform.environment.containsKey('STEADDESK_J25_SHOTS')) {
++    throw StateError('A CJK font is required for the session screenshots.');
++  }
++  if (cjk.isNotEmpty) {
++    final data = ByteData.sublistView(cjk.first.readAsBytesSync());
++    for (final family in [
++      'J25 UI',
++      'Inter',
++      'Microsoft YaHei UI',
++      'Segoe UI'
++    ]) {
++      await (FontLoader(family)..addFont(Future.value(data))).load();
++    }
++  }
++  final mono = [
++    if (Platform.isWindows) r'C:\Windows\Fonts\consola.ttf',
++    if (Platform.isMacOS) '/System/Library/Fonts/Menlo.ttc',
++  ].map(File.new).where((f) => f.existsSync());
++  if (mono.isNotEmpty) {
++    final bytes = ByteData.sublistView(mono.first.readAsBytesSync());
++    await (FontLoader('Consolas')..addFont(Future.value(bytes))).load();
++  }
++  await (FontLoader('MaterialIcons')
++        ..addFont(rootBundle.load('fonts/MaterialIcons-Regular.otf')))
++      .load();
++}
++
++Future<void> writeJ25Capture(
++    WidgetTester tester, GlobalKey boundary, String name) async {
++  final dir = Platform.environment['STEADDESK_J25_SHOTS'];
++  if (dir == null || dir.isEmpty) return;
++  final render =
++      boundary.currentContext!.findRenderObject() as RenderRepaintBoundary;
++  await tester.runAsync(() async {
++    final image = await render.toImage(pixelRatio: 1);
++    try {
++      final bytes = await image.toByteData(format: ui.ImageByteFormat.png);
++      Directory(dir).createSync(recursive: true);
++      await File('$dir/$name.png').writeAsBytes(bytes!.buffer.asUint8List());
++    } finally {
++      image.dispose();
++    }
++  });
++}
+diff --git a/flutter/test/steaddesk/j25c_cases_test.dart b/flutter/test/steaddesk/j25c_cases_test.dart
+new file mode 100644
+index 0000000..e52910c
+--- /dev/null
++++ b/flutter/test/steaddesk/j25c_cases_test.dart
+@@ -0,0 +1,171 @@
++import 'package:flutter/material.dart';
++import 'package:flutter_test/flutter_test.dart';
++
++import 'package:flutter_hbb/steaddesk/cases/case_dialog.dart';
++import 'package:flutter_hbb/steaddesk/cases/case_store.dart';
++import 'package:flutter_hbb/steaddesk/cases/history_ui.dart';
++import 'package:flutter_hbb/steaddesk/session_rail.dart';
++import 'package:flutter_hbb/steaddesk/support_appearance.dart';
++import 'package:flutter_hbb/steaddesk/theme.dart';
++import 'j25c_capture.dart';
++
++class _Store extends Fake implements CaseStore {
++  @override
++  Future<bool> isAppendOnly(String account, String id) async => false;
++}
++
++final _clock = DateTime.utc(2026, 11, 19, 19, 10);
++
++Map<String, dynamic> _row(int age, int minutes, String category, String result,
++    String agent, String note) {
++  final ended = _clock.subtract(Duration(days: age));
++  return {
++    'id': 'demo-$age',
++    'device_id': 'demo-101',
++    'display_name': '示例商户 A 前台点单平板',
++    'started_at': ended.subtract(Duration(minutes: minutes)).toIso8601String(),
++    'ended_at': ended.toIso8601String(),
++    'category': category,
++    'result': result,
++    'agent': agent,
++    'note': note,
++  };
++}
++
++final _records = [
++  _row(
++      0, 14, 'printer', 'resolved', 'support-demo', '后厨打印机网线松了，商户重新插好，重打了两张单。'),
++  _row(1, 9, 'other', 'resolved', 'support-demo', '重新进入 Kiosk 模式后，打印服务恢复。'),
++  _row(5, 12, 'network', 'unresolved', 'amy', '路由器需要更换，已约周四上门。'),
++  _row(8, 3, 'pos_operation', 'resolved', 'amy', '前台已恢复接单。'),
++];
++
++void main() {
++  setUpAll(loadJ25Fonts);
++  for (final night in [false, true]) {
++    final mode = night ? 'night' : 'day';
++    testWidgets(
++        'Windows case surfaces, scoped history and session note ($mode)',
++        (t) async {
++      t.view.devicePixelRatio = 1;
++      t.view.physicalSize = const Size(1280, 800);
++      addTearDown(t.view.resetPhysicalSize);
++      addTearDown(t.view.resetDevicePixelRatio);
++      final frame = GlobalKey();
++      final base = ThemeData(
++        platform: TargetPlatform.windows,
++        brightness: night ? Brightness.dark : Brightness.light,
++        fontFamily: 'J25 UI',
++      );
++      var open = false;
++      var note = _records.first['note'] as String;
++      final data = <String, dynamic>{
++        'session': 'synthetic-session',
++        'note': note,
++        'summary': {'latest': _records.first, 'count_30d': _records.length},
++        'can_store': false,
++        'device': _records,
++        'device_note': '后厨打印机重启后要等一分钟才会重新连上，请先确认出纸。',
++      };
++      await t.pumpWidget(MaterialApp(
++        theme: night ? supportNightTheme(base) : base,
++        builder: (_, child) => RepaintBoundary(key: frame, child: child!),
++        home: StatefulBuilder(builder: (context, refresh) {
++          return Scaffold(
++            appBar: AppBar(
++              title: const Text('示例商户 A · 前台点单平板'),
++              actions: [
++                TextButton(
++                    onPressed: () => showCaseCloseDialog(context,
++                            store: _Store(),
++                            account: 'support-demo',
++                            record: {
++                              ..._records.first,
++                              'status': 'draft',
++                              'help_id': '1042',
++                              'note': note,
++                              'auto': {'files': 0}
++                            }),
++                    child: const Text('结案')),
++              ],
++            ),
++            body: SessionRail(
++              pinned: true,
++              collapsedWidth: 44,
++              expandedWidth: 240,
++              panel: (_) => Material(
++                color:
++                    context.shade(SteadDeskTheme.sessionSurface, Night.panel),
++                child: ListView(
++                    padding: const EdgeInsets.only(top: 16),
++                    children: [
++                      CaseHistorySidebar(
++                          data: data,
++                          clock: () => _clock,
++                          onOpen: () => refresh(() => open = true),
++                          onNoteChanged: (s) => note = s),
++                    ]),
++              ),
++              canvas: Stack(fit: StackFit.expand, children: [
++                ColoredBox(
++                    color:
++                        context.shade(const Color(0xfff2f5f7), Night.window)),
++                if (open)
++                  Align(
++                      alignment: Alignment.centerLeft,
++                      child: SizedBox(
++                          width: 420,
++                          child: CaseHistoryDrawer(
++                              data: data,
++                              clock: () => _clock,
++                              translate: (key) =>
++                                  key == 'Expand note' ? '展开' : '收起',
++                              onClose: () => refresh(() => open = false),
++                              onEditDevice: () {},
++                              onAppend: (_, __, ___) async {}))),
++              ]),
++            ),
++          );
++        }),
++      ));
++      await t.pumpAndSettle();
++      final noteField = t.widget<TextField>(find.byType(TextField));
++      expect(noteField.decoration!.fillColor,
++          night ? Night.panel : Colors.white.withOpacity(.72));
++      await t.tap(find.text('历史报告'));
++      await t.pumpAndSettle();
++      expect(find.textContaining('近 30 天 4 次 · 未解决 1'), findsOneWidget);
++      final drawerMaterial = t
++          .widgetList<Material>(find.descendant(
++              of: find.byType(CaseHistoryDrawer),
++              matching: find.byType(Material)))
++          .first;
++      expect(drawerMaterial.color, night ? Night.overlay : Colors.white);
++      expect(
++          t
++              .widget<TextButton>(find.widgetWithText(TextButton, '本门店'))
++              .onPressed,
++          isNull);
++      await writeJ25Capture(t, frame, 'history-$mode');
++      await t.tap(find.byTooltip('关闭历史报告'));
++      await t.pumpAndSettle();
++      await t.tap(find.text('结案'));
++      await t.pumpAndSettle();
++      expect(t.widget<Dialog>(find.byType(Dialog)).backgroundColor,
++          night ? Night.overlay : Colors.white);
++      final selected =
++          t.widget<OutlinedButton>(find.widgetWithText(OutlinedButton, '已解决'));
++      expect(selected.style!.backgroundColor!.resolve({}),
++          night ? Night.selection : SteadDeskTheme.brandSurface);
++      final save = t.widget<ElevatedButton>(
++          find.widgetWithText(ElevatedButton, '保存（Enter）'));
++      expect(save.style!.foregroundColor!.resolve({}),
++          night ? Night.window : Colors.white);
++      await writeJ25Capture(t, frame, 'case-$mode');
++      await t.tap(find.widgetWithText(OutlinedButton, '未解决'));
++      await t.pumpAndSettle();
++      expect(find.text('跟进人'), findsOneWidget);
++      expect(t.takeException(), isNull);
++    });
++  }
++}
+diff --git a/flutter/test/steaddesk/j25c_session_test.dart b/flutter/test/steaddesk/j25c_session_test.dart
+new file mode 100644
+index 0000000..057f25c
+--- /dev/null
++++ b/flutter/test/steaddesk/j25c_session_test.dart
+@@ -0,0 +1,189 @@
++import 'package:flutter/material.dart';
++import 'package:flutter_test/flutter_test.dart';
++import 'package:flutter_hbb/steaddesk/cases/history_ui.dart';
++import 'package:flutter_hbb/steaddesk/device_id_widgets.dart';
++import 'package:flutter_hbb/steaddesk/ops_health.dart';
++import 'package:flutter_hbb/steaddesk/ops_health_widgets.dart';
++import 'package:flutter_hbb/steaddesk/power_menu.dart';
++import 'package:flutter_hbb/steaddesk/quality_badge.dart';
++import 'package:flutter_hbb/steaddesk/session_chrome.dart';
++import 'package:flutter_hbb/steaddesk/session_rail.dart';
++import 'package:flutter_hbb/steaddesk/support_appearance.dart';
++import 'j25c_capture.dart';
++
++class _NoTransport extends Fake implements HealthApi {}
++
++void main() {
++  setUpAll(loadJ25Fonts);
++  for (final night in [false, true]) {
++    final mode = night ? 'night' : 'day';
++    testWidgets(
++        'session-$mode renders actionable session controls, health and notes',
++        (t) async {
++      t.view.devicePixelRatio = 1;
++      t.view.physicalSize = const Size(1280, 800);
++      addTearDown(t.view.resetPhysicalSize);
++      addTearDown(t.view.resetDevicePixelRatio);
++      final time = DateTime.utc(2026, 11, 19, 19, 10);
++      final health =
++          HealthStore(_NoTransport(), isCurrent: () => true, now: () => time);
++      const id = '123456789';
++      health.devices[id] = DeviceHealth.from({
++        'device_id': id,
++        'status': 'normal',
++        'reasons': <String>[],
++        'updated_at': time.toIso8601String()
++      });
++      final boundary = GlobalKey();
++      int actions = 0;
++      var note = '';
++      void pressed() => actions++;
++      final colors =
++          night ? supportNightTheme(ThemeData.dark()) : ThemeData.light();
++      final theme = colors.copyWith(
++          textTheme: colors.textTheme.apply(fontFamily: 'J25 UI'));
++      final paneWidth = night ? 248.0 : 252.0;
++      const labels = {
++        'Back': '返回',
++        'Home': '主屏幕',
++        'Recent apps': '最近任务',
++        'Volume down': '调低音量',
++        'Volume up': '调高音量'
++      };
++      final header = SessionHeaderBar(
++        device: SessionDeviceTitle(
++            id: id,
++            alias: '示例商户 · 前台点单平板',
++            subtitle: 'OrderPAD 3 · Android',
++            translate: (s) => s),
++        status: Row(children: [
++          const SessionEncryptedBadge('已加密'),
++          QualityBadge(
++              delay: 37,
++              route: '直连',
++              unknown: '未知',
++              fps: const {0: 30},
++              display: 0,
++              monitorLabel: (i) => '屏幕 ${i + 1}',
++              details: const []),
++        ]),
++        actions: [
++          SessionCommand(child: const Text('传输文件'), onPressed: pressed),
++          SessionCommandMenu(child: const Text('聊天'), items: [
++            SessionCommand(child: const Text('文字聊天'), onPressed: pressed)
++          ]),
++          SessionCommand(child: const Text('截屏'), onPressed: pressed),
++          SessionCommandMenu(child: const Text('画面质量'), items: [
++            SessionCommand(child: const Text('自动'), onPressed: pressed)
++          ]),
++          SessionCommandMenu(child: const Text('显示'), items: [
++            SessionCommand(child: const Text('显示器 1'), onPressed: pressed)
++          ]),
++          SessionCommandMenu(child: const Text('工具'), items: [
++            SessionCommand(child: const Text('全屏'), onPressed: pressed)
++          ]),
++        ],
++        endLabel: '结束会话',
++        onEnd: pressed,
++      );
++      final rail = SessionRail(
++        pinned: true,
++        collapsedWidth: 64,
++        expandedWidth: paneWidth + (night ? 0 : 20),
++        panel: (expanded) => SessionDevicePane(
++            width: paneWidth,
++            reduced: false,
++            compact: !expanded,
++            toggle: IconButton(
++                icon: const Icon(Icons.chevron_left),
++                onPressed: pressed,
++                tooltip: '折叠设备状态栏'),
++            title: '设备状态',
++            rows: [
++              const SessionPanelField('平台', 'Android 14'),
++              const SessionPanelField('设备型号', 'OrderPAD 3'),
++              const SessionPanelField('分辨率', '1340 × 800'),
++              const SessionPanelField('连接方式', '直连'),
++              const SessionPanelField('SteadDesk 版本', '1.5.0'),
++              Padding(
++                  padding: const EdgeInsets.symmetric(horizontal: 12),
++                  child: HealthDeviceView(store: health, id: id)),
++              CaseHistorySidebar(
++                  data: {
++                    'session': 'display-fixture',
++                    'note': '测试 Kiosk 模式',
++                    'summary': {
++                      'count_30d': 2,
++                      'latest': {
++                        'category': 'printer',
++                        'result': 'resolved',
++                        'ended_at': time.toIso8601String()
++                      }
++                    }
++                  },
++                  clock: () => time,
++                  onOpen: pressed,
++                  onNoteChanged: (text) => note = text),
++            ]),
++        canvas: Center(
++            child: Padding(
++                padding: const EdgeInsets.symmetric(horizontal: 16),
++                child: AspectRatio(
++                    aspectRatio: 1340 / 852,
++                    child: Column(children: [
++                      Expanded(
++                          child: ColoredBox(
++                              color:
++                                  night ? Night.panel : const Color(0xfff8fbfc),
++                              child: const Center(
++                                  child: Column(
++                                      mainAxisSize: MainAxisSize.min,
++                                      children: [
++                                    Icon(Icons.desktop_windows_outlined,
++                                        size: 36),
++                                    SizedBox(height: 8),
++                                    Text('商户设备画面')
++                                  ])))),
++                      SizedBox(
++                          height: 36,
++                          child: SessionAndroidNavigation(
++                              label: (s) => labels[s] ?? s,
++                              enabled: true,
++                              back: pressed,
++                              home: pressed,
++                              apps: pressed,
++                              quieter: pressed,
++                              louder: pressed,
++                              power: PowerMenuButton(
++                                  visible: true,
++                                  enabled: true,
++                                  activeConnection: () => 'local-fixture',
++                                  send: (_, __) async {
++                                    pressed();
++                                  },
++                                  tooltip: '电源菜单'))),
++                    ])))),
++      );
++      await t.pumpWidget(MaterialApp(
++          theme: theme,
++          home: RepaintBoundary(
++              key: boundary,
++              child: Scaffold(
++                  body: SessionViewFrame(header: header, body: rail)))));
++      await t.pumpAndSettle();
++      expect(find.text('设备健康 · 正常'), findsOneWidget);
++      expect(
++          find.byType(BackdropFilter), night ? findsNothing : findsOneWidget);
++      expect(t.takeException(), isNull);
++      await writeJ25Capture(t, boundary, 'session-$mode');
++      await t.tap(find.text('传输文件'));
++      await t.pumpAndSettle();
++      expect(actions, 1);
++      await t.tap(find.byTooltip('主屏幕'));
++      await t.pumpAndSettle();
++      expect(actions, 2);
++      await t.enterText(find.byType(TextField), '测试会话记录');
++      expect(note, '测试会话记录');
++    });
++  }
++}
+diff --git a/flutter/test/steaddesk/j25c_transfer_test.dart b/flutter/test/steaddesk/j25c_transfer_test.dart
+new file mode 100644
+index 0000000..1097e2c
+--- /dev/null
++++ b/flutter/test/steaddesk/j25c_transfer_test.dart
+@@ -0,0 +1,240 @@
++import 'dart:convert';
++
++import 'package:flutter/material.dart';
++import 'package:flutter_hbb/models/remote_file_scope.dart';
++import 'package:flutter_hbb/steaddesk/file_transfer_v10.dart';
++import 'package:flutter_hbb/steaddesk/support_appearance.dart';
++import 'package:flutter_test/flutter_test.dart';
++
++import 'j25c_capture.dart';
++
++const localFiles = [
++  ['菜单图片', '', '目录', '2026-11-12 10:20'],
++  ['商户培训资料', '', '目录', '2026-10-28 16:05'],
++  ['SteadDesk 日志', '', '目录', '2026-11-17 19:14'],
++  ['打印机驱动', '', '目录', '2026-09-03 09:41'],
++  ['菜单图片-2026-冬.zip', '48.2 MB', 'ZIP', '2026-11-16 14:32'],
++  ['价目表-11月.xlsx', '86 KB', 'XLSX', '2026-11-15 11:08'],
++  ['开机自检步骤.pdf', '1.2 MB', 'PDF', '2026-11-02 17:26'],
++  ['小票模板-80mm.txt', '3 KB', 'TXT', '2026-10-19 08:55'],
++  ['员工排班-示例.xlsx', '41 KB', 'XLSX', '2026-10-11 13:12'],
++  ['收银操作说明.pdf', '2.8 MB', 'PDF', '2026-09-27 15:40'],
++  ['rs_r2026-11-17_18-43.log', '21.7 KB', 'LOG', '2026-11-17 18:43'],
++  ['打印测试页.pdf', '96 KB', 'PDF', '2026-08-30 10:02'],
++];
++const remoteFiles = [
++  ['旧菜单', '', '目录', '2026-08-14 12:30'],
++  ['菜单图片-2026-秋.zip', '45.9 MB', 'ZIP', '2026-09-01 09:15'],
++  ['价目表-10月.xlsx', '84 KB', 'XLSX', '2026-10-01 10:44'],
++  ['开机自检步骤.pdf', '1.2 MB', 'PDF', '2026-11-02 17:31'],
++  ['update-notes.txt', '2 KB', 'TXT', '2026-11-10 20:18'],
++];
++
++void main() {
++  TestWidgetsFlutterBinding.ensureInitialized();
++  setUpAll(loadJ25Fonts);
++  testWidgets(
++      'Android locations preserve grant and availability hints and recheck at click',
++      (t) async {
++    RemoteFileScope? scope(bool allowed) =>
++        RemoteFileScope.fromPeerAdditions(jsonEncode({
++          'steaddesk_file_scope': {
++            'authorized': allowed,
++            'download': '/allowed/download',
++            'pictures': '/allowed/pictures',
++            'logs': '/allowed/logs'
++          }
++        }));
++    var current = scope(false);
++    final opened = <String>[];
++    Future<void> render() => t.pumpWidget(MaterialApp(
++        home: Scaffold(
++            body: TransferScopedPlaces(
++                scope: current!,
++                currentScope: () => current,
++                directory: '/allowed/logs',
++                label: (s) => s,
++                open: opened.add))));
++    await render();
++    expect(find.text('Device not authorized'), findsNWidgets(4));
++    await t.tap(find.text('Download'));
++    expect(opened, isEmpty);
++    await t.tap(find.text('SteadDesk logs'));
++    expect(opened, ['/allowed/logs']);
++    current = scope(true);
++    await render();
++    expect(find.text('Unavailable'), findsNWidgets(2));
++    await t.tap(find.text('Pictures'));
++    expect(opened.last, '/allowed/pictures');
++    current = scope(false);
++    await t.tap(find.text('Download'));
++    expect(opened, ['/allowed/logs', '/allowed/pictures']);
++  });
++
++  for (final night in [false, true]) {
++    testWidgets(
++        'v10 transfer ${night ? 'night' : 'day'} renders and acts on synthetic directory and jobs',
++        (t) async {
++      t.view.devicePixelRatio = 1;
++      t.view.physicalSize = const Size(1280, 720);
++      addTearDown(t.view.reset);
++      final capture = GlobalKey();
++      final leftPath =
++          TextEditingController(text: r'C:\Users\support\Documents');
++      final rightPath =
++          TextEditingController(text: '/storage/emulated/0/Download');
++      addTearDown(leftPath.dispose);
++      addTearDown(rightPath.dispose);
++      int? localSelected;
++      bool done = true, expanded = true;
++      final base = ThemeData(
++          brightness: night ? Brightness.dark : Brightness.light,
++          fontFamily: 'J25 UI');
++      await t.pumpWidget(MaterialApp(
++          theme: night ? supportNightTheme(base) : base,
++          home: RepaintBoundary(
++              key: capture,
++              child: StatefulBuilder(builder: (context, set) {
++                Widget pane(bool local) => TransferPaneFrame(
++                      title: local ? '本地电脑' : '远程设备',
++                      path: TransferPathField(
++                          controller: local ? leftPath : rightPath,
++                          label: local ? '本地路径' : '远程路径',
++                          onSubmitted: (_) {}),
++                      action: TransferActionButton(
++                          key: ValueKey(local ? 'test-send' : 'test-receive'),
++                          local: local,
++                          label: local ? '发送' : '接收',
++                          onPressed:
++                              local && localSelected != null ? () {} : null),
++                      toolsLabel: '更多',
++                      tools: const Text('刷新'),
++                      places: ListView(children: [
++                        for (final name in local
++                            ? ['桌面', '下载', '文档']
++                            : ['下载', '图片', '视频', 'DCIM', 'SteadDesk 日志'])
++                          TransferPlace(name,
++                              selected: name == (local ? '文档' : '下载'),
++                              onPressed: () {}),
++                        if (local) ...[
++                          TransferPlace('此电脑',
++                              leading: const Icon(Icons.expand_more, size: 15),
++                              onPressed: () {}),
++                          for (final (name, free) in [
++                            ('本地磁盘 (C:)', '120 GB 可用'),
++                            ('数据 (D:)', '412 GB 可用'),
++                            ('U 盘 (E:)', '14 GB 可用')
++                          ])
++                            TransferPlace(name,
++                                subtitle: free,
++                                indented: true,
++                                onPressed: () {}),
++                        ],
++                      ]),
++                      table: LayoutBuilder(builder: (context, box) {
++                        final cols = [
++                          for (final share in [.52, .10, .02, .36])
++                            52 + (box.maxWidth - 208) * share
++                        ];
++                        final files = local ? localFiles : remoteFiles;
++                        return Column(children: [
++                          TransferTableHeader(
++                              widths: cols,
++                              labels: const ['名称', '大小', '类型', '修改时间'],
++                              sortedColumn: 0,
++                              ascending: true,
++                              onSort: (_) {},
++                              divider: (_) => const SizedBox(width: 7)),
++                          Expanded(
++                              child: ListView.builder(
++                                  itemExtent: 28,
++                                  itemCount: files.length,
++                                  itemBuilder: (_, i) => TransferFileRow(
++                                      cells: files[i],
++                                      widths: cols,
++                                      selected: local && localSelected == i,
++                                      onTap: () {
++                                        if (local) set(() => localSelected = i);
++                                      }))),
++                        ]);
++                      }),
++                    );
++                return TransferBoard(
++                    local: pane(true),
++                    remote: pane(false),
++                    localWidth: (1280 - 7) / 2,
++                    separator: VerticalDivider(
++                        width: 7, thickness: 1, color: context.ftLine),
++                    queueSplitter:
++                        Divider(height: 7, thickness: 1, color: context.ftLine),
++                    queueHeader: TransferQueueHeader(
++                        title: '传输队列',
++                        summary: '1 进行中 · ${done ? "1" : "0"} 已完成',
++                        clearLabel: '清除已完成',
++                        collapsed: !expanded,
++                        onToggle: () => set(() => expanded = !expanded),
++                        onClear: done ? () => set(() => done = false) : null),
++                    queueHeight: expanded ? 100 : 0,
++                    queueBody: ListView(children: [
++                      TransferJobRow(
++                          name: localFiles[4][0],
++                          direction: '本地 → 远程 · 下载',
++                          status: '',
++                          trailing: '62%',
++                          progress: .62,
++                          actions: const Icon(Icons.close, size: 15)),
++                      if (done)
++                        TransferJobRow(
++                            name: localFiles[10][0],
++                            direction: '远程 → 本地 · 文档',
++                            status: '已完成',
++                            trailing: '21.7 KB',
++                            actions: const Icon(Icons.close, size: 15)),
++                    ]));
++              }))));
++      await t.pumpAndSettle();
++      final file = find.text(localFiles[4][0]).first;
++      expect(
++          t
++              .widget<TransferActionButton>(
++                  find.byKey(const ValueKey('test-send')))
++              .onPressed,
++          isNull);
++      await t.tap(file);
++      await t.pumpAndSettle();
++      expect(
++          t
++              .widget<TransferActionButton>(
++                  find.byKey(const ValueKey('test-send')))
++              .onPressed,
++          isNotNull);
++      expect(
++          t
++              .widget<LinearProgressIndicator>(
++                  find.byType(LinearProgressIndicator))
++              .value,
++          .62);
++      expect(
++          t
++              .widget<Material>(find
++                  .descendant(
++                      of: find.byType(TransferBoard),
++                      matching: find.byType(Material))
++                  .first)
++              .color,
++          night ? const Color(0xff08090a) : Colors.white);
++      await writeJ25Capture(
++          t, capture, night ? 'transfer-night' : 'transfer-day');
++      await t.tap(find.text('清除已完成'));
++      await t.pumpAndSettle();
++      expect(find.text('已完成'), findsNothing);
++      await t.tap(find.text('传输队列'));
++      await t.pumpAndSettle();
++      expect(find.byType(TransferJobRow), findsNothing);
++      await t.tap(find.byTooltip('更多').first);
++      await t.pumpAndSettle();
++      expect(find.text('刷新'), findsOneWidget);
++      expect(t.takeException(), isNull);
++    });
++  }
++}
+diff --git a/flutter/lib/steaddesk/ops_health_widgets.dart b/flutter/lib/steaddesk/ops_health_widgets.dart
+index ca2726e..8be5483 100644
+--- a/flutter/lib/steaddesk/ops_health_widgets.dart
++++ b/flutter/lib/steaddesk/ops_health_widgets.dart
+@@ -1,2 +1,3 @@
++import 'support_appearance.dart';
+ import 'package:flutter/material.dart';
+ import 'ops_health.dart';
+@@ -82,5 +83,7 @@ class _HealthDeviceViewState extends State<HealthDeviceView> {
+           'unknown': '未知'
+         }[level]!;
+-        final color = const {
++        final color = context.night ? const {
++          'normal': Night.online, 'attention': Night.warning, 'alert': Night.error, 'unknown': Night.muted
++        }[level] : const {
+           'normal': Color(0xff176747),
+           'attention': Color(0xff946000),

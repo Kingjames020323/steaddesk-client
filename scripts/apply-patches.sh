@@ -14,9 +14,25 @@ test "$(git rev-parse HEAD)" = fada664df7a294d1d1a9ca3e7cd3637069122f17
 test "$(git -C libs/hbb_common rev-parse HEAD)" = 229b904508364c8997aad0fb5af57effac859f60
 # Later patches may edit lines introduced by earlier ones. Rewind the applied
 # prefix in a disposable index, then preflight the entire queue before writing.
-patches=("$queue"/patches/*.patch)
+# Resolve same-file changes only when both independent patches are present.
+selected=$(mktemp -d)
+trap 'rm -r -- "$selected"' EXIT
+python3 "$queue/scripts/select-patch-overrides.py" "$queue/patches" "$selected"
+patches=()
+for patch in "$queue"/patches/*.patch; do
+  if [[ -f "$selected/${patch##*/}" ]]; then patch="$selected/${patch##*/}"; fi
+  # #77 and the session skin can be reviewed independently. When both are
+  # present, relocate the role controls through the header layout change.
+  if [[ ${patch##*/} == 0076-session-surfaces-v10.patch &&
+        -f "$queue/patches/0069-support-session-roles.patch" ]]; then
+    patches+=("$queue/patches/compat/0069-0076-before.patch" "$patch"
+              "$queue/patches/compat/0069-0076-after.patch")
+  else
+    patches+=("$patch")
+  fi
+done
 scratch=$(mktemp -d)
-trap 'rm -r -- "$scratch"' EXIT
+trap 'rm -r -- "$scratch" "$selected"' EXIT
 git init -q "$scratch"
 while IFS= read -r -d '' record; do
   path=${record#*$'\t'}
