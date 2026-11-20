@@ -1,0 +1,89 @@
+diff --git a/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MainService.kt b/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MainService.kt
+index a9aaae2..6b0b2f7 100644
+--- a/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MainService.kt
++++ b/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MainService.kt
+@@ -551,6 +551,26 @@ class MainService : Service() {
+         if (restartCapture) {
+             captureRestartPending = false
+             startCapture(restartInVoiceCall)
++        } else {
++            holdVirtualDisplay(projection)
++        }
++    }
++
++    // Android 14 rejects a projection whose first virtual display is created after the
++    // grant has idled, so the merchant edition opens it paused until a session attaches.
++    private fun holdVirtualDisplay(projection: MediaProjection) {
++        if (!BuildConfig.MERCHANT_EDITION || !reuseVirtualDisplay || virtualDisplay != null) return
++        if (SCREEN_INFO.width <= 0 || SCREEN_INFO.height <= 0) return
++        try {
++            virtualDisplay = projection.createVirtualDisplay(
++                "RustDeskVD",
++                SCREEN_INFO.width, SCREEN_INFO.height, SCREEN_INFO.dpi, VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
++                null, null, null
++            )
++            Log.d(logTag, "holdVirtualDisplay: ${virtualDisplay != null}")
++        } catch (e: SecurityException) {
++            Log.w(logTag, "holdVirtualDisplay: got SecurityException", e)
++            handleVirtualDisplayFailure()
+         }
+     }
+ 
+diff --git a/flutter/lib/steaddesk/help/merchant_help_host.dart b/flutter/lib/steaddesk/help/merchant_help_host.dart
+index 80357e7..c42bed2 100644
+--- a/flutter/lib/steaddesk/help/merchant_help_host.dart
++++ b/flutter/lib/steaddesk/help/merchant_help_host.dart
+@@ -4,7 +4,7 @@ import 'dart:io';
+ import 'package:flutter/widgets.dart';
+ import 'package:path_provider/path_provider.dart';
+ 
+-import '../../common.dart' show translate;
++import '../../common.dart' show gFFI, translate;
+ import '../../models/native_model.dart' show PlatformFFI;
+ import '../../models/platform_model.dart' show bind;
+ import '../kb_build.dart';
+@@ -25,6 +25,14 @@ Widget merchantHelpEntry() => StoreFeaturesView(builder: (flags) {
+           callbacksEnabled: callback,
+           label: translate,
+           pick: pickHelpScreenshot,
++          // Asks for screen sharing only when it is off; a paused device stays paused.
++          ensureScreenShare: Platform.isAndroid
++              ? () async {
++                  if (!gFFI.serverModel.mediaOk) {
++                    await gFFI.serverModel.startService();
++                  }
++                }
++              : null,
+           language: () {
+             final saved = Platform.isWindows
+                 ? bind.mainGetCommonSync(key: 'merchant-language')
+diff --git a/flutter/lib/steaddesk/help/merchant_help_widget.dart b/flutter/lib/steaddesk/help/merchant_help_widget.dart
+index 791a87f..7af5f01 100644
+--- a/flutter/lib/steaddesk/help/merchant_help_widget.dart
++++ b/flutter/lib/steaddesk/help/merchant_help_widget.dart
+@@ -24,12 +24,14 @@ class MerchantHelpEntry extends StatefulWidget {
+   final bool callbacksEnabled, cardsEnabled;
+   final String Function()? language;
+   final HelpJson Function()? callbackProfile;
++  final Future<void> Function()? ensureScreenShare;
+   const MerchantHelpEntry(
+       {super.key,
+       required this.open,
+       required this.label,
+       required this.pick,
+       this.callbackProfile,
++      this.ensureScreenShare,
+       this.language,
+       this.cardsEnabled = true,
+       this.callbacksEnabled = merchantCallbacksEnabled});
+@@ -157,6 +159,10 @@ class _MerchantHelpEntryState extends State<MerchantHelpEntry> {
+               create: (category, message, image) => run(() async {
+                     await c.create(category, message, image);
+                     await c.refresh();
++                    // The request stands even if sharing cannot start; support then sees no picture.
++                    try {
++                      await widget.ensureScreenShare?.call();
++                    } catch (_) {}
+                   }))
+         else if (v == null)
+           Text(t('Restoring your request…'))
