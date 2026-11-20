@@ -1,0 +1,33 @@
+diff --git a/flutter/lib/steaddesk/cases/history_ui.dart b/flutter/lib/steaddesk/cases/history_ui.dart
+index d0ae658..649e4cb 100644
+--- a/flutter/lib/steaddesk/cases/history_ui.dart
++++ b/flutter/lib/steaddesk/cases/history_ui.dart
+@@ -5,2 +5,3 @@
+ import '../support_appearance.dart';
++import 'self_fix_history.dart';
+ import 'case_dialog.dart' show caseCategoryLabels, caseResultLabels;
+@@ -202,3 +203,3 @@ class _CaseHistoryDrawerState extends State<CaseHistoryDrawer> {
+     final rows = (widget.data[scope] as List? ?? const []).cast<Map>();
+-    final visible = rows
++    final filtered = rows
+         .where((record) =>
+@@ -207,2 +208,5 @@ class _CaseHistoryDrawerState extends State<CaseHistoryDrawer> {
+         .toList();
++    final events = scope == 'device' ? SessionSelfFixHistory.eventsOf(context) : const <SelfFixEvent>[];
++    final visible = mergeSelfFixTimeline(filtered,
++        (category == null || category == 'printer') && !unresolved ? events : const []);
+     final note = widget.data['device_note'] as String? ?? '';
+@@ -307,3 +311,3 @@ class _CaseHistoryDrawerState extends State<CaseHistoryDrawer> {
+             const SizedBox(height: 4),
+-            Text('只显示本机记录，团队共享记录上线后自动合并', style: context.caption),
++            Text(events.isEmpty ? '只显示本机记录，团队共享记录上线后自动合并' : '本机会话记录与商户自助记录', style: context.caption),
+             if (context.night) ...[
+@@ -334,3 +338,7 @@ class _CaseHistoryDrawerState extends State<CaseHistoryDrawer> {
+                 delegate: SliverChildBuilderDelegate((context, i) {
+-                final row = visible[i];
++                final item = visible[i];
++                if (item is SelfFixEvent) {
++                  return SelfFixEventRow(item, titleStyle: context.body, detailStyle: context.caption);
++                }
++                final row = item as Map;
+                 return _Entry(

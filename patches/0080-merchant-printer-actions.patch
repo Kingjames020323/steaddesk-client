@@ -1,0 +1,2641 @@
+diff --git a/flutter/android/app/src/steaddeskMerchant/java/com/carriez/flutter_hbb/AgentWakeService.java b/flutter/android/app/src/steaddeskMerchant/java/com/carriez/flutter_hbb/AgentWakeService.java
+index 655c40b..4b2c448 100644
+--- a/flutter/android/app/src/steaddeskMerchant/java/com/carriez/flutter_hbb/AgentWakeService.java
++++ b/flutter/android/app/src/steaddeskMerchant/java/com/carriez/flutter_hbb/AgentWakeService.java
+@@ -7,11 +7,16 @@ import android.os.IBinder;
+ import android.os.Parcel;
+ import android.os.RemoteException;
+ 
+-/** The exported Binder never accepts a component, Intent or arguments from the caller. */
++/** Signature-protected Agent operations. Printer requests also require a matching local merchant approval. */
+ public final class AgentWakeService extends Service {
++    private static final int PRINTER = IBinder.FIRST_CALL_TRANSACTION + 4;
++    private native int selfFixPrinter(boolean execute, String job, String action, String target, String ip);
++    // Rechecked by native code immediately before opening/writing the fixed printer socket.
++    @androidx.annotation.Keep
++    private boolean selfFixIdle() { return MerchantRecovery.status(this) == 1; }
+     private final Binder endpoint = new Binder() {
+         @Override protected boolean onTransact(int code, Parcel data, Parcel reply, int flags) throws RemoteException {
+-            if (code != FIRST_CALL_TRANSACTION && code != FIRST_CALL_TRANSACTION + 1 && code != FIRST_CALL_TRANSACTION + 2 && code != FIRST_CALL_TRANSACTION + 3)
++            if (code != FIRST_CALL_TRANSACTION && code != FIRST_CALL_TRANSACTION + 1 && code != FIRST_CALL_TRANSACTION + 2 && code != FIRST_CALL_TRANSACTION + 3 && code != PRINTER)
+                 return super.onTransact(code, data, reply, flags);
+             data.enforceInterface("com.steaddesk.remote.IWakeService");
+             enforceCallingPermission("com.steaddesk.remote.permission.WAKE_SERVICE", MerchantLanguage.text(AgentWakeService.this, R.string.recovery_signature));
+@@ -25,6 +30,22 @@ public final class AgentWakeService extends Service {
+             long identity = Binder.clearCallingIdentity();
+             try {
+                 int state = MerchantRecovery.status(AgentWakeService.this);
++                if (code == PRINTER) {
++                    if (reply == null || flags != 0 || data.dataAvail() < 4 || data.dataAvail() > 640)
++                        throw new IllegalArgumentException("Invalid printer request");
++                    int phase = data.readInt();
++                    String job = data.readString(), action = data.readString(), target = data.readString(), ip = data.readString();
++                    if ((phase != 0 && phase != 1) || data.dataAvail() != 0 || job == null || action == null || target == null || ip == null)
++                        throw new IllegalArgumentException("Invalid printer request");
++                    int result = 0;
++                    if (state == 1) {
++                        try { result = selfFixPrinter(phase == 1, job, action, target, ip); }
++                        catch (UnsatisfiedLinkError unavailable) { result = -1; }
++                    }
++                    reply.writeNoException();
++                    reply.writeInt(result);
++                    return true;
++                }
+                 if (code == FIRST_CALL_TRANSACTION + 3) {
+                     reply.writeNoException();
+                     if (state == 1 || state == 2) MerchantToday.append(AgentWakeService.this, reply);
+diff --git a/flutter/lib/steaddesk/cases/history_host.dart b/flutter/lib/steaddesk/cases/history_host.dart
+index 157f563..95b3328 100644
+--- a/flutter/lib/steaddesk/cases/history_host.dart
++++ b/flutter/lib/steaddesk/cases/history_host.dart
+@@ -6,6 +6,7 @@ import 'package:window_manager/window_manager.dart';
+ 
+ import '../../common.dart' show translate;
+ import 'case_session.dart';
++import '../support_help_header_api.dart' show supportSelfFixHistory;
+ import 'history_ui.dart';
+ 
+ /// Keeps per-window view state. The main window owns identity, drafts and disk.
+@@ -201,13 +202,14 @@ class _CaseHistoryHostState extends State<CaseHistoryHost> with WindowListener {
+       open
+           ? FocusScope(
+               node: drawerFocus,
+-              child: CaseHistoryDrawer(
++              child: supportSelfFixHistory(data['device_id'] ?? '', account: data['agent'] ?? '',
++                child: CaseHistoryDrawer(
+                   translate: translate,
+                   key: ValueKey(id),
+                   data: data,
+                   onClose: _close,
+                   onEditDevice: _editDevice,
+-                  onAppend: _append))
++                  onAppend: _append)))
+           : null,
+     );
+     return Focus(
+diff --git a/flutter/lib/steaddesk/cases/history_ui.dart b/flutter/lib/steaddesk/cases/history_ui.dart
+index 8367ca6..ed143ab 100644
+--- a/flutter/lib/steaddesk/cases/history_ui.dart
++++ b/flutter/lib/steaddesk/cases/history_ui.dart
+@@ -5,2 +5,3 @@ import '../theme.dart';
+ import 'case_dialog.dart' show caseCategoryLabels, caseResultLabels;
++import 'self_fix_history.dart';
+ 
+@@ -164,3 +165,3 @@ class _CaseHistoryDrawerState extends State<CaseHistoryDrawer> {
+     final rows = (widget.data[scope] as List? ?? const []).cast<Map>();
+-    final visible = rows
++    final filtered = rows
+         .where((record) =>
+@@ -169,2 +170,5 @@ class _CaseHistoryDrawerState extends State<CaseHistoryDrawer> {
+         .toList();
++    final events = scope == 'device' ? SessionSelfFixHistory.eventsOf(context) : const <SelfFixEvent>[];
++    final visible = mergeSelfFixTimeline(filtered,
++        (category == null || category == 'printer') && !unresolved ? events : const []);
+     final note = widget.data['device_note'] as String? ?? '';
+@@ -206,3 +210,3 @@ class _CaseHistoryDrawerState extends State<CaseHistoryDrawer> {
+           const SizedBox(height: 4),
+-          const Text('只显示本机记录，团队共享记录上线后自动合并', style: _caption),
++          Text(events.isEmpty ? '只显示本机记录，团队共享记录上线后自动合并' : '本机会话记录与商户自助记录', style: _caption),
+           Wrap(children: [
+@@ -275,3 +279,7 @@ class _CaseHistoryDrawerState extends State<CaseHistoryDrawer> {
+                 delegate: SliverChildBuilderDelegate((context, i) {
+-                final row = visible[i];
++                final item = visible[i];
++                if (item is SelfFixEvent) {
++                  return SelfFixEventRow(item, titleStyle: _text, detailStyle: _caption);
++                }
++                final row = item as Map;
+                 return _Entry(
+diff --git a/flutter/lib/steaddesk/cases/self_fix_history.dart b/flutter/lib/steaddesk/cases/self_fix_history.dart
+new file mode 100644
+index 0000000..86df339
+--- /dev/null
++++ b/flutter/lib/steaddesk/cases/self_fix_history.dart
+@@ -0,0 +1,169 @@
++import 'dart:async';
++
++import 'package:flutter/material.dart';
++
++import '../self_fix_event.dart';
++export '../self_fix_event.dart' show SelfFixEvent;
++
++/// Only the bound remote-session report supplies this device-scoped timeline.
++class SessionSelfFixHistory extends InheritedWidget {
++  final List<SelfFixEvent> events;
++  const SessionSelfFixHistory(
++      {super.key, required this.events, required super.child});
++  static List<SelfFixEvent> eventsOf(BuildContext context) =>
++      context
++          .dependOnInheritedWidgetOfExactType<SessionSelfFixHistory>()
++          ?.events ??
++      const [];
++  @override
++  bool updateShouldNotify(SessionSelfFixHistory oldWidget) =>
++      events != oldWidget.events;
++}
++
++class SelfFixHistory extends StatefulWidget {
++  const SelfFixHistory(
++      {super.key,
++      required this.scope,
++      required this.load,
++      required this.current,
++      this.child});
++  final Widget? child;
++  final Object scope;
++  final Future<List<SelfFixEvent>> Function() load;
++  final bool Function() current;
++
++  @override
++  State<SelfFixHistory> createState() => _SelfFixHistoryState();
++}
++
++class _SelfFixHistoryState extends State<SelfFixHistory> {
++  List<SelfFixEvent> events = const [];
++  bool expanded = false, pending = false;
++  int epoch = 0;
++  Timer? timer;
++  @override
++  void initState() {
++    super.initState();
++    _start();
++  }
++
++  void _start() {
++    _refresh();
++    var ticks = 0;
++    timer = Timer.periodic(const Duration(seconds: 1), (_) {
++      if (!widget.current()) {
++        _clear();
++      } else if (++ticks % 10 == 0) {
++        _refresh();
++      }
++    });
++  }
++
++  void _clear() {
++    epoch++;
++    pending = false;
++    if (events.isNotEmpty || expanded) {
++      setState(() {
++        events = const [];
++        expanded = false;
++      });
++    }
++  }
++
++  @override
++  void didUpdateWidget(SelfFixHistory old) {
++    super.didUpdateWidget(old);
++    if (old.scope != widget.scope) {
++      _clear();
++      _refresh();
++    }
++  }
++
++  Future<void> _refresh() async {
++    if (pending || !widget.current()) return;
++    pending = true;
++    final generation = ++epoch;
++    List<SelfFixEvent> next;
++    try {
++      next = await widget.load();
++    } catch (_) {
++      next = const [];
++    }
++    if (!mounted || generation != epoch) return;
++    pending = false;
++    if (!widget.current()) {
++      _clear();
++      return;
++    }
++    setState(() {
++      events = next;
++      if (events.isEmpty) expanded = false;
++    });
++  }
++
++  @override
++  void dispose() {
++    timer?.cancel();
++    super.dispose();
++  }
++
++  @override
++  Widget build(BuildContext context) {
++    if (widget.child != null) {
++      return SessionSelfFixHistory(
++          events: widget.current() ? events : const [], child: widget.child!);
++    }
++    if (!widget.current() || events.isEmpty) return const SizedBox.shrink();
++    final entries = expanded ? events : events.take(2);
++    return Padding(
++      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
++      child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
++        Text('商户自助记录', style: Theme.of(context).textTheme.titleSmall),
++        for (final e in entries) SelfFixEventRow(e),
++        if (events.length > 2)
++          Align(
++              alignment: Alignment.centerLeft,
++              child: TextButton(
++                  onPressed: () => setState(() => expanded = !expanded),
++                  child: Text(expanded ? '收起' : '查看全部（${events.length}）'))),
++      ]),
++    );
++  }
++}
++
++class SelfFixEventRow extends StatelessWidget {
++  const SelfFixEventRow(this.event,
++      {super.key, this.titleStyle, this.detailStyle});
++  final TextStyle? titleStyle, detailStyle;
++  final SelfFixEvent event;
++  @override
++  Widget build(BuildContext context) {
++    final e = event;
++    return Padding(
++        padding: const EdgeInsets.symmetric(vertical: 6),
++        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
++          Text(
++              '商户自助：${printerActionLabels[e.action]}（${selfFixStateLabels[e.state]}）',
++              style: titleStyle),
++          Text(
++              '${e.at.toLocal().toString().split(".").first} · ${e.actor} · ${e.target}\n步骤卡 ${e.card} · v${e.version}',
++              style: detailStyle ?? Theme.of(context).textTheme.bodySmall),
++        ]));
++  }
++}
++
++/// Both server events and saved reports are ordered newest first. Preserve the
++/// server's order for job transitions that share the same epoch second.
++List<Object> mergeSelfFixTimeline(
++    List<Map> reports, List<SelfFixEvent> events) {
++  final items = <Object>[];
++  var i = 0;
++  for (final report in reports) {
++    final end = DateTime.parse(report['ended_at']);
++    while (i < events.length && !events[i].at.isBefore(end)) {
++      items.add(events[i++]);
++    }
++    items.add(report);
++  }
++  return items..addAll(events.skip(i));
++}
+diff --git a/flutter/lib/steaddesk/device_card.dart b/flutter/lib/steaddesk/device_card.dart
+index 1822064..88f2a4a 100644
+--- a/flutter/lib/steaddesk/device_card.dart
++++ b/flutter/lib/steaddesk/device_card.dart
+@@ -12,6 +12,7 @@ enum _DeviceTab {
+ 
+   final String label;
+-  final bool enabled;
+-  const _DeviceTab(this.label, this.enabled);
++  final bool _enabled;
++  bool get enabled => _enabled || (this == reports && helpEnabled && !merchantEdition);
++  const _DeviceTab(this.label, this._enabled);
+ }
+ 
+@@ -276,4 +277,7 @@ class _DeviceCardState extends State<_DeviceCard> {
+                                 : FontWeight.normal)))
+             ]),
++          if (tab == _DeviceTab.reports)
++            ConstrainedBox(constraints: const BoxConstraints(maxHeight: 180),
++                child: SingleChildScrollView(child: supportSelfFixHistory(d.id))),
+           const Divider(height: 1),
+           Expanded(
+diff --git a/flutter/lib/steaddesk/help/merchant_help_client.dart b/flutter/lib/steaddesk/help/merchant_help_client.dart
+index ea675a2..ae591a7 100644
+--- a/flutter/lib/steaddesk/help/merchant_help_client.dart
++++ b/flutter/lib/steaddesk/help/merchant_help_client.dart
+@@ -1,4 +1,5 @@
+ import 'dart:async';
++import 'self_fix.dart';
+ import 'dart:convert';
+ import 'dart:io';
+ import 'dart:typed_data';
+@@ -13,6 +14,9 @@ typedef HelpSign = ({String secret, HelpJson request}) Function(
+ typedef HelpSend = Future<HelpJson> Function(Uri origin, String method,
+     String path, String? secret, HelpJson? body, String? key, int? version);
+ 
++typedef SelfFixSend = Future<HelpJson> Function(HelpScope owner, String receipt,
++    HelpJson body, String key, Future<bool> Function() current);
++
+ class HelpFailure implements Exception {
+   final int status;
+   final String code;
+@@ -34,7 +38,8 @@ Uri configuredHelpOrigin(String value) {
+ }
+ 
+ Future<HelpJson> sendHelp(Uri origin, String method, String path,
+-    String? secret, HelpJson? body, String? key, int? version) async {
++    String? secret, HelpJson? body, String? key, int? version,
++    {Map<String, String> deviceProof = const {}}) async {
+   final client = HttpClient()..connectionTimeout = const Duration(seconds: 8);
+   Future<HelpJson> send() async {
+     final request =
+@@ -44,6 +49,20 @@ Future<HelpJson> sendHelp(Uri origin, String method, String path,
+     if (secret != null) {
+       request.headers.set(HttpHeaders.authorizationHeader, 'Help $secret');
+     }
++    if (deviceProof.isNotEmpty) {
++      const fields = {
++        'X-Fleet-Device',
++        'X-Fleet-Key-Version',
++        'X-Fleet-Time',
++        'X-Fleet-Nonce',
++        'X-Fleet-Signature'
++      };
++      if (method != 'POST' ||
++          path != 'me/self-fix' ||
++          deviceProof.length != fields.length ||
++          !fields.every(deviceProof.containsKey)) throw HelpFailure(403);
++      deviceProof.forEach((name, value) => request.headers.set(name, value));
++    }
+     if (key != null) request.headers.set('Idempotency-Key', key);
+     if (version != null) request.headers.set('If-Match', '"$version"');
+     if (body != null) {
+@@ -89,6 +108,9 @@ class MerchantHelpClient {
+   final Future<HelpScope> Function() scope;
+   final HelpSign sign;
+   final HelpSend send;
++  final SelfFixSend? sendSelfFix;
++  final Future<bool> Function()? selfFixPaused;
++  final Future<bool> Function(HelpJson consent)? rememberSelfFix;
+   final String merchantVersion;
+   final bool useKb;
+   final Future<bool> Function(String)? canUseStoreFeature;
+@@ -98,6 +120,9 @@ class MerchantHelpClient {
+   final int Function() now;
+   MerchantHelpClient(this.journal, this.scope, this.sign, this.merchantVersion,
+       {this.send = sendHelp,
++      this.sendSelfFix,
++      this.selfFixPaused,
++      this.rememberSelfFix,
+       this.useKb = false,
+       this.canUseStoreFeature,
+       int Function()? clock})
+@@ -116,16 +141,21 @@ class MerchantHelpClient {
+           jsonEncode([owner.origin.origin, owner.device, owner.account])))
+       .toString();
+ 
+-  Future<void> save() async {
+-    final entry = record;
+-    if (entry == null) {
+-      if (await journal.exists()) await journal.delete();
+-      return;
+-    }
+-    await journal.parent.create(recursive: true);
+-    final next = File('${journal.path}.next');
+-    await next.writeAsString(jsonEncode(entry), flush: true);
+-    await next.rename(journal.path);
++  Future<void> _writes = Future.value();
++  Future<void> save() {
++    final snapshot = record == null ? null : jsonEncode(record);
++    final next = _writes.then((_) async {
++      if (snapshot == null) {
++        if (await journal.exists()) await journal.delete();
++      } else {
++        await journal.parent.create(recursive: true);
++        final file = File('${journal.path}.next');
++        await file.writeAsString(snapshot, flush: true);
++        await file.rename(journal.path);
++      }
++    });
++    _writes = next.catchError((_) {});
++    return next;
+   }
+ 
+   Future<void> forget() async {
+@@ -302,7 +332,11 @@ class MerchantHelpClient {
+         },
+     };
+     record!['view'] = view = safeView;
+-    if (data['state'] != 'queued') cards = [];
++    if (data['state'] == 'claimed') {
++      cards = cards.where((card) => selfFixOffer(card) != null).toList();
++    } else if (data['state'] != 'queued') {
++      cards = [];
++    }
+     if (data['state'] == 'closed' || data['state'] == 'cancelled') {
+       record!.remove('png');
+       record!.remove('diagnostic');
+@@ -333,7 +367,7 @@ class MerchantHelpClient {
+       await submit();
+     }
+     if (record?['action'] != null) await sendAction();
+-    cards = [];
++    if (view?['state'] != 'claimed') cards = [];
+     if (view?['state'] == 'queued' && await _allowed('step_cards')) {
+       List? offered;
+       if (useKb && kbAvailable != false) {
+@@ -432,6 +466,126 @@ class MerchantHelpClient {
+     }
+   }
+ 
++  bool _currentOffer(String ticket, SelfFixOffer offer) =>
++      view?['id'] == ticket &&
++      view?['lane'] == 'verified' &&
++      const {'queued', 'claimed'}.contains(view?['state']) &&
++      cards.any((card) => selfFixOffer(card) == offer);
++
++  Future<SelfFixOptions> selfFixOptions(
++      String ticket, SelfFixOffer offer) async {
++    final auth = await owner();
++    final secret = record?['secret'];
++    if (secret is! String ||
++        !_currentOffer(ticket, offer) ||
++        canUseStoreFeature == null ||
++        !await _allowed('self_fix') ||
++        !_currentOffer(ticket, offer)) throw HelpFailure(403);
++    final route = Uri(path: 'me/self-fix', queryParameters: {
++      'card_id': offer.card,
++      'card_version': '${offer.version}',
++      'offer_id': offer.offer
++    });
++    final data = await send(
++        auth.origin, 'GET', route.toString(), secret, null, null, null);
++    if (await owner() != auth ||
++        record?['secret'] != secret ||
++        !_currentOffer(ticket, offer)) {
++      throw HelpFailure(409);
++    }
++    final options = SelfFixOptions.parse(data, offer);
++    if (view?['state'] == 'claimed') {
++      return SelfFixOptions(options.printers, 'staff_active', options.job);
++    }
++    if (options.blocked == null &&
++        selfFixPaused != null &&
++        await selfFixPaused!()) {
++      return SelfFixOptions(options.printers, 'paused', options.job);
++    }
++    return options;
++  }
++
++  String? selfFixRetryTarget(String ticket, SelfFixOffer offer) {
++    final pending = record?['self_fix_retry'];
++    if (pending is! Map ||
++        pending['ticket'] != ticket ||
++        pending['body'] is! Map) return null;
++    final b = pending['body'];
++    return b['card_id'] == offer.card &&
++            b['card_version'] == offer.version &&
++            b['offer_id'] == offer.offer &&
++            b['action'] == offer.action
++        ? b['target_id'] as String?
++        : null;
++  }
++
++  Future<SelfFixJob> startSelfFix(
++      String ticket, SelfFixOffer offer, String target) async {
++    final signedSend = sendSelfFix;
++    final options = await selfFixOptions(ticket, offer);
++    if (signedSend == null ||
++        rememberSelfFix == null ||
++        view?['state'] != 'queued' ||
++        !_currentOffer(ticket, offer) ||
++        !options.printers.any((printer) => printer.id == target))
++      throw HelpFailure(403);
++    if (options.blocked != null) throw HelpFailure(409, options.blocked!);
++    final auth = await owner();
++    final secret = record?['secret'];
++    if (secret is! String || !_currentOffer(ticket, offer))
++      throw HelpFailure(409);
++    final body = {
++      'action': offer.action,
++      'card_id': offer.card,
++      'card_version': offer.version,
++      'offer_id': offer.offer,
++      'target_id': target
++    };
++    final pending = record?['self_fix_retry'];
++    final same = pending is Map &&
++        pending['ticket'] == ticket &&
++        pending['key'] is String &&
++        pending['body'] is Map &&
++        body.entries.every((e) => pending['body'][e.key] == e.value);
++    if (options.job?.active == true && !same)
++      throw HelpFailure(409, 'job_active');
++    final String key = same ? pending['key'] : const Uuid().v4();
++    record!['self_fix_retry'] = {'ticket': ticket, 'body': body, 'key': key};
++    await save();
++    Future<bool> current() async =>
++        (await owner()) == auth &&
++        record?['secret'] == secret &&
++        view?['state'] == 'queued' &&
++        _currentOffer(ticket, offer) &&
++        !(await selfFixPaused?.call() ?? false);
++    if (!await current()) throw HelpFailure(409, 'paused');
++    final reply = await signedSend(auth, secret, body, key, current);
++    final job = SelfFixJob.parse(reply, offer);
++    if (job.target != target ||
++        await owner() != auth ||
++        record?['secret'] != secret) {
++      throw HelpFailure(409);
++    }
++    final proof = reply['target_proof'];
++    if (proof is! String ||
++        !RegExp(r'^[a-f0-9]{64}$').hasMatch(proof) ||
++        !await current() ||
++        job.active &&
++            !await rememberSelfFix!({
++              'id': job.id,
++              'action': job.action,
++              'target_id': job.target,
++              'target_proof': proof
++            })) {
++      throw HelpFailure(409, 'local_consent');
++    }
++    if (record?['self_fix_retry']?['key'] == key) {
++      record!.remove('self_fix_retry');
++      await save();
++    }
++    return job;
++  }
++
+   Future<void> confirmCard(String ticket, HelpJson card, bool expanded) async {
+     final offer = card['offer_id'];
+     bool current() =>
+diff --git a/flutter/lib/steaddesk/help/merchant_help_host.dart b/flutter/lib/steaddesk/help/merchant_help_host.dart
+index 80357e7..d6e3d5b 100644
+--- a/flutter/lib/steaddesk/help/merchant_help_host.dart
++++ b/flutter/lib/steaddesk/help/merchant_help_host.dart
+@@ -1,2 +1,3 @@
+ import 'dart:convert';
++import 'self_fix_transport.dart';
+ import 'dart:io';
+@@ -24,2 +25,3 @@ Widget merchantHelpEntry() => StoreFeaturesView(builder: (flags) {
+           cardsEnabled: kb,
++          selfFixEnabled: kb && Platform.isAndroid && enabled('self_fix', true),
+           callbacksEnabled: callback,
+@@ -77,2 +79,5 @@ Widget merchantHelpEntry() => StoreFeaturesView(builder: (flags) {
+                 useKb: merchantKbEnabled,
++                sendSelfFix: sendMerchantSelfFix,
++                selfFixPaused: merchantSelfFixPaused,
++                rememberSelfFix: rememberMerchantSelfFix,
+                 canUseStoreFeature: (feature) async {
+@@ -82,3 +87,3 @@ Widget merchantHelpEntry() => StoreFeaturesView(builder: (flags) {
+                           switch (feature) {
+-                            'step_cards' => merchantKbEnabled,
++                            'step_cards' || 'self_fix' => merchantKbEnabled,
+                             'callback' => merchantCallbacksEnabled,
+diff --git a/flutter/lib/steaddesk/help/merchant_help_widget.dart b/flutter/lib/steaddesk/help/merchant_help_widget.dart
+index 791a87f..2690eef 100644
+--- a/flutter/lib/steaddesk/help/merchant_help_widget.dart
++++ b/flutter/lib/steaddesk/help/merchant_help_widget.dart
+@@ -1 +1,3 @@
++import 'self_fix.dart';
++import 'self_fix_card.dart';
+ import 'dart:async';
+@@ -23,3 +25,3 @@ class MerchantHelpEntry extends StatefulWidget {
+   final Future<Uint8List?> Function() pick;
+-  final bool callbacksEnabled, cardsEnabled;
++  final bool callbacksEnabled, cardsEnabled, selfFixEnabled;
+   final String Function()? language;
+@@ -34,2 +36,3 @@ class MerchantHelpEntry extends StatefulWidget {
+       this.cardsEnabled = true,
++      this.selfFixEnabled = false,
+       this.callbacksEnabled = merchantCallbacksEnabled});
+@@ -43,2 +46,3 @@ class _MerchantHelpEntryState extends State<MerchantHelpEntry> {
+   String? error;
++  String? humanTicket;
+   Timer? timer;
+@@ -165,3 +169,24 @@ class _MerchantHelpEntryState extends State<MerchantHelpEntry> {
+               view: v,
+-              cards: widget.cardsEnabled ? c.cards : const [],
++              cards: widget.cardsEnabled && humanTicket != v['id']
++                  ? c.cards
++                  : const [],
++              selfFixAction: widget.selfFixEnabled
++                  ? (card, language) {
++                      final offer = selfFixOffer(card);
++                      if (offer == null) return const SizedBox.shrink();
++                      final id = v['id'] as String;
++                      return SelfFixCardAction(
++                          key: ValueKey((id, offer)),
++                          offer: offer,
++                          language: language,
++                          online: online,
++                          options: () => c.selfFixOptions(id, offer),
++                          submit: (target) => c.startSelfFix(id, offer, target),
++                          retryTarget: () => c.selfFixRetryTarget(id, offer),
++                          contact: () => setState(() => humanTicket = id));
++                    }
++                  : null,
++              humanTicket: humanTicket == v['id']
++                  ? () => setState(() => humanTicket = null)
++                  : null,
+               callbacksAllowed: widget.callbacksEnabled,
+@@ -335,2 +360,4 @@ class HelpWaiting extends StatelessWidget {
+   final Widget? callbackEntry;
++  final Widget Function(HelpJson card, String language)? selfFixAction;
++  final VoidCallback? humanTicket;
+   final bool callbacksAllowed;
+@@ -350,2 +377,4 @@ class HelpWaiting extends StatelessWidget {
+       this.confirmCard,
++      this.selfFixAction,
++      this.humanTicket,
+       this.callbacksAllowed = true,
+@@ -374,2 +403,11 @@ class HelpWaiting extends StatelessWidget {
+       if (queued) ...[
++        if (humanTicket != null) ...[
++          SelectableText(selfFixCopy(language, '人工求助单', 'Support request',
++                  'Solicitud de soporte') +
++              ' #${view['id']}'),
++          TextButton(
++              onPressed: humanTicket,
++              child: Text(selfFixCopy(language, '返回步骤卡',
++                  'Back to suggested steps', 'Volver a los pasos sugeridos'))),
++        ],
+         if (view['ahead'] is int)
+@@ -408,2 +446,3 @@ class HelpWaiting extends StatelessWidget {
+                   title: title,
++                  action: selfFixAction?.call(card, language),
+                   steps: steps.whereType<String>().toList(),
+@@ -442,2 +481,5 @@ class HelpWaiting extends StatelessWidget {
+           Text(format('Claimed at %s', time(view['claimed_at']))),
++        if (selfFixAction != null)
++          for (final card in cards.where((c) => selfFixOffer(c) != null))
++            selfFixAction!(card, language),
+       ] else if (state == 'callback_requested') ...[
+diff --git a/flutter/lib/steaddesk/help/self_fix.dart b/flutter/lib/steaddesk/help/self_fix.dart
+new file mode 100644
+index 0000000..42cc90a
+--- /dev/null
++++ b/flutter/lib/steaddesk/help/self_fix.dart
+@@ -0,0 +1,80 @@
++const selfFixActions = {'print_test', 'reconnect_printer'};
++final _identifier = RegExp(r'^[A-Za-z0-9_-]{1,80}$');
++final _offer = RegExp(r'^[a-f0-9]{64}$');
++final _printer = RegExp(r'^i_[0-7][0-9A-HJKMNP-TV-Z]{25}$');
++final _job = RegExp(r'^sf_[0-7][0-9A-HJKMNP-TV-Z]{25}$');
++
++typedef SelfFixPrinter = ({String id, String name});
++typedef SelfFixOffer = ({
++  String card,
++  int version,
++  String offer,
++  String action
++});
++
++SelfFixOffer? selfFixOffer(Map card) {
++  final id = card['card_id'], version = card['card_version'];
++  final offer = card['offer_id'], action = card['action'];
++  if (id is! String ||
++      !_identifier.hasMatch(id) ||
++      version is! int ||
++      version < 1 ||
++      version > 9007199254740991 ||
++      offer is! String ||
++      !_offer.hasMatch(offer) ||
++      action is! String ||
++      !selfFixActions.contains(action)) return null;
++  return (card: id, version: version, offer: offer, action: action);
++}
++
++class SelfFixJob {
++  final String id, action, target, state;
++  const SelfFixJob(this.id, this.action, this.target, this.state);
++  bool get active => state == 'queued' || state == 'running';
++
++  factory SelfFixJob.parse(dynamic raw, SelfFixOffer offer) {
++    if (raw is! Map ||
++        raw['id'] is! String ||
++        !_job.hasMatch(raw['id']) ||
++        raw['action'] != offer.action ||
++        raw['target_id'] is! String ||
++        !_printer.hasMatch(raw['target_id']) ||
++        !const {'queued', 'running', 'success', 'failed', 'unsupported'}
++            .contains(raw['state'])) {
++      throw const FormatException('Invalid self-fix job');
++    }
++    return SelfFixJob(raw['id'], raw['action'], raw['target_id'], raw['state']);
++  }
++}
++
++class SelfFixOptions {
++  final List<SelfFixPrinter> printers;
++  final String? blocked;
++  final SelfFixJob? job;
++  const SelfFixOptions(this.printers, this.blocked, this.job);
++
++  factory SelfFixOptions.parse(Map raw, SelfFixOffer offer) {
++    if (raw['action'] != offer.action ||
++        !raw.containsKey('blocked') ||
++        !const {null, 'staff_active', 'paused', 'agent_unavailable'}
++            .contains(raw['blocked']) ||
++        raw['targets'] is! List ||
++        !raw.containsKey('job')) {
++      throw const FormatException('Invalid self-fix options');
++    }
++    final printers = <SelfFixPrinter>[], ids = <String>{};
++    for (final p in raw['targets']) {
++      if (p is! Map ||
++          p['id'] is! String ||
++          !_printer.hasMatch(p['id']) ||
++          !ids.add(p['id']) ||
++          p['name'] is! String ||
++          (p['name'] as String).trim().isEmpty) {
++        throw const FormatException('Invalid self-fix printer');
++      }
++      printers.add((id: p['id'] as String, name: p['name'] as String));
++    }
++    return SelfFixOptions(printers, raw['blocked'] as String?,
++        raw['job'] == null ? null : SelfFixJob.parse(raw['job'], offer));
++  }
++}
+diff --git a/flutter/lib/steaddesk/help/self_fix_card.dart b/flutter/lib/steaddesk/help/self_fix_card.dart
+new file mode 100644
+index 0000000..1fa2ab7
+--- /dev/null
++++ b/flutter/lib/steaddesk/help/self_fix_card.dart
+@@ -0,0 +1,281 @@
++import 'dart:async';
++import 'package:flutter/material.dart';
++import '../kb/card_tile.dart' show cardLanguage;
++import 'self_fix.dart';
++import 'merchant_help_client.dart' show HelpFailure;
++
++String selfFixCopy(String language, String zh, String en, String es) =>
++    switch (cardLanguage(language)) { 'zh' => zh, 'es' => es, _ => en };
++
++class SelfFixCardAction extends StatefulWidget {
++  final SelfFixOffer offer;
++  final String language;
++  final bool online;
++  final Future<SelfFixOptions> Function() options;
++  final Future<SelfFixJob> Function(String target) submit;
++  final String? Function() retryTarget;
++  final VoidCallback contact;
++  const SelfFixCardAction(
++      {super.key,
++      required this.offer,
++      required this.language,
++      required this.online,
++      required this.options,
++      required this.submit,
++      required this.retryTarget,
++      required this.contact});
++  @override
++  State<SelfFixCardAction> createState() => _SelfFixCardActionState();
++}
++
++class _SelfFixCardActionState extends State<SelfFixCardAction>
++    with WidgetsBindingObserver {
++  SelfFixOptions? options;
++  String? issue;
++  Timer? poll;
++  int revision = 0;
++  bool loading = false, working = false, foreground = true;
++  String t(String zh, String en, String es) =>
++      selfFixCopy(widget.language, zh, en, es);
++  bool get testPage => widget.offer.action == 'print_test';
++  String get title => testPage
++      ? t('打印测试页', 'Print test page', 'Imprimir página de prueba')
++      : t('重新连接打印机', 'Reconnect printer', 'Reconectar la impresora');
++
++  @override
++  void initState() {
++    super.initState();
++    WidgetsBinding.instance.addObserver(this);
++    refresh();
++  }
++
++  @override
++  void didUpdateWidget(SelfFixCardAction old) {
++    super.didUpdateWidget(old);
++    if (old.offer != widget.offer || old.online != widget.online) {
++      revision++;
++      options = null;
++      issue = null;
++      loading = false;
++      refresh();
++    }
++  }
++
++  @override
++  void didChangeAppLifecycleState(AppLifecycleState state) {
++    foreground = state == AppLifecycleState.resumed;
++    if (foreground) {
++      refresh();
++    } else {
++      poll?.cancel();
++      revision++;
++      loading = false;
++    }
++  }
++
++  Future<void> refresh() async {
++    poll?.cancel();
++    if (!widget.online || !foreground || loading) return;
++    loading = true;
++    final run = ++revision;
++    try {
++      final next = await widget.options();
++      if (mounted && run == revision) {
++        setState(() => options = next);
++      }
++    } catch (_) {
++      if (mounted && run == revision) {
++        setState(() => options = null);
++      }
++    } finally {
++      if (mounted && run == revision) {
++        loading = false;
++        if (foreground && widget.online) {
++          poll = Timer(Duration(seconds: options?.job?.active == true ? 3 : 10),
++              refresh);
++        }
++      }
++    }
++  }
++
++  String blocked(String code) => switch (code) {
++        'staff_active' => t(
++            '客服正在处理，请稍候',
++            'Support is working on this device. Please wait.',
++            'Soporte está atendiendo el dispositivo. Espere.'),
++        'paused' => t('远程支持已暂停', 'Remote support is paused',
++            'El soporte remoto está en pausa'),
++        'agent_unavailable' => t('打印服务暂不可用', 'Printer service unavailable',
++            'Servicio de impresión no disponible'),
++        'rate_limited' => t(
++            '本小时次数已用完，请稍后再试',
++            'Hourly limit reached. Try again later.',
++            'Límite por hora alcanzado. Inténtelo más tarde.'),
++        'local_consent' => t(
++            '设备未确认本次执行，请联系客服。',
++            'The device could not authorize this action. Contact support.',
++            'El dispositivo no pudo autorizar la acción. Contacte con soporte.'),
++        _ => t(
++            '未能确认操作，请查看当前求助单。',
++            'Could not confirm the action. Check your support request.',
++            'No se pudo confirmar la acción. Consulte su solicitud.'),
++      };
++
++  Future<void> confirm() async {
++    final current = options;
++    if (working ||
++        current == null ||
++        current.blocked != null ||
++        current.printers.isEmpty) return;
++    setState(() {
++      working = true;
++      issue = null;
++    });
++    try {
++      final retry = widget.retryTarget();
++      final choices = current.job?.active == true
++          ? current.printers.where((p) => p.id == retry).toList()
++          : current.printers;
++      if (choices.isEmpty) return;
++      SelfFixPrinter? selection = choices.length == 1 ? choices.single : null;
++      final target = await showDialog<String>(
++          context: context,
++          useRootNavigator: false,
++          builder: (ctx) => StatefulBuilder(
++              builder: (_, change) => AlertDialog(
++                      title: Text(title),
++                      content: SingleChildScrollView(
++                          child: Column(
++                              mainAxisSize: MainAxisSize.min,
++                              crossAxisAlignment: CrossAxisAlignment.stretch,
++                              children: [
++                            if (choices.length > 1)
++                              DropdownButtonFormField<String>(
++                                  value: selection?.id,
++                                  isExpanded: true,
++                                  decoration: InputDecoration(
++                                      labelText: t(
++                                          '选择已登记打印机',
++                                          'Select a registered printer',
++                                          'Seleccione una impresora registrada')),
++                                  items: [
++                                    for (final p in choices)
++                                      DropdownMenuItem(
++                                          value: p.id,
++                                          child: Text(choices
++                                                      .where((entry) =>
++                                                          entry.name == p.name)
++                                                      .length >
++                                                  1
++                                              ? '${p.name} · ${p.id.substring(p.id.length - 6)}'
++                                              : p.name))
++                                  ],
++                                  onChanged: (id) => change(() => selection =
++                                      choices.firstWhere((p) => p.id == id))),
++                            if (selection != null)
++                              Padding(
++                                  padding: const EdgeInsets.only(top: 8),
++                                  child: Text(testPage
++                                      ? t(
++                                          '将向${selection!.name}发送一张测试页。',
++                                          'A test page will be sent to ${selection!.name}.',
++                                          'Se enviará una página de prueba a ${selection!.name}.')
++                                      : t(
++                                          '将重新连接${selection!.name}。',
++                                          'This will reconnect ${selection!.name}.',
++                                          'Se volverá a conectar ${selection!.name}.'))),
++                          ])),
++                      actions: [
++                        TextButton(
++                            onPressed: () => Navigator.pop(ctx),
++                            child: Text(t('取消', 'Cancel', 'Cancelar'))),
++                        FilledButton(
++                            onPressed: selection == null
++                                ? null
++                                : () => Navigator.pop(ctx, selection!.id),
++                            child: Text(t('确认', 'Confirm', 'Confirmar')))
++                      ])));
++      if (!mounted || target == null || !widget.online || !foreground) return;
++      final job = await widget.submit(target);
++      if (mounted)
++        setState(() => options = SelfFixOptions(current.printers, null, job));
++    } on HelpFailure catch (e) {
++      if (mounted) {
++        setState(() => issue = e.status == 429 ? 'rate_limited' : e.code);
++      }
++    } catch (_) {
++      if (mounted) setState(() => issue = 'unknown');
++    } finally {
++      if (mounted) {
++        setState(() => working = false);
++        await refresh();
++      }
++    }
++  }
++
++  @override
++  void dispose() {
++    revision++;
++    poll?.cancel();
++    WidgetsBinding.instance.removeObserver(this);
++    super.dispose();
++  }
++
++  @override
++  Widget build(BuildContext context) {
++    final opt = options;
++    if (!widget.online || opt == null || opt.printers.isEmpty) {
++      return const SizedBox.shrink();
++    }
++    final job = opt.job;
++    final targetName =
++        opt.printers.where((p) => p.id == job?.target).firstOrNull?.name;
++    final canPress = opt.blocked == null &&
++        !working &&
++        (job?.active != true || widget.retryTarget() != null);
++    final detail = switch (job?.state) {
++      'queued' => t('已排队，等待打印服务', 'Queued for the printer service',
++          'En cola para el servicio de impresión'),
++      'running' => t('正在执行…', 'In progress…', 'En curso…'),
++      'success' => t('操作成功，请检查打印机。', 'Action completed. Check the printer.',
++          'Acción completada. Compruebe la impresora.'),
++      'failed' => t(
++          '操作失败。请检查纸张、电源和连接。',
++          'Action failed. Check paper, power and connections.',
++          'La acción falló. Revise el papel, la alimentación y la conexión.'),
++      'unsupported' => t(
++          '这台打印机不支持该操作。',
++          'This printer does not support the action.',
++          'Esta impresora no admite la acción.'),
++      _ => null
++    };
++    return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
++      FilledButton.icon(
++          onPressed: canPress ? confirm : null,
++          icon: Icon(testPage ? Icons.print_outlined : Icons.refresh),
++          label: Text(title)),
++      if (targetName != null && detail != null)
++        Text(targetName, style: Theme.of(context).textTheme.labelMedium),
++      if (opt.blocked != null || detail != null || issue != null)
++        Padding(
++            padding: const EdgeInsets.symmetric(vertical: 6),
++            child: Semantics(
++                liveRegion: true,
++                child: Text(opt.blocked != null
++                    ? blocked(opt.blocked!)
++                    : issue != null
++                        ? blocked(issue!)
++                        : detail!))),
++      if (issue != null ||
++          job?.state == 'failed' ||
++          job?.state == 'unsupported')
++        Align(
++            alignment: Alignment.centerLeft,
++            child: TextButton.icon(
++                onPressed: widget.contact,
++                icon: const Icon(Icons.headset_mic_outlined),
++                label: Text(
++                    t('联系客服', 'Contact support', 'Contactar con soporte')))),
++    ]);
++  }
++}
+diff --git a/flutter/lib/steaddesk/help/self_fix_transport.dart b/flutter/lib/steaddesk/help/self_fix_transport.dart
+new file mode 100644
+index 0000000..4ac48f9
+--- /dev/null
++++ b/flutter/lib/steaddesk/help/self_fix_transport.dart
+@@ -0,0 +1,51 @@
++import 'dart:io';
++
++import '../../models/native_model.dart' show PlatformFFI;
++import '../../models/platform_model.dart' show bind;
++import '../quick/http.dart';
++import 'merchant_help_client.dart';
++
++Future<bool> merchantSelfFixPaused() async {
++  if (!Platform.isAndroid) return !Platform.isWindows;
++  try {
++    return await PlatformFFI.instance
++            .invokeMethodWithResult<bool>('merchant_remote_paused') !=
++        false;
++  } catch (_) {
++    return true;
++  }
++}
++
++Future<HelpJson> sendMerchantSelfFix(HelpScope owner, String receipt,
++    HelpJson body, String key, Future<bool> Function() current) async {
++  final signer = PlatformFFI.instance.helpSigner;
++  if (signer == null ||
++      await bind.mainGetMyId() != owner.device ||
++      !await current()) {
++    throw HelpFailure(403);
++  }
++  final scope = (
++    origin: owner.origin,
++    device: owner.device,
++    binding: signer.quickCheckBinding()
++  );
++  final identity =
++      await signedQuickCall(scope, 'identity', 0, {}, signer.signQuickCheck);
++  final version = identity['key_version'];
++  if (version is! int || version < 1 || !await current())
++    throw HelpFailure(403);
++  final proof = signer.signSelfFix(version, body);
++  if (proof['X-Fleet-Device'] != owner.device || !await current())
++    throw HelpFailure(403);
++  return sendHelp(owner.origin, 'POST', 'me/self-fix', receipt, body, key, null,
++      deviceProof: proof);
++}
++
++Future<bool> rememberMerchantSelfFix(Map<String, dynamic> consent) async {
++  if (!Platform.isAndroid || await merchantSelfFixPaused()) return false;
++  try {
++    return PlatformFFI.instance.helpSigner?.rememberSelfFix(consent) ?? false;
++  } catch (_) {
++    return false;
++  }
++}
+diff --git a/flutter/lib/steaddesk/help_signer.dart b/flutter/lib/steaddesk/help_signer.dart
+index 50f0398..ce3f1d1 100644
+--- a/flutter/lib/steaddesk/help_signer.dart
++++ b/flutter/lib/steaddesk/help_signer.dart
+@@ -19,6 +19,22 @@ class MerchantHelpSigner {
+   final DynamicLibrary _core;
+   MerchantHelpSigner(this._core);
+ 
++  Map<String,String> signSelfFix(int version, Map<String,dynamic> body) =>
++      _quickCheckCall('self_fix', version, body);
++
++  bool rememberSelfFix(Map<String,dynamic> consent) {
++    final bytes = utf8.encode(jsonEncode(consent));
++    final memory = calloc<Uint8>(bytes.length);
++    try {
++      memory.asTypedList(bytes.length).setAll(0, bytes);
++      final remember = _core.lookupFunction<Int32 Function(Pointer<Uint8>, UintPtr),
++          int Function(Pointer<Uint8>, int)>('steaddesk_remember_self_fix');
++      return remember(memory, bytes.length) == 1;
++    } finally {
++      calloc.free(memory);
++    }
++  }
++
+   String quickCheckBinding() =>
+       _quickCheckCall('binding', 0, const {})['fingerprint']!;
+ 
+diff --git a/flutter/lib/steaddesk/kb/admin_panel.dart b/flutter/lib/steaddesk/kb/admin_panel.dart
+index 94018e8..9b62602 100644
+--- a/flutter/lib/steaddesk/kb/admin_panel.dart
++++ b/flutter/lib/steaddesk/kb/admin_panel.dart
+@@ -4,6 +4,7 @@ import 'dart:math' as math;
+ import 'package:flutter/material.dart';
+ import 'package:uuid/uuid.dart';
+ import '../help/merchant_help_widget.dart' show HelpWaiting;
++import '../self_fix_event.dart' show printerActionLabels;
+ import '../support_help.dart' show HelpRow, HelpStaffError, helpReasons;
+ 
+ typedef KbCall = Future<HelpRow> Function(String method, String route,
+@@ -46,7 +47,7 @@ class _KbAdminPanelState extends State<KbAdminPanel> {
+   String? nextCard;
+   int? nextVersion;
+   String language = 'zh', original = '', message = '';
+-  String? lastWrite, writeKey;
++  String? action, lastWrite, writeKey;
+   bool busy = true, loaded = false, preview = false;
+ 
+   @override
+@@ -95,6 +96,7 @@ class _KbAdminPanelState extends State<KbAdminPanel> {
+   }
+ 
+   HelpRow edit() => {
++        if (action != null || selected?.containsKey('action') == true) 'action': action,
+         'locales': {
+           for (final lang in _languages.keys)
+             lang: {'title': titles[lang]!.text.trim(), 'steps': lines(lang)}
+@@ -182,6 +184,7 @@ class _KbAdminPanelState extends State<KbAdminPanel> {
+ 
+   void load(HelpRow? card) {
+     selected = card;
++    action = card?['action'] as String?;
+     for (final lang in _languages.keys) {
+       final copy = card?['locales']?[lang];
+       titles[lang]!.text = copy?['title'] ?? '';
+@@ -338,6 +341,8 @@ class _KbAdminPanelState extends State<KbAdminPanel> {
+                             Text(historical == null
+                                 ? '商户预览 · 1024 × 640'
+                                 : '历史版本 v${historical!['version']} · 1024 × 640'),
++                            if ((historical == null ? action : historical!['action']) != null)
++                              Text('商户自助动作：${printerActionLabels[historical == null ? action : historical!['action']]}'),
+                             KbMerchantPreview(
+                                 locales:
+                                     historical?['locales'] ?? edit()['locales'],
+@@ -388,6 +393,16 @@ class _KbAdminPanelState extends State<KbAdminPanel> {
+                                                 stepCount[language] =
+                                                     stepCount[language]! + 1)
+                                             : null)),
++                            DropdownButtonFormField<String>(
++                                key: const ValueKey('kb-card-action'),
++                                value: action ?? '',
++                                decoration: const InputDecoration(labelText: '商户自助动作'),
++                                items: [
++                                  const DropdownMenuItem(value: '', child: Text('无')),
++                                  for (final item in printerActionLabels.entries)
++                                    DropdownMenuItem(value: item.key, child: Text(item.value))
++                                ],
++                                onChanged: ready ? (v) => setState(() => action = v == '' ? null : v) : null),
+                             const Text('适用求助原因'),
+                             Wrap(spacing: 6, children: [
+                               for (final category in helpReasons.entries)
+diff --git a/flutter/lib/steaddesk/kb/card_tile.dart b/flutter/lib/steaddesk/kb/card_tile.dart
+index 6879a06..14df6b8 100644
+--- a/flutter/lib/steaddesk/kb/card_tile.dart
++++ b/flutter/lib/steaddesk/kb/card_tile.dart
+@@ -13,6 +13,7 @@ class StepCardTile extends StatefulWidget {
+   final String Function(String) label;
+   final Future<void> Function(bool expanded)? acknowledge;
+   final VoidCallback? solve;
++  final Widget? action;
+   final bool online;
+   const StepCardTile(
+       {super.key,
+@@ -21,6 +22,7 @@ class StepCardTile extends StatefulWidget {
+       required this.label,
+       this.acknowledge,
+       this.solve,
++      this.action,
+       this.online = true});
+ 
+   @override
+@@ -124,6 +126,7 @@ class _StepCardTileState extends State<StepCardTile>
+             Padding(
+                 padding: const EdgeInsets.only(bottom: 6),
+                 child: Text('${i + 1}. ${widget.steps[i]}')),
++          if (widget.action != null) widget.action!,
+           if (failed)
+             TextButton(
+                 onPressed: widget.online ? confirm : null,
+diff --git a/flutter/lib/steaddesk/self_fix_event.dart b/flutter/lib/steaddesk/self_fix_event.dart
+new file mode 100644
+index 0000000..b1d49cd
+--- /dev/null
++++ b/flutter/lib/steaddesk/self_fix_event.dart
+@@ -0,0 +1,54 @@
++const printerActionLabels = {
++  'print_test': '打印测试页',
++  'reconnect_printer': '重新连接打印机',
++};
++const selfFixStateLabels = {
++  'queued': '已排队',
++  'running': '执行中',
++  'success': '成功',
++  'failed': '失败',
++  'unsupported': '不支持',
++};
++
++class SelfFixEvent {
++  final String action, state, actor, card, target;
++  final int version;
++  final DateTime at;
++  SelfFixEvent._(this.action, this.state, this.actor, this.card, this.target,
++      this.version, this.at);
++
++  static List<SelfFixEvent> parse(Object? raw) {
++    if (raw is! List || raw.length > 100) {
++      throw const FormatException('Invalid self-fix history');
++    }
++    final result = <SelfFixEvent>[];
++    for (final item in raw) {
++      if (item is! Map) continue;
++      final action = item['action'], state = item['state'];
++      final actor = item['actor'], card = item['card_id'];
++      final version = item['card_version'], at = item['at'];
++      final target = item['target_name'];
++      if (!printerActionLabels.containsKey(action) ||
++          !selfFixStateLabels.containsKey(state) ||
++          actor is! String ||
++          !RegExp(r'^商户设备 …[0-9]{4}$').hasMatch(actor) ||
++          card is! String ||
++          !RegExp(r'^[A-Za-z0-9_-]{1,100}$').hasMatch(card) ||
++          target is! String ||
++          target.isEmpty ||
++          target.runes.length > 128 ||
++          RegExp(r'[\x00-\x1f\x7f]').hasMatch(target) ||
++          version is! int ||
++          version < 1 ||
++          at is! int ||
++          at < 0 ||
++          at > 253402300799) {
++        continue;
++      }
++      result.add(SelfFixEvent._(action, state, actor, card, target, version,
++          DateTime.fromMillisecondsSinceEpoch(at * 1000, isUtc: true)));
++    }
++    // The server supplies newest first, including event order within a second.
++    return result;
++  }
++}
+diff --git a/flutter/lib/steaddesk/store_feature_admin.dart b/flutter/lib/steaddesk/store_feature_admin.dart
+index 11874e1..8fae10a 100644
+--- a/flutter/lib/steaddesk/store_feature_admin.dart
++++ b/flutter/lib/steaddesk/store_feature_admin.dart
+@@ -10,6 +10,7 @@ const _labels = {
+   'toolbar_actions': '改动类动作',
+   'callback': '预约回电',
+   'step_cards': '步骤卡',
++  'self_fix': '商户打印机自助修复',
+ };
+ 
+ class StoreFeatureAdmin extends StatefulWidget {
+@@ -138,7 +139,7 @@ class _StoreFeatureAdminState extends State<StoreFeatureAdmin> {
+       if (error != null) Text(error!),
+       if (row != null) ...[
+         Text('门店 ${row['store_id']}'),
+-        for (final name in storeFeatureNames)
++        for (final name in storeFeatureNames.where((name) => row['flags'].containsKey(name)))
+           SwitchListTile(
+               title: Text(_labels[name]!),
+               value: row['flags'][name] == true,
+diff --git a/flutter/lib/steaddesk/store_feature_policy.dart b/flutter/lib/steaddesk/store_feature_policy.dart
+index cd0c4d9..32ef03a 100644
+--- a/flutter/lib/steaddesk/store_feature_policy.dart
++++ b/flutter/lib/steaddesk/store_feature_policy.dart
+@@ -7,7 +7,8 @@ const storeFeatureNames = {
+   'toolbar',
+   'toolbar_actions',
+   'callback',
+-  'step_cards'
++  'step_cards',
++  'self_fix'
+ };
+ const offlineStoreFeatures = {'health', 'quick_check', 'toolbar', 'step_cards'};
+ 
+@@ -27,11 +28,14 @@ class StoreFeatureSnapshot {
+     if (store is! String ||
+         store.isEmpty ||
+         flags is! Map ||
+-        flags.length != storeFeatureNames.length ||
+-        !storeFeatureNames.every((key) => flags[key] is bool)) {
++        flags.keys.any((key) => !storeFeatureNames.contains(key)) ||
++        !storeFeatureNames.every((key) =>
++            flags[key] is bool ||
++            (key == 'self_fix' && !flags.containsKey(key)))) {
+       throw const FormatException('Invalid store feature response');
+     }
+-    return StoreFeatureSnapshot(store, Map<String, bool>.from(flags), observed,
++    return StoreFeatureSnapshot(
++        store, {'self_fix': false, ...Map<String, bool>.from(flags)}, observed,
+         online: online);
+   }
+ 
+diff --git a/flutter/lib/steaddesk/support_help.dart b/flutter/lib/steaddesk/support_help.dart
+index e9e74f1..3b19a6a 100644
+--- a/flutter/lib/steaddesk/support_help.dart
++++ b/flutter/lib/steaddesk/support_help.dart
+@@ -4,2 +4,3 @@ import 'dart:io';
+ import 'package:uuid/uuid.dart';
++import 'self_fix_event.dart' show SelfFixEvent;
+ import 'ops_groups.dart' show opsEndpoint;
+@@ -202,2 +203,10 @@ class SupportHelpApi {
+ 
++  Future<List<SelfFixEvent>> selfFixHistory(String device) async {
++    if (base.scheme != 'https' || !RegExp(r'^[0-9]{9,10}$').hasMatch(device)) {
++      throw const HelpStaffError(400);
++    }
++    final page = await _request('help/devices/$device/self-fix-history', method: 'GET');
++    return SelfFixEvent.parse(page['items']);
++  }
++
+   Future<HelpRow> detail(String id) => _request(_ticket(id));
+diff --git a/flutter/lib/steaddesk/support_help_host.dart b/flutter/lib/steaddesk/support_help_host.dart
+index 113be94..873f676 100644
+--- a/flutter/lib/steaddesk/support_help_host.dart
++++ b/flutter/lib/steaddesk/support_help_host.dart
+@@ -11,4 +11,5 @@ import 'support_help.dart';
+ import 'store_feature_rows.dart';
+ import 'store_features.dart';
++import 'cases/self_fix_history.dart';
+ import 'support_help_queue.dart';
+ 
+@@ -50,4 +51,31 @@ class SupportHelpHeader extends StatefulWidget {
+ }
+ 
++Widget supportSelfFixHistory(String device, {String? account, Widget? child}) {
++  if (!RegExp(r'^[0-9]{9,10}$').hasMatch(device)) {
++    return child ?? const SizedBox.shrink();
++  }
++  final login = _login();
++  if (login == null || (account != null && login.account != account)) {
++    return child ?? const SizedBox.shrink();
++  }
++  final origin = _configuredOrigin();
++  if (origin == null || origin.scheme != 'https') {
++    return child ?? const SizedBox.shrink();
++  }
++  bool current() => login == _login() && origin == _configuredOrigin();
++  return SelfFixHistory(
++      scope: (login, origin, device),
++      current: current,
++      child: child,
++      load: () async {
++        final api = SupportHelpApi(origin, login.account, login.token, current);
++        try {
++          return await api.selfFixHistory(device);
++        } finally {
++          api.dispose();
++        }
++      });
++}
++
+ class _SupportHelpHeaderState extends State<SupportHelpHeader> {
+   _Login? login;
+diff --git a/flutter/lib/steaddesk/support_help_off.dart b/flutter/lib/steaddesk/support_help_off.dart
+index bb3759a..c357ece 100644
+--- a/flutter/lib/steaddesk/support_help_off.dart
++++ b/flutter/lib/steaddesk/support_help_off.dart
+@@ -2,2 +2,4 @@ import 'package:flutter/widgets.dart';
+ 
++Widget supportSelfFixHistory(String device, {String? account, Widget? child}) => child ?? const SizedBox.shrink();
++
+ class SupportHelpHeader extends StatelessWidget {
+diff --git a/flutter/test/steaddesk/kb_cards_test.dart b/flutter/test/steaddesk/kb_cards_test.dart
+index 80ecbc8..a60bcf9 100644
+--- a/flutter/test/steaddesk/kb_cards_test.dart
++++ b/flutter/test/steaddesk/kb_cards_test.dart
+@@ -154,6 +154,7 @@ void main() {
+       'version': 3,
+       'status': 'draft',
+       'published_version': 2,
++      'action': 'print_test',
+       'locales': {
+         ...locales,
+         'en': {
+@@ -250,6 +251,7 @@ void main() {
+     await tester.pumpAndSettle();
+     expect(calls[0], calls[1]);
+     expect(calls[1][2], 3);
++    expect((calls[1][4] as HelpJson)['action'], 'print_test');
+     expect(calls[1][3], isNotNull);
+     expect((calls[1][4] as HelpJson)['locales']['en']['steps'],
+         ['Check power\nCheck indicator']);
+@@ -268,6 +270,22 @@ void main() {
+             .widget<FilledButton>(find.widgetWithText(FilledButton, '发布'))
+             .onPressed,
+         isNull);
++    final actionField = find.byKey(const ValueKey('kb-card-action'));
++    Future<void> selectAction(String label) async {
++      await tester.ensureVisible(actionField);
++      await tester.tap(actionField);
++      await tester.pumpAndSettle();
++      await tester.tap(find.text(label).last);
++      await tester.pumpAndSettle();
++      await tester.ensureVisible(find.text('保存草稿'));
++      await tester.tap(find.text('保存草稿'));
++      await tester.pumpAndSettle();
++    }
++    await selectAction('重新连接打印机');
++    expect((calls.last[4] as HelpJson)['action'], 'reconnect_printer');
++    await selectAction('无');
++    expect((calls.last[4] as HelpJson).containsKey('action'), isTrue);
++    expect((calls.last[4] as HelpJson)['action'], isNull);
+     await review('发布', '已审核三种语言');
+     expect(calls.last[1], 'cards/fixture/publish');
+     expect(calls.last[4], {'reason': '已审核三种语言'});
+diff --git a/flutter/test/steaddesk/self_fix_history_test.dart b/flutter/test/steaddesk/self_fix_history_test.dart
+new file mode 100644
+index 0000000..57c532b
+--- /dev/null
++++ b/flutter/test/steaddesk/self_fix_history_test.dart
+@@ -0,0 +1,148 @@
++import 'dart:async';
++
++import 'package:flutter/material.dart';
++import 'package:flutter_test/flutter_test.dart';
++import 'package:flutter_hbb/steaddesk/cases/history_ui.dart';
++import 'package:flutter_hbb/steaddesk/cases/self_fix_history.dart';
++import 'package:flutter_hbb/steaddesk/support_help.dart';
++
++Map<String, Object> receipt(String action, String state, int at) => {
++      'id': 'sf_fixture',
++      'action': action,
++      'state': state,
++      'at': at,
++      'card_id': 'reviewed_example',
++      'card_version': 2,
++      'actor': '商户设备 …4321',
++      'target_name': 'Kitchen printer',
++      'ticket_id': 'h_fixture',
++    };
++
++void main() {
++  test('strict projection and authorization before HTTP', () async {
++    final valid = receipt('print_test', 'success', 300);
++    expect(
++        SelfFixEvent.parse([
++          valid,
++          {...valid, 'action': 'reboot'},
++          {...valid, 'actor': 'merchant:123454321'},
++          {...valid, 'state': 'ok'},
++          {...valid, 'card_version': null},
++          {...valid, 'at': -1},
++        ]).length,
++        1);
++    expect(() => SelfFixEvent.parse(List.filled(101, valid)),
++        throwsFormatException);
++    for (final (origin, peer, current) in [
++      ('http://127.0.0.1', '123454321', true),
++      ('https://127.0.0.1', '12345/../9', true),
++      ('https://127.0.0.1', '123454321', false),
++    ]) {
++      final api = SupportHelpApi(
++          Uri.parse(origin), 'example', 'fixture', () => current);
++      await expectLater(
++          api.selfFixHistory(peer), throwsA(isA<HelpStaffError>()));
++      api.dispose();
++    }
++  });
++
++  testWidgets(
++      '0025 merges actual events in time order, scoped to device and live authorization',
++      (t) async {
++    t.view.devicePixelRatio = 1;
++    t.view.physicalSize = const Size(900, 920);
++    addTearDown(t.view.resetDevicePixelRatio);
++    addTearDown(t.view.resetPhysicalSize);
++    final result = SelfFixEvent.parse([
++      receipt('print_test', 'success', 300),
++      receipt('reconnect_printer', 'failed', 100),
++    ]);
++    final data = {
++      'can_store': true,
++      'device': [
++        {
++          'id': 'session',
++          'category': 'printer',
++          'result': 'resolved',
++          'agent': 'Support A',
++          'note': 'Physical inspection',
++          'started_at': DateTime.fromMillisecondsSinceEpoch(175000, isUtc: true)
++              .toIso8601String(),
++          'ended_at': DateTime.fromMillisecondsSinceEpoch(200000, isUtc: true)
++              .toIso8601String()
++        }
++      ],
++      'store': [],
++    };
++    var allowed = true;
++    await t.pumpWidget(MaterialApp(
++        home: Scaffold(
++            body: SelfFixHistory(
++      scope: 'device A',
++      current: () => allowed,
++      load: () async => result,
++      child: CaseHistoryDrawer(
++          data: data,
++          onClose: () {},
++          onEditDevice: () {},
++          onAppend: (_, __, ___) async {}),
++    ))));
++    await t.pumpAndSettle();
++    final ok = find.text('商户自助：打印测试页（成功）');
++    final failed = find.text('商户自助：重新连接打印机（失败）');
++    final middle = find.textContaining('Support A');
++    expect(t.getTopLeft(ok).dy, lessThan(t.getTopLeft(middle).dy));
++    expect(t.getTopLeft(middle).dy, lessThan(t.getTopLeft(failed).dy));
++    expect(find.textContaining('步骤卡 reviewed_example · v2'), findsNWidgets(2));
++    await t.tap(find.text('本门店'));
++    await t.pumpAndSettle();
++    expect(ok, findsNothing);
++    await t.tap(find.text('本设备'));
++    await t.pumpAndSettle();
++    expect(ok, findsOneWidget);
++    allowed = false;
++    await t.pump(const Duration(seconds: 1));
++    await t.pump();
++    expect(ok, findsNothing);
++    expect(middle, findsOneWidget);
++    await t.pumpWidget(const SizedBox());
++  });
++
++  testWidgets(
++      'device history drops late data when changing scope and clears on forbidden refresh',
++      (t) async {
++    final first = Completer<List<SelfFixEvent>>();
++    final second = Completer<List<SelfFixEvent>>();
++    var denied = false;
++    Future<void> show(String scope, Completer<List<SelfFixEvent>> result) =>
++        t.pumpWidget(MaterialApp(
++            home: Scaffold(
++                body: SelfFixHistory(
++          scope: scope,
++          current: () => true,
++          load: () =>
++              denied ? Future.error(const HelpStaffError(403)) : result.future,
++        ))));
++    await show('old account', first);
++    await show('current account', second);
++    first.complete(SelfFixEvent.parse([receipt('print_test', 'failed', 100)]));
++    second.complete(SelfFixEvent.parse([
++      receipt('reconnect_printer', 'unsupported', 300),
++      receipt('reconnect_printer', 'running', 200),
++      receipt('reconnect_printer', 'queued', 100),
++    ]));
++    await t.pumpAndSettle();
++    expect(find.textContaining('打印测试页'), findsNothing);
++    expect(find.textContaining('（不支持）'), findsOneWidget);
++    await t.tap(find.text('查看全部（3）'));
++    await t.pump();
++    expect(find.textContaining('（已排队）'), findsOneWidget);
++    denied = true;
++    for (int i = 0; i < 10; i++) {
++      await t.pump(const Duration(seconds: 1));
++    }
++    await t.pump();
++    expect(find.text('商户自助记录'), findsNothing);
++    await t.pumpWidget(const SizedBox());
++  });
++}
+diff --git a/flutter/test/steaddesk/self_fix_merchant_test.dart b/flutter/test/steaddesk/self_fix_merchant_test.dart
+new file mode 100644
+index 0000000..5dd7bac
+--- /dev/null
++++ b/flutter/test/steaddesk/self_fix_merchant_test.dart
+@@ -0,0 +1,422 @@
++import 'dart:io';
++import 'package:flutter/material.dart';
++import 'package:flutter_test/flutter_test.dart';
++import 'package:visibility_detector/visibility_detector.dart';
++import 'package:flutter_hbb/steaddesk/help/merchant_help_client.dart';
++import 'package:flutter_hbb/steaddesk/help/merchant_help_widget.dart';
++import 'package:flutter_hbb/steaddesk/help/self_fix.dart';
++import 'package:flutter_hbb/steaddesk/store_feature_policy.dart';
++
++const ticket = 'h_0123456789abcdef0123456789abcdef';
++const kitchen = 'i_00000000000000000000000001',
++    counter = 'i_00000000000000000000000002';
++const jobId = 'sf_00000000000000000000000001';
++const title = '打印机没出纸：先打一张测试页';
++final card = <String, dynamic>{
++  'card_id': 'kb_self_fix_print_test',
++  'card_version': 1,
++  'offer_id': 'a' * 64,
++  'action': 'print_test',
++  'locales': {
++    'zh': {
++      'title': title,
++      'steps': [
++        '检查纸卷是否装好，并确认出纸口没有卡纸。',
++        '选择要检查的打印机，确认后打印测试页。',
++        '查看是否打印出测试页；若仍未出纸，请联系客服。'
++      ]
++    }
++  }
++};
++const translations = {
++  'View help request': '查看求助单',
++  'Contact support': '联系客服',
++  'Collapse help': '收起求助',
++  'Suggested steps': '建议步骤',
++  'This solved my problem': '这个解决了我的问题',
++  'Cancel help request': '取消求助',
++  'Waiting for %s min': '已等待 %s 分钟',
++  '%s ahead of you': '前面还有 %s 位',
++  'Request closed': '求助已结束',
++  'Start another request': '发起新的求助'
++};
++String label(String key) => translations[key] ?? key;
++
++class Fixture {
++  final owner = (
++    origin: Uri.parse('https://fixture.invalid'),
++    device: '123456789',
++    account: ''
++  );
++  bool enabled = true,
++      paused = false,
++      bound = true,
++      recordLocal = true,
++      loseReply = false;
++  String? blocked, state, postTarget;
++  String ticketState = 'queued', fakeAction = 'print_test';
++  final posts = <String>[], consents = <HelpJson>[];
++  final targets = [
++    {'id': kitchen, 'name': '厨房打印机'},
++    {'id': counter, 'name': '收银打印机'}
++  ];
++  HelpJson get view => {
++        'id': ticket,
++        'lane': 'verified',
++        'version': ticketState == 'queued' ? 1 : 2,
++        'state': ticketState,
++        'queued_at': 900,
++        'created_at': 900,
++        'queue_updated_at': 1200,
++        'ahead': 2,
++        if (ticketState == 'closed') 'ended_at': 1200
++      };
++  HelpJson get job => {
++        'id': jobId,
++        'state': state,
++        'action': 'print_test',
++        'target_id': postTarget ?? kitchen,
++        'created_at': 1200
++      };
++  Future<HelpJson> send(Uri origin, String method, String path, String? secret,
++      HelpJson? body, String? key, int? version) async {
++    expect(origin, owner.origin);
++    if (path == 'capabilities') return {'kb': true};
++    expect(secret, 'demo-receipt');
++    if (path.startsWith('me/self-fix?')) {
++      expect(method, 'GET');
++      expect(Uri.parse(path).queryParameters, {
++        'card_id': card['card_id'],
++        'card_version': '1',
++        'offer_id': card['offer_id']
++      });
++      if (!bound) throw HelpFailure(404);
++      return {
++        'action': 'print_test',
++        'blocked': blocked,
++        'targets': targets,
++        'job': state == null ? null : job
++      };
++    }
++    if (path == 'me') return view;
++    if (path == 'me/kb-cards')
++      return {
++        'cards': [card]
++      };
++    if (path == 'me/kb-shown' || path == 'me/kb-used')
++      return {'accepted': true};
++    if (path == 'me/self-resolve') {
++      ticketState = 'closed';
++      return view;
++    }
++    throw StateError('Unexpected $method $path');
++  }
++
++  Future<HelpJson> submit(HelpScope scope, String receipt, HelpJson body,
++      String key, Future<bool> Function() current) async {
++    expect(await current(), isTrue);
++    expect(scope, owner);
++    expect(receipt, 'demo-receipt');
++    expect(
++        body.keys,
++        unorderedEquals(
++            ['card_id', 'card_version', 'offer_id', 'target_id', 'action']));
++    posts.add(key);
++    postTarget = body['target_id'];
++    state = 'queued';
++    if (loseReply) throw HelpFailure(0);
++    return {...job, 'action': fakeAction, 'target_proof': 'c' * 64};
++  }
++
++  Future<bool> remember(HelpJson consent) async {
++    consents.add(consent);
++    return recordLocal;
++  }
++
++  MerchantHelpClient client(File file) => MerchantHelpClient(
++      file,
++      () async => owner,
++      (_, __, ___, ____) => throw StateError('Existing receipt only'),
++      'fixture',
++      send: send,
++      sendSelfFix: submit,
++      rememberSelfFix: remember,
++      selfFixPaused: () async => paused,
++      clock: () => 1200,
++      useKb: true,
++      canUseStoreFeature: (name) async => name != 'self_fix' || enabled);
++  void seed(MerchantHelpClient c) {
++    c.view = view;
++    c.cards = [card];
++    c.record = {
++      'owner': c.fingerprint(owner),
++      'view': view,
++      'secret': 'demo-receipt'
++    };
++  }
++}
++
++// Widget fixtures replace disk scheduling only. Receipt policy, option parsing,
++// confirmation, polling and the separate merchant resolution use real clients.
++class WidgetClient extends MerchantHelpClient {
++  final Fixture fixture;
++  WidgetClient(this.fixture)
++      : super(
++            File('unused-fixture'),
++            () async => fixture.owner,
++            (_, __, ___, ____) => throw StateError('Fixture receipt only'),
++            'fixture',
++            useKb: true,
++            clock: () => 1200,
++            send: fixture.send,
++            sendSelfFix: fixture.submit,
++            rememberSelfFix: fixture.remember,
++            selfFixPaused: () async => fixture.paused,
++            canUseStoreFeature: (s) async =>
++                s != 'self_fix' || fixture.enabled);
++  @override
++  Future<void> save() async {}
++  @override
++  Future<void> initialize() async {
++    fixture.seed(this);
++  }
++}
++
++Widget fixtureEntry(Fixture f) => MerchantHelpEntry(
++    open: () async => WidgetClient(f),
++    label: label,
++    callbacksEnabled: false,
++    selfFixEnabled: true,
++    language: () => 'zh-CN',
++    pick: () async => null);
++
++void main() {
++  test(
++      'legacy flags disable self-fix, online opt-in, offline and invalid choices fail closed',
++      () {
++    final now = DateTime.utc(2026),
++        old = {
++          for (final k in storeFeatureNames)
++            if (k != 'self_fix') k: true
++        };
++    bool flag(Map flags, bool online) =>
++        StoreFeatureSnapshot.parse({'store_id': 'test', 'flags': flags}, now,
++                online: online)
++            .allows('self_fix', true, now);
++    expect(flag(old, true), isFalse);
++    expect(flag({...old, 'self_fix': true}, true), isTrue);
++    expect(flag({...old, 'self_fix': true}, false), isFalse);
++    expect(() => flag({...old, 'self_fix': 1}, true), throwsFormatException);
++    expect(selfFixOffer({...card, 'action': 'restart_pos'}), isNull);
++    expect(selfFixOffer({...card, 'offer_id': 'unverified'}), isNull);
++    expect(
++        () => SelfFixOptions.parse({
++              'action': 'print_test',
++              'blocked': null,
++              'job': null,
++              'targets': [
++                {'id': '192.0.2.1', 'name': 'other'}
++              ]
++            }, selfFixOffer(card)!),
++        throwsFormatException);
++  });
++
++  test(
++      'no POST or local authorization when disabled/unbound/paused/staff active or target unavailable',
++      () async {
++    final dir = await Directory.systemTemp.createTemp();
++    addTearDown(() => dir.delete(recursive: true));
++    final f = Fixture(), offer = selfFixOffer(card)!;
++    final c = f.client(File('${dir.path}/receipt'));
++    f.seed(c);
++    Future<void> failClosed() async => expectLater(
++        c.startSelfFix(ticket, offer, kitchen), throwsA(isA<HelpFailure>()));
++    f.enabled = false;
++    await failClosed();
++    f.enabled = true;
++    f.bound = false;
++    await failClosed();
++    f.bound = true;
++    f.paused = true;
++    await failClosed();
++    f.paused = false;
++    f.blocked = 'staff_active';
++    await failClosed();
++    f.blocked = null;
++    await expectLater(
++        c.startSelfFix(ticket, offer, 'i_00000000000000000000000111'),
++        throwsA(isA<HelpFailure>()));
++    await expectLater(c.startSelfFix('different', offer, kitchen),
++        throwsA(isA<HelpFailure>()));
++    expect(f.posts, isEmpty);
++    expect(f.consents, isEmpty);
++  });
++
++  test(
++      'lost enqueue reply survives restart and explicit replay for same printer; status reads never arm native',
++      () async {
++    final dir = await Directory.systemTemp.createTemp();
++    addTearDown(() => dir.delete(recursive: true));
++    final file = File('${dir.path}/receipt'),
++        f = Fixture(),
++        offer = selfFixOffer(card)!;
++    final first = f.client(file);
++    f.seed(first);
++    f.loseReply = true;
++    await expectLater(first.startSelfFix(ticket, offer, counter),
++        throwsA(isA<HelpFailure>()));
++    expect(f.posts, hasLength(1));
++    expect(f.consents, isEmpty);
++    final restored = f.client(file);
++    await restored.initialize();
++    await restored.refresh();
++    f.loseReply = false;
++    expect((await restored.selfFixOptions(ticket, offer)).job!.state, 'queued');
++    expect(f.consents, isEmpty);
++    await expectLater(restored.startSelfFix(ticket, offer, kitchen),
++        throwsA(isA<HelpFailure>()));
++    final job = await restored.startSelfFix(ticket, offer, counter);
++    expect(job.id, jobId);
++    expect(f.posts, hasLength(2));
++    expect(f.posts.toSet(), hasLength(1));
++    expect(f.consents.single, {
++      'id': jobId,
++      'action': 'print_test',
++      'target_id': counter,
++      'target_proof': 'c' * 64
++    });
++    expect(await file.readAsString(), isNot(contains('target_proof')));
++    expect(restored.selfFixRetryTarget(ticket, offer), isNull);
++    expect(f.ticketState, 'queued');
++  });
++
++  test(
++      'mismatched action never reaches consent; native rejection is actionable and retains retry',
++      () async {
++    final dir = await Directory.systemTemp.createTemp();
++    addTearDown(() => dir.delete(recursive: true));
++    final f = Fixture(), offer = selfFixOffer(card)!;
++    final c = f.client(File('${dir.path}/receipt'));
++    f.seed(c);
++    f.fakeAction = 'reconnect_printer';
++    await expectLater(
++        c.startSelfFix(ticket, offer, kitchen), throwsFormatException);
++    expect(f.consents, isEmpty);
++    f.fakeAction = 'print_test';
++    f.recordLocal = false;
++    await expectLater(
++        c.startSelfFix(ticket, offer, kitchen),
++        throwsA(
++            isA<HelpFailure>().having((e) => e.code, 'code', 'local_consent')));
++    expect(c.selfFixRetryTarget(ticket, offer), kitchen);
++  });
++
++  testWidgets(
++      'waiting card hides unavailable targets, disables occupied devices, and offers human support for unsupported jobs',
++      (t) async {
++    final old = VisibilityDetectorController.instance.updateInterval;
++    VisibilityDetectorController.instance.updateInterval = Duration.zero;
++    addTearDown(
++        () => VisibilityDetectorController.instance.updateInterval = old);
++    final fixture = Fixture()..bound = false;
++    await t.pumpWidget(MaterialApp(
++        home: Scaffold(
++            body: SingleChildScrollView(child: fixtureEntry(fixture)))));
++    await t.pumpAndSettle();
++    await t.tap(find.text('查看求助单'));
++    await t.pumpAndSettle();
++    await t.tap(find.text(title));
++    await t.pumpAndSettle();
++    expect(find.text('打印测试页'), findsNothing);
++    fixture.bound = true;
++    fixture.enabled = false;
++    Future<void> poll() async {
++      await t.pump(const Duration(seconds: 12));
++      await t.pumpAndSettle();
++    }
++
++    await poll();
++    expect(find.text('打印测试页'), findsNothing);
++    fixture.enabled = true;
++    fixture.blocked = 'staff_active';
++    await poll();
++    expect(find.text('客服正在处理，请稍候'), findsOneWidget);
++    final button = find.ancestor(
++        of: find.text('打印测试页'),
++        matching: find.byWidgetPredicate((w) => w is FilledButton));
++    expect(t.widget<FilledButton>(button).onPressed, isNull);
++    fixture.blocked = null;
++    fixture.paused = true;
++    await poll();
++    expect(find.text('远程支持已暂停'), findsOneWidget);
++    expect(t.widget<FilledButton>(button).onPressed, isNull);
++    fixture.paused = false;
++    fixture.state = 'unsupported';
++    await poll();
++    expect(find.text('这台打印机不支持该操作。'), findsOneWidget);
++    fixture.ticketState = 'claimed';
++    await poll();
++    expect(find.text('客服正在处理，请稍候'), findsOneWidget);
++    expect(t.widget<FilledButton>(button).onPressed, isNull);
++    expect(find.text('这个解决了我的问题'), findsNothing);
++    expect(fixture.posts, isEmpty);
++    expect(fixture.consents, isEmpty);
++    await t.pumpWidget(const SizedBox());
++  });
++
++  testWidgets(
++      'merchant waiting page explicitly chooses printer, confirms, polls, contacts support and resolves separately',
++      (t) async {
++    final old = VisibilityDetectorController.instance.updateInterval;
++    VisibilityDetectorController.instance.updateInterval = Duration.zero;
++    addTearDown(
++        () => VisibilityDetectorController.instance.updateInterval = old);
++    final f = Fixture();
++    await t.pumpWidget(MaterialApp(
++        home: Scaffold(body: SingleChildScrollView(child: fixtureEntry(f)))));
++    await t.pumpAndSettle();
++    await t.tap(find.text('查看求助单'));
++    await t.pumpAndSettle();
++    await t.tap(find.text(title));
++    await t.pumpAndSettle();
++    expect(find.text('打印测试页'), findsOneWidget);
++    await t.tap(find.text('打印测试页'));
++    await t.pumpAndSettle();
++    expect(
++        t
++            .widget<FilledButton>(find.widgetWithText(FilledButton, '确认'))
++            .onPressed,
++        isNull);
++    await t.tap(find.byType(DropdownButtonFormField<String>));
++    await t.pumpAndSettle();
++    await t.tap(find.text('厨房打印机').last);
++    await t.pumpAndSettle();
++    expect(find.text('将向厨房打印机发送一张测试页。'), findsOneWidget);
++    expect(f.posts, isEmpty);
++    await t.tap(find.text('确认'));
++    await t.pumpAndSettle();
++    expect(f.consents, hasLength(1));
++    expect(find.text('已排队，等待打印服务'), findsOneWidget);
++    f.state = 'failed';
++    await t.pump(const Duration(seconds: 4));
++    await t.pumpAndSettle();
++    expect(find.text('操作失败。请检查纸张、电源和连接。'), findsOneWidget);
++    final contact = find.text('联系客服').last;
++    await t.tap(contact);
++    await t.pumpAndSettle();
++    expect(find.text('人工求助单 #$ticket'), findsOneWidget);
++    expect(f.ticketState, 'queued');
++    f.state = 'success';
++    await t.tap(find.text('返回步骤卡'));
++    await t.pumpAndSettle();
++    await t.tap(find.text(title));
++    await t.pumpAndSettle();
++    expect(find.text('操作成功，请检查打印机。'), findsOneWidget);
++    expect(f.ticketState, 'queued');
++    await t.tap(find.text('这个解决了我的问题'));
++    await t.pumpAndSettle();
++    expect(f.ticketState, 'closed');
++    expect(f.consents, hasLength(1));
++    await t.pumpWidget(const SizedBox());
++  });
++}
+diff --git a/src/lib.rs b/src/lib.rs
+index 27e74e0..d1975af 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -1,6 +1,11 @@
+ #[cfg(any(test, not(target_os = "linux")))]
+ mod audio_resampler;
+ mod keyboard;
++#[cfg(any(steaddesk_fixed_merchant, all(target_os = "android", steaddesk_merchant)))]
++mod steaddesk_printer;
++#[cfg(all(target_os = "android", steaddesk_merchant))]
++mod steaddesk_self_fix;
++
+ #[cfg(steaddesk_help_merchant)]
+ mod steaddesk_help;
+ #[cfg(steaddesk_tb_merchant)]
+diff --git a/src/steaddesk_check_signer.rs b/src/steaddesk_check_signer.rs
+index 094fe8f..5812b46 100644
+--- a/src/steaddesk_check_signer.rs
++++ b/src/steaddesk_check_signer.rs
+@@ -40,4 +40,7 @@ fn proof(input: Input, device: &str, stamp: u64, nonce: &str) -> Option<Vec<u8>>
+     } = input;
+     let (method, path, payload) = match operation.as_str() {
++        "self_fix" if key_version > 0 && valid_self_fix(&body) => {
++            ("POST", "/ops/v1/help/me/self-fix", body)
++        }
+         "identity" if key_version == 0 && body == json!({}) => {
+             ("GET", "/ops/v1/device/update-identity", body)
+@@ -119,4 +122,21 @@ fn headers(input: Input) -> Option<Vec<u8>> {
+ }
+ 
++fn valid_self_fix(body: &Value) -> bool {
++    let Some(fields) = body.as_object() else { return false };
++    let text = |name: &str| fields.get(name).and_then(Value::as_str).unwrap_or("");
++    let card = text("card_id").as_bytes();
++    let offer = text("offer_id").as_bytes();
++    let target = text("target_id").as_bytes();
++    fields.len() == 5
++        && matches!(text("action"), "print_test" | "reconnect_printer")
++        && (1..=80).contains(&card.len())
++        && card.iter().all(|b| b.is_ascii_alphanumeric() || b"_-".contains(b))
++        && fields.get("card_version").and_then(Value::as_u64).is_some_and(|n| (1..=9_007_199_254_740_991).contains(&n))
++        && offer.len() == 64 && offer.iter().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(b))
++        && target.len() == 28 && target.starts_with(b"i_")
++        && (b'0'..=b'7').contains(&target[2])
++        && target[3..].iter().all(|b| b"0123456789ABCDEFGHJKMNPQRSTVWXYZ".contains(b))
++}
++
+ /// # Safety
+ /// The caller owns separate buffers of the indicated lengths for the duration of the call.
+@@ -189,4 +209,22 @@ mod tests {
+     }
+     #[test]
++    fn self_fix_is_limited_to_versioned_offers_and_inventory_ids() {
++        let body = json!({"action":"print_test", "card_id":"kb_print", "card_version":1,
++            "offer_id":"a".repeat(64), "target_id":format!("i_{}", "0".repeat(26))});
++        let bytes = canonical("self_fix", 1, body.clone()).unwrap();
++        let envelope: Value = serde_json::from_slice(&bytes[b"SteadDesk-fleet-v1\0".len()..]).unwrap();
++        assert_eq!(envelope[0], "POST");
++        assert_eq!(envelope[1], "/ops/v1/help/me/self-fix");
++        assert_eq!(envelope[2], body);
++        assert!(canonical("self_fix", 0, body.clone()).is_none());
++        for (key, value) in [("action",json!("reboot")), ("ip",json!("192.0.2.1")),
++                ("target_id",json!("192.0.2.1")), ("card_version",json!(0)),
++                ("target_id",json!(format!("i_{}", "I".repeat(26)))), ("offer_id",json!(""))] {
++            let mut changed = body.clone();
++            changed[key] = value;
++            assert!(canonical("self_fix", 1, changed).is_none());
++        }
++    }
++    #[test]
+     fn cannot_select_a_different_route_or_sign_extra_fields() {
+         for op in [
+diff --git a/src/steaddesk_fixed.rs b/src/steaddesk_fixed.rs
+index 6050a3b..a9bb7a5 100644
+--- a/src/steaddesk_fixed.rs
++++ b/src/steaddesk_fixed.rs
+@@ -1,12 +1,17 @@
+ //! Scoped merchant control plane. The UI can only poll and acknowledge its visible offer.
++use crate::steaddesk_printer::{OwnedPrinter, PrinterBinding};
++#[cfg(test)]
++use crate::steaddesk_printer::{transfer_printer, PAGE};
++#[cfg(test)]
++use std::net::TcpStream;
+ use hbb_common::config::Config;
+ use reqwest::{blocking::Client, redirect::Policy, Url};
+ use serde_derive::Deserialize;
+ use serde_json::{json, Value};
+ use std::{
+     collections::{BTreeMap, HashSet},
+-    io::{Read, Write},
+-    net::{Ipv4Addr, SocketAddr, TcpStream},
++    io::Read,
++    net::{Ipv4Addr, SocketAddr},
+     panic::catch_unwind,
+     slice,
+     sync::{Mutex, OnceLock},
+@@ -25,7 +30,6 @@ const ACTIONS: [&str; 5] = [
+     "open_settings",
+     "reboot",
+ ];
+-const PAGE: &[u8] = b"SteadDesk printer test\n\n\n";
+ #[cfg(target_os = "android")]
+ const PLATFORM: &str = "android";
+ #[cfg(windows)]
+@@ -393,19 +397,7 @@ fn validate(t: &Target, a: &str) -> bool {
+     }
+ }
+ 
+-#[derive(PartialEq, Clone)]
+-struct PrinterBinding {
+-    scope: Scope,
+-    target: String,
+-    addr: SocketAddr,
+-}
+-struct OwnedPrinter {
+-    binding: PrinterBinding,
+-    stream: TcpStream,
+-    opened: std::time::Instant,
+-}
+-static PRINTER: Mutex<Option<OwnedPrinter>> = Mutex::new(None);
+-const PRINTER_TTL: Duration = Duration::from_secs(600);
++static PRINTER: Mutex<Option<OwnedPrinter<Scope>>> = Mutex::new(None);
+ 
+ pub(crate) fn release_printer() {
+     if let Ok(mut session) = PRINTER.lock() {
+@@ -419,85 +411,7 @@ fn printer(s: &Scope, t: &Target, print: bool) -> &'static str {
+         target: t.id.clone(),
+         addr: SocketAddr::from((t.ip, 9100)),
+     };
+-    let mut slot = match PRINTER.lock() {
+-        Ok(slot) => slot,
+-        Err(_) => return "failed",
+-    };
+-    let result = transfer_printer(
+-        &mut slot,
+-        &binding,
+-        || TcpStream::connect_timeout(&binding.addr, Duration::from_secs(2)),
+-        || current(s),
+-        print,
+-    );
+-    if !print && result == "completed" {
+-        let Some(opened) = slot.as_ref().map(|p| p.opened) else {
+-            return "failed";
+-        };
+-        if std::thread::Builder::new()
+-            .name("fixed-printer-expiry".into())
+-            .spawn(move || {
+-                std::thread::sleep(PRINTER_TTL);
+-                if let Ok(mut held) = PRINTER.lock() {
+-                    if held.as_ref().is_some_and(|p| p.opened == opened) {
+-                        held.take();
+-                    }
+-                }
+-            })
+-            .is_err()
+-        {
+-            slot.take();
+-            return "failed";
+-        }
+-    }
+-    result
+-}
+-
+-fn transfer_printer(
+-    slot: &mut Option<OwnedPrinter>,
+-    binding: &PrinterBinding,
+-    dial: impl FnOnce() -> std::io::Result<TcpStream>,
+-    allowed: impl Fn() -> bool,
+-    print: bool,
+-) -> &'static str {
+-    // Taking ownership before every attempt means an uncertain write can never fall back to a second connection.
+-    let previous = slot
+-        .take()
+-        .filter(|p| p.binding == *binding && p.opened.elapsed() < PRINTER_TTL);
+-    if !allowed() {
+-        return "cancelled";
+-    }
+-    if !print {
+-        drop(previous);
+-        let Ok(stream) = dial() else { return "failed" };
+-        if !allowed() {
+-            return "cancelled";
+-        }
+-        *slot = Some(OwnedPrinter {
+-            binding: binding.clone(),
+-            stream,
+-            opened: std::time::Instant::now(),
+-        });
+-        return "completed";
+-    }
+-    let mut stream = match previous {
+-        Some(p) => p.stream,
+-        None => match dial() {
+-            Ok(stream) => stream,
+-            Err(_) => return "failed",
+-        },
+-    };
+-    if !allowed() {
+-        return "cancelled";
+-    }
+-    if stream
+-        .set_write_timeout(Some(Duration::from_secs(2)))
+-        .is_err()
+-        || stream.write_all(PAGE).is_err()
+-    {
+-        return "failed";
+-    }
+-    "completed"
++    crate::steaddesk_printer::run(&PRINTER, binding, || current(s), print)
+ }
+ 
+ #[cfg(windows)]
+diff --git a/src/steaddesk_printer.rs b/src/steaddesk_printer.rs
+new file mode 100644
+index 0000000..555a746
+--- /dev/null
++++ b/src/steaddesk_printer.rs
+@@ -0,0 +1,107 @@
++//! Fixed raw-printer transport shared by support and merchant approvals.
++use std::{
++    io::Write,
++    net::{SocketAddr, TcpStream},
++    sync::Mutex,
++    time::Duration,
++};
++pub(crate) const PAGE: &[u8] = b"SteadDesk printer test\n\n\n";
++const PRINTER_TTL: Duration = Duration::from_secs(600);
++
++#[derive(PartialEq, Clone)]
++pub(crate) struct PrinterBinding<S> {
++    pub(crate) scope: S,
++    pub(crate) target: String,
++    pub(crate) addr: SocketAddr,
++}
++pub(crate) struct OwnedPrinter<S> {
++    pub(crate) binding: PrinterBinding<S>,
++    stream: TcpStream,
++    opened: std::time::Instant,
++}
++pub(crate) fn run<S: Clone + PartialEq + Send + 'static>(
++    slot_ref: &'static Mutex<Option<OwnedPrinter<S>>>,
++    binding: PrinterBinding<S>,
++    allowed: impl FnMut() -> bool,
++    print: bool,
++) -> &'static str {
++    let mut slot = match slot_ref.lock() {
++        Ok(slot) => slot,
++        Err(_) => return "failed",
++    };
++    let result = transfer_printer(
++        &mut slot,
++        &binding,
++        || TcpStream::connect_timeout(&binding.addr, Duration::from_secs(2)),
++        allowed,
++        print,
++    );
++    if !print && result == "completed" {
++        let Some(opened) = slot.as_ref().map(|p| p.opened) else {
++            return "failed";
++        };
++        if std::thread::Builder::new()
++            .name("fixed-printer-expiry".into())
++            .spawn(move || {
++                std::thread::sleep(PRINTER_TTL);
++                if let Ok(mut held) = slot_ref.lock() {
++                    if held.as_ref().is_some_and(|p| p.opened == opened) {
++                        held.take();
++                    }
++                }
++            })
++            .is_err()
++        {
++            slot.take();
++            return "failed";
++        }
++    }
++    result
++}
++
++pub(crate) fn transfer_printer<S: Clone + PartialEq>(
++    slot: &mut Option<OwnedPrinter<S>>,
++    binding: &PrinterBinding<S>,
++    dial: impl FnOnce() -> std::io::Result<TcpStream>,
++    mut allowed: impl FnMut() -> bool,
++    print: bool,
++) -> &'static str {
++    // Taking ownership before every attempt means an uncertain write can never fall back to a second connection.
++    let previous = slot
++        .take()
++        .filter(|p| p.binding == *binding && p.opened.elapsed() < PRINTER_TTL);
++    if !allowed() {
++        return "cancelled";
++    }
++    if !print {
++        drop(previous);
++        let Ok(stream) = dial() else { return "failed" };
++        if !allowed() {
++            return "cancelled";
++        }
++        *slot = Some(OwnedPrinter {
++            binding: binding.clone(),
++            stream,
++            opened: std::time::Instant::now(),
++        });
++        return "completed";
++    }
++    let mut stream = match previous {
++        Some(p) => p.stream,
++        None => match dial() {
++            Ok(stream) => stream,
++            Err(_) => return "failed",
++        },
++    };
++    if !allowed() {
++        return "cancelled";
++    }
++    if stream
++        .set_write_timeout(Some(Duration::from_secs(2)))
++        .is_err()
++        || stream.write_all(PAGE).is_err()
++    {
++        return "failed";
++    }
++    "completed"
++}
+diff --git a/src/steaddesk_self_fix.rs b/src/steaddesk_self_fix.rs
+new file mode 100644
+index 0000000..bbb6112
+--- /dev/null
++++ b/src/steaddesk_self_fix.rs
+@@ -0,0 +1,294 @@
++//! One local approval per acknowledged merchant job. The Mesh message cannot choose a different printer.
++use crate::steaddesk_printer::{OwnedPrinter, PrinterBinding};
++use hbb_common::{
++    config::Config,
++    sha2::{Digest, Sha256},
++};
++use jni::{
++    objects::{JObject, JString},
++    sys::{jboolean, jint},
++    JNIEnv,
++};
++use serde_derive::Deserialize;
++use std::{
++    net::{Ipv4Addr, SocketAddr},
++    panic::{catch_unwind, AssertUnwindSafe},
++    sync::{Mutex, OnceLock},
++    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
++};
++
++const ALPHABET: &[u8] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
++const TTL: Duration = Duration::from_secs(90);
++type Identity = (String, String);
++static PRINTER: Mutex<Option<OwnedPrinter<Identity>>> = Mutex::new(None);
++
++#[derive(Clone, Deserialize, PartialEq)]
++#[serde(deny_unknown_fields)]
++struct Approval {
++    id: String,
++    action: String,
++    target_id: String,
++    target_proof: String,
++}
++
++struct Entry {
++    approval: Approval,
++    identity: Identity,
++    created: Instant,
++    used: bool,
++}
++
++fn ulid(value: &str, prefix: &str) -> Option<u64> {
++    let s = value.strip_prefix(prefix)?.as_bytes();
++    if s.len() != 26 || s[0] > b'7' || !s.iter().all(|b| ALPHABET.contains(b)) {
++        return None;
++    }
++    s[..10].iter().try_fold(0u64, |v, b| {
++        Some(v * 32 + ALPHABET.iter().position(|c| c == b)? as u64)
++    })
++}
++fn identity() -> Identity {
++    (Config::get_option("api-server"), Config::get_id())
++}
++fn entries() -> &'static Mutex<Vec<Entry>> {
++    static APPROVALS: OnceLock<Mutex<Vec<Entry>>> = OnceLock::new();
++    APPROVALS.get_or_init(|| Mutex::new(Vec::new()))
++}
++fn remember(
++    list: &mut Vec<Entry>,
++    approval: Approval,
++    who: Identity,
++    wall_ms: u64,
++    now: Instant,
++) -> bool {
++    let Some(issued) = ulid(&approval.id, "sf_") else {
++        return false;
++    };
++    if issued > wall_ms + 15_000
++        || wall_ms.saturating_sub(issued) > TTL.as_millis() as u64
++        || ulid(&approval.target_id, "i_").is_none()
++        || !matches!(approval.action.as_str(), "print_test" | "reconnect_printer")
++        || approval.target_proof.len() != 64
++        || !approval
++            .target_proof
++            .bytes()
++            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
++    {
++        return false;
++    }
++    list.retain(|e| now.duration_since(e.created) < TTL + Duration::from_secs(20));
++    if let Some(old) = list.iter().find(|e| e.approval.id == approval.id) {
++        return old.approval == approval && old.identity == who;
++    }
++    if list.len() >= 32 {
++        return false;
++    }
++    list.push(Entry {
++        approval,
++        identity: who,
++        created: now,
++        used: false,
++    });
++    true
++}
++
++/// Called by the merchant UI after its explicit confirmation and authenticated POST acknowledgement.
++#[no_mangle]
++pub unsafe extern "C" fn steaddesk_remember_self_fix(data: *const u8, len: usize) -> jint {
++    if data.is_null() || len == 0 || len > 512 {
++        return 0;
++    }
++    catch_unwind(|| {
++        let body = std::slice::from_raw_parts(data, len);
++        let Ok(approval) = serde_json::from_slice(body) else {
++            return 0;
++        };
++        let Ok(at) = SystemTime::now().duration_since(UNIX_EPOCH) else {
++            return 0;
++        };
++        let Ok(mut list) = entries().lock() else {
++            return 0;
++        };
++        remember(
++            &mut list,
++            approval,
++            identity(),
++            at.as_millis() as u64,
++            Instant::now(),
++        ) as jint
++    })
++    .unwrap_or(0)
++}
++fn approved(
++    list: &mut [Entry],
++    who: &Identity,
++    id: &str,
++    action: &str,
++    target: &str,
++    ip: Option<Ipv4Addr>,
++    now: Instant,
++) -> bool {
++    let Some(entry) = list.iter_mut().find(|e| {
++        !e.used
++            && e.identity == *who
++            && e.approval.id == id
++            && e.approval.target_id == target
++            && e.approval.action == action
++            && now.duration_since(e.created) < TTL
++    }) else {
++        return false;
++    };
++    if let Some(addr) = ip {
++        let proof = format!(
++            "{:x}",
++            Sha256::digest(format!("{id}|{action}|{target}|{addr}").as_bytes())
++        );
++        if !addr.is_private() || proof != entry.approval.target_proof {
++            return false;
++        }
++        entry.used = true;
++    }
++    true
++}
++#[no_mangle]
++pub extern "system" fn Java_com_carriez_flutter_1hbb_AgentWakeService_selfFixPrinter(
++    mut env: JNIEnv,
++    this: JObject,
++    execute: jboolean,
++    id: JString,
++    action: JString,
++    target: JString,
++    ip: JString,
++) -> jint {
++    catch_unwind(AssertUnwindSafe(|| -> Option<jint> {
++        let id: String = env.get_string(&id).ok()?.into();
++        let action: String = env.get_string(&action).ok()?.into();
++        let target: String = env.get_string(&target).ok()?.into();
++        let ip: String = env.get_string(&ip).ok()?.into();
++        let addr = if execute != 0 {
++            let parsed: Ipv4Addr = ip.parse().ok()?;
++            if !parsed.is_private() || parsed.to_string() != ip {
++                return None;
++            }
++            Some(parsed)
++        } else {
++            if !ip.is_empty() {
++                return None;
++            }
++            None
++        };
++        let who = identity();
++        let mut idle = || {
++            identity() == who
++                && env
++                    .call_method(&this, "selfFixIdle", "()Z", &[])
++                    .and_then(|v| v.z())
++                    .unwrap_or(false)
++        };
++        if !idle() {
++            return None;
++        }
++        if !approved(
++            &mut entries().lock().ok()?[..],
++            &who,
++            &id,
++            &action,
++            &target,
++            addr,
++            Instant::now(),
++        ) {
++            return None;
++        }
++        let Some(addr) = addr else {
++            return Some(1);
++        };
++        let binding = PrinterBinding {
++            scope: who.clone(),
++            target,
++            addr: SocketAddr::from((addr, 9100)),
++        };
++        let result = crate::steaddesk_printer::run(&PRINTER, binding, idle, action == "print_test");
++        Some((result == "completed") as jint)
++    }))
++    .ok()
++    .flatten()
++    .unwrap_or(0)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    const JOB: &str = "sf_00000000000000000000000001";
++    const TARGET: &str = "i_00000000000000000000000003";
++    fn who() -> Identity {
++        ("https://lab.invalid".into(), "fixture-device".into())
++    }
++    fn consent() -> Approval {
++        let proof = format!(
++            "{:x}",
++            Sha256::digest(format!("{JOB}|print_test|{TARGET}|10.0.0.1").as_bytes())
++        );
++        Approval {
++            id: JOB.into(),
++            action: "print_test".into(),
++            target_id: TARGET.into(),
++            target_proof: proof,
++        }
++    }
++    #[test]
++    fn only_the_confirmed_action_and_address_can_consume_consent_once() {
++        let now = Instant::now();
++        let mut list = vec![];
++        assert!(remember(&mut list, consent(), who(), 0, now));
++        let run = |list: &mut Vec<Entry>, action: &str, ip: &str| {
++            approved(
++                list,
++                &who(),
++                JOB,
++                action,
++                TARGET,
++                Some(ip.parse().unwrap()),
++                now,
++            )
++        };
++        assert!(!run(&mut list, "reconnect_printer", "10.0.0.1"));
++        assert!(!run(&mut list, "print_test", "10.0.0.2"));
++        assert!(approved(
++            &mut list,
++            &who(),
++            JOB,
++            "print_test",
++            TARGET,
++            None,
++            now
++        ));
++        assert!(run(&mut list, "print_test", "10.0.0.1"));
++        assert!(remember(&mut list, consent(), who(), 100, now));
++        assert!(!run(&mut list, "print_test", "10.0.0.1"));
++    }
++    #[test]
++    fn expires_by_monotonic_time_and_does_not_follow_an_account_or_device_change() {
++        let now = Instant::now();
++        let mut list = vec![];
++        assert!(!remember(&mut list, consent(), who(), 91_000, now));
++        assert!(remember(&mut list, consent(), who(), 0, now));
++        assert!(!approved(
++            &mut list,
++            &("".into(), "other".into()),
++            JOB,
++            "print_test",
++            TARGET,
++            None,
++            now
++        ));
++        assert!(!approved(
++            &mut list,
++            &who(),
++            JOB,
++            "print_test",
++            TARGET,
++            None,
++            now + TTL
++        ));
++    }
++}
