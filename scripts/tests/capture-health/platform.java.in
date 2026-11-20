@@ -55,6 +55,8 @@ public class Parcel {
     public void writeNoException() {}
     public void enforceInterface(String descriptor) {}
     public int dataAvail() { return 0; }
+    public int readInt() { throw new IllegalStateException("Empty fixture parcel"); }
+    public String readString() { throw new IllegalStateException("Empty fixture parcel"); }
 }
 
 package android.os;
@@ -72,3 +74,6 @@ public class PeerWatchdog {
     public boolean isPeerUserStopped() { return false; }
     public String freshPeerUserStopped() { return ""; }
 }
+
+package androidx.annotation;
+public @interface Keep {}

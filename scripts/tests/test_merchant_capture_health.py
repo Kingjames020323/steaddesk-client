@@ -29,7 +29,7 @@ class MerchantCaptureTests(unittest.TestCase):
             declarations = (FIXTURES / "platform.java.in").read_text().split("\npackage ")[1:]
             for declaration in declarations:
                 package_name = declaration.split(";", 1)[0]
-                name = re.search(r"public (?:abstract )?(?:class|interface) (\w+)", declaration)[1]
+                name = re.search(r"public (?:abstract )?(?:class|interface|@interface) (\w+)", declaration)[1]
                 path = tree.joinpath(*package_name.split("."), name + ".java")
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text("package " + declaration)
