@@ -1,0 +1,2028 @@
+diff --git a/flutter/lib/steaddesk/cases/case_dialog.dart b/flutter/lib/steaddesk/cases/case_dialog.dart
+index 83c926a..ba05990 100644
+--- a/flutter/lib/steaddesk/cases/case_dialog.dart
++++ b/flutter/lib/steaddesk/cases/case_dialog.dart
+@@ -6,3 +6,4 @@
+ import 'package:flutter_hbb/steaddesk/toolbar_api.dart';
+ import 'case_store.dart';
++import '../onsite_reason.dart';
+ import 'team_notes.dart';
+@@ -35,7 +36,7 @@ Future<void> showCaseCloseDialog(
+ }) async {
+   final appendOnly = await store.isAppendOnly(account, record['id'] as String);
+   if (!context.mounted) return;
+-  await showDialog<void>(
++  final confirmedOnsite = await showDialog<bool>(
+     context: context,
+     useRootNavigator: false,
+     barrierDismissible: false,
+@@ -55,6 +56,10 @@ Future<void> showCaseCloseDialog(
+         ..sort(),
+     ),
+   );
++  if (confirmedOnsite == true && context.mounted) {
++    ScaffoldMessenger.maybeOf(context)?.showSnackBar(
++        const SnackBar(content: Text(onsiteConfirmedText)));
++  }
+ }
+ 
+ class _CaseCloseDialog extends StatefulWidget {
+@@ -82,13 +87,27 @@ class _CaseCloseDialogState extends State<_CaseCloseDialog> {
+   late bool appendOnly = widget.appendOnly;
+   bool get lockedFields => appendOnly && widget.record['status'] == 'saved';
+   String get original => widget.record['note'] as String? ?? '';
+-  late final note = TextEditingController(text: appendOnly ? '' : original);
++  Map? get pending => widget.record['pending_onsite'] as Map?;
++  bool get savedTicket => widget.record['status'] == 'saved' && widget.record['help_id'] != null;
++  bool get legacyOnsite => widget.record['status'] == 'saved' &&
++      widget.record['result'] == 'onsite' && widget.record['onsite_reason'] == null;
++  late final reason = TextEditingController(
++      text: pending?['reason'] ?? widget.record['onsite_reason'] ?? '');
++  String get draftNote {
++    final draft = pending?['note'];
++    if (draft is! String) return appendOnly ? '' : original;
++    if (appendOnly && pending?['append_only'] != true) {
++      return draft.startsWith(original) ? draft.substring(original.length) : '';
++    }
++    return draft;
++  }
++  late final note = TextEditingController(text: draftNote);
+   late final owner = TextEditingController(
+       text: widget.record['follow_up']?['owner'] as String? ?? widget.account);
+   late final colleague =
+       TextEditingController(text: widget.record['transferred_to'] as String?);
+-  late String? category = widget.record['category'] as String?;
+-  late String? result = widget.record['result'] as String?;
++  late String? category = pending?['category'] ?? widget.record['category'] as String?;
++  late String? result = pending != null ? 'onsite' : widget.record['result'] as String?;
+   late DateTime? due =
+       DateTime.tryParse(widget.record['follow_up']?['due'] as String? ?? '');
+ 
+@@ -97,12 +116,14 @@ class _CaseCloseDialogState extends State<_CaseCloseDialog> {
+   final ownerNode = FocusNode(),
+       dateNode = FocusNode(),
+       colleagueNode = FocusNode(),
+-      noteNode = FocusNode();
++      noteNode = FocusNode(),
++      reasonNode = FocusNode();
+   final formFocus = FocusNode(skipTraversal: true);
+   var busy = false;
+   String? error;
+ 
+-  bool get followUp => result == 'unresolved' || result == 'onsite';
++  bool get followUp => result == 'unresolved' ||
++      (result == 'onsite' && widget.record['help_id'] == null);
+   bool get transfer => result == 'transferred';
+ 
+   @override
+@@ -130,10 +151,12 @@ class _CaseCloseDialogState extends State<_CaseCloseDialog> {
+       dateNode,
+       colleagueNode,
+       noteNode,
++      reasonNode,
+       formFocus
+     ]) {
+       node.dispose();
+     }
++    reason.dispose();
+     note.dispose();
+     owner.dispose();
+     colleague.dispose();
+@@ -166,7 +189,7 @@ class _CaseCloseDialogState extends State<_CaseCloseDialog> {
+     if (key == LogicalKeyboardKey.enter ||
+         key == LogicalKeyboardKey.numpadEnter) {
+       // Let a Chinese input method commit its active composition first.
+-      for (final field in [note, owner, colleague]) {
++      for (final field in [note, reason, owner, colleague]) {
+         if (!field.value.composing.isCollapsed) return KeyEventResult.ignored;
+       }
+       if (!busy && !lockedFields) {
+@@ -183,6 +206,7 @@ class _CaseCloseDialogState extends State<_CaseCloseDialog> {
+     if (busy ||
+         lockedFields ||
+         noteNode.hasFocus ||
++        reasonNode.hasFocus ||
+         ownerNode.hasFocus ||
+         colleagueNode.hasFocus) {
+       return KeyEventResult.ignored;
+@@ -211,6 +235,8 @@ class _CaseCloseDialogState extends State<_CaseCloseDialog> {
+       if (caseFieldsRequired && result == null) {
+         return _missing(resultNodes.values.first, '请选择处理结果');
+       }
++      if (result == 'onsite' && !(legacyOnsite && reason.text.isEmpty) &&
++          !validOnsiteReason(reason.text)) return _missing(reasonNode, onsiteReasonHint);
+       if (followUp && owner.text.trim().isEmpty) {
+         return _missing(ownerNode, '请填写跟进人');
+       }
+@@ -226,22 +252,26 @@ class _CaseCloseDialogState extends State<_CaseCloseDialog> {
+       error = null;
+     });
+     final id = widget.record['id'] as String;
++    bool confirmed = false;
+     try {
+       if (later) {
+         if (widget.record['status'] == 'saved') {
+           Navigator.of(context).pop();
+           return;
+         }
+-        if (appendOnly ? note.text.trim().isNotEmpty : note.text != original) {
++        if (result == 'onsite' || pending != null ||
++            (appendOnly ? note.text.trim().isNotEmpty : note.text != original)) {
+           await widget.store.defer(widget.account, id,
+-              note: note.text, expectedAppendOnly: appendOnly);
++              note: note.text, expectedAppendOnly: appendOnly,
++              onsiteDraft: result == 'onsite' ? {'category': category, 'reason': reason.text} : null);
+         }
+       } else if (lockedFields) {
+         if (note.text.trim().isNotEmpty) {
+           await widget.store.append(widget.account, id, note.text);
+         }
+       } else {
+-        await widget.store.save(widget.account, id,
++        confirmed = await widget.store.save(widget.account, id,
++            onsiteReason: result == 'onsite' ? reason.text.trim() : null,
+             category: category,
+             result: result,
+             followUp: followUp
+@@ -251,7 +281,7 @@ class _CaseCloseDialogState extends State<_CaseCloseDialog> {
+             note: note.text,
+             expectedAppendOnly: appendOnly);
+       }
+-      if (mounted) Navigator.of(context).pop();
++      if (mounted) Navigator.of(context).pop(confirmed);
+     } on CaseEditWindowExpired {
+       if (!mounted) return;
+       setState(() {
+@@ -263,11 +293,11 @@ class _CaseCloseDialogState extends State<_CaseCloseDialog> {
+         error = '已超过 24 小时，请确认要追加的说明后保存';
+       });
+       noteNode.requestFocus();
+-    } catch (_) {
++    } catch (e) {
+       if (mounted) {
+         setState(() {
+           busy = false;
+-          error = '写入失败，请重试';
++          error = e is OnsiteCloseError ? e.message : '写入失败，请重试';
+         });
+       }
+     }
+@@ -492,6 +522,14 @@ class _CaseCloseDialogState extends State<_CaseCloseDialog> {
+                         }),
+                 focus: resultNodes[entry.key]),
+         ]),
++        if (result == 'onsite') ...[
++          const SizedBox(height: 12),
++          TextField(
++              controller: reason, focusNode: reasonNode,
++              readOnly: lockedFields || savedTicket, maxLines: 1, maxLength: 200,
++              decoration: const InputDecoration(labelText: '上门说明', hintText: onsiteReasonHint,
++                  border: OutlineInputBorder())),
++        ],
+         if (followUp) _followUp(),
+         if (transfer) _transfer(),
+         const SizedBox(height: 16),
+diff --git a/flutter/lib/steaddesk/cases/case_store.dart b/flutter/lib/steaddesk/cases/case_store.dart
+index 2907f24..4378edd 100644
+--- a/flutter/lib/steaddesk/cases/case_store.dart
++++ b/flutter/lib/steaddesk/cases/case_store.dart
+@@ -1,6 +1,7 @@
+ import 'dart:async';
+ import 'dart:convert';
+ import 'dart:io';
++import '../onsite_reason.dart';
+ 
+ const caseFieldsRequired = true;
+ const caseStoreFileName = 'support-cases-v1.json';
+@@ -56,9 +57,9 @@ abstract class CaseStore {
+   Future<bool> addDraft(String account, CaseRecord record);
+   Future<bool> isAppendOnly(String account, String id);
+   Future<void> defer(String account, String id,
+-      {required String note, bool? expectedAppendOnly});
+-  Future<void> save(String account, String id,
+-      {String? category,
++      {required String note, bool? expectedAppendOnly, Map<String,dynamic>? onsiteDraft});
++  Future<bool> save(String account, String id,
++      {String? onsiteReason, String? category,
+       String? result,
+       Map<String, dynamic>? followUp,
+       String? transferredTo,
+@@ -285,7 +286,7 @@ class LocalCaseStore implements CaseStore {
+           _expired(_find(accounts, account, id), clock().toUtc()));
+ 
+   Future<void> _edit(String account, String id,
+-          FutureOr<void> Function(CaseRecord, DateTime, bool) edit,
++          FutureOr<void> Function(CaseRecord, DateTime, bool, Future<void> Function()) edit,
+           {bool? expectedAppendOnly}) =>
+       _locked((target, accounts) async {
+         final row = _find(accounts, account, id);
+@@ -294,7 +295,7 @@ class LocalCaseStore implements CaseStore {
+         if (expectedAppendOnly == false && expired) {
+           throw const CaseEditWindowExpired();
+         }
+-        await edit(row, now, expired);
++        await edit(row, now, expired, () => _replace(target, accounts));
+         row['updated_at'] = now.toIso8601String();
+         _trim(accounts[account]!);
+         await _replace(target, accounts);
+@@ -312,9 +313,14 @@ class LocalCaseStore implements CaseStore {
+ 
+   @override
+   Future<void> defer(String account, String id,
+-          {required String note, bool? expectedAppendOnly}) =>
+-      _edit(account, id, (row, now, expired) {
++          {required String note, bool? expectedAppendOnly, Map<String,dynamic>? onsiteDraft}) =>
++      _edit(account, id, (row, now, expired, _) {
+         if (row['status'] != 'draft') throw StateError('Case already closed');
++        if (onsiteDraft == null) {
++          row.remove('pending_onsite');
++        } else {
++          row['pending_onsite'] = onsiteDraft;
++        }
+         _note(row, now, note, expired);
+       }, expectedAppendOnly: expectedAppendOnly);
+ 
+@@ -327,14 +333,15 @@ class LocalCaseStore implements CaseStore {
+   }
+ 
+   @override
+-  Future<void> save(String account, String id,
+-          {String? category,
++  Future<bool> save(String account, String id,
++          {String? onsiteReason, String? category,
+           String? result,
+           Map<String, dynamic>? followUp,
+           String? transferredTo,
+           required String note,
+-          bool? expectedAppendOnly}) =>
+-      _edit(account, id, (row, now, expired) async {
++          bool? expectedAppendOnly}) async {
++    bool onsiteConfirmed = false;
++    await _edit(account, id, (row, now, expired, checkpoint) async {
+         if (expired && row['status'] == 'saved') {
+           throw StateError('Case is append only');
+         }
+@@ -346,7 +353,19 @@ class LocalCaseStore implements CaseStore {
+                 : !caseResults.contains(result))) {
+           throw const FormatException('category/result');
+         }
+-        final needsFollowUp = result == 'unresolved' || result == 'onsite';
++        final onsite = result == 'onsite';
++        final ticket = row['help_id'] != null;
++        final legacySaved = row['status'] == 'saved' && row['result'] == 'onsite' &&
++            row['onsite_reason'] == null;
++        if (onsite && !legacySaved && (onsiteReason == null || !validOnsiteReason(onsiteReason))) {
++          throw const FormatException(onsiteReasonHint);
++        }
++        final reason = onsiteReason?.trim();
++        if (onsite && ticket && row['status'] == 'saved' &&
++            (row['onsite_reason'] ?? '') != (reason ?? '')) {
++          throw StateError('已结案的上门说明不可修改');
++        }
++        final needsFollowUp = result == 'unresolved' || (onsite && !ticket);
+         if (needsFollowUp &&
+             (!_present(followUp?['owner']) || !_validDue(followUp?['due']))) {
+           throw const FormatException('follow_up');
+@@ -358,29 +377,47 @@ class LocalCaseStore implements CaseStore {
+         // write leaves a durable draft; replay verifies the server's round record.
+         if (row['help_id'] != null && row['status'] == 'draft') {
+           if (writeHelp == null) throw StateError('求助服务未启用');
+-          await writeHelp!(row, category!, result!);
++          if (onsite) {
++            // Persist form data before the HTTPS call. A lost reply or restart
++            // leaves the same ticket, claim and reason available for replay.
++            row['pending_onsite'] = {'category': category, 'reason': reason,
++                'note': note, 'append_only': expired};
++            await checkpoint();
++          }
++          await writeHelp!({...row, if (onsite) 'onsite_reason': reason}, category!, result!);
++          onsiteConfirmed = onsite;
+         }
+         if (row['help_id'] != null && row['status'] == 'saved' &&
+             (row['category'] != category || row['result'] != result)) {
+           throw StateError('求助单已结案');
+         }
++        row.remove('pending_onsite');
++        if (onsite && reason != null && reason.isNotEmpty) {
++          row['onsite_reason'] = reason;
++        } else if (!onsite) {
++          row.remove('onsite_reason');
++        }
+         row['category'] = category;
+         row['result'] = result;
+-        row['follow_up'] = needsFollowUp
+-            ? {'owner': followUp!['owner'], 'due': followUp['due']}
+-            : null;
++        if (!(onsite && ticket && row['status'] == 'saved')) {
++          row['follow_up'] = needsFollowUp
++              ? {'owner': followUp!['owner'], 'due': followUp['due']}
++              : null;
++        }
+         row['transferred_to'] =
+             result == 'transferred' ? transferredTo!.trim() : null;
+         row['status'] = 'saved';
+         _note(row, now, note, expired);
+       }, expectedAppendOnly: expectedAppendOnly);
++    return onsiteConfirmed;
++  }
+ 
+   @override
+   Future<void> append(String account, String id, String text,
+           {CaseHistoryScope? scope,
+           bool storeWide = false,
+           DateTime? addedAt}) =>
+-      _edit(account, id, (row, now, _) {
++      _edit(account, id, (row, now, _, __) {
+         if (scope != null && !scope.contains(row, storeWide: storeWide)) {
+           throw StateError('Case outside history scope');
+         }
+diff --git a/flutter/lib/steaddesk/device_card.dart b/flutter/lib/steaddesk/device_card.dart
+index 1822064..bcf1291 100644
+--- a/flutter/lib/steaddesk/device_card.dart
++++ b/flutter/lib/steaddesk/device_card.dart
+@@ -227,7 +227,8 @@ class _DeviceCardState extends State<_DeviceCard> {
+         !book.isPersonal() &&
+         (row.source.peer.password.isNotEmpty ||
+             gFFI.abModel.getdefaultSharedPassword(book) != null);
+-    final tabs = _DeviceTab.values.where((t) => t.enabled).toList();
++    final tabs = _DeviceTab.values.where((t) =>
++        t.enabled || (t == _DeviceTab.reports && onsiteHistoryEnabled)).toList();
+     final name = d.alias.isNotEmpty
+         ? d.alias
+         : d.name.isNotEmpty
+@@ -278,7 +279,9 @@ class _DeviceCardState extends State<_DeviceCard> {
+           const Divider(height: 1),
+           Expanded(
+               child: tab != _DeviceTab.overview
+-                  ? _additionalTab(d.id)
++                  ? tab == _DeviceTab.reports && onsiteHistoryEnabled
++                      ? supportOnsiteHistory(d.id, _additionalTab(d.id))
++                      : _additionalTab(d.id)
+                   : ListView(padding: const EdgeInsets.all(16), children: [
+                       if (opsHealthEnabled)
+                         OpsHealthHost(HealthSurface.card, device: d.id),
+diff --git a/flutter/lib/steaddesk/onsite/data.dart b/flutter/lib/steaddesk/onsite/data.dart
+new file mode 100644
+index 0000000..fffbef8
+--- /dev/null
++++ b/flutter/lib/steaddesk/onsite/data.dart
+@@ -0,0 +1,246 @@
++import 'dart:convert';
++import 'dart:io';
++
++import '../ops_groups.dart' show opsEndpoint;
++
++typedef OnsiteJson = Map<String, dynamic>;
++const onsiteStates = {
++  'open': '待安排',
++  'scheduled': '已预约',
++  'done': '已完成',
++  'cancelled': '已取消',
++};
++final _ticket = RegExp(r'^[hu]_[0-9a-f]{32}$');
++final _device = RegExp(r'^[0-9]{9,10}$');
++
++class OnsiteFailure implements Exception {
++  final int code;
++  final OnsiteRecord? latest;
++  const OnsiteFailure(this.code, [this.latest]);
++}
++
++class OnsiteRecord {
++  final String ticket,
++      store,
++      storeName,
++      device,
++      deviceName,
++      issueType,
++      reason,
++      status,
++      owner;
++  final int closeVersion, version;
++  final DateTime? scheduled;
++  final bool canEdit;
++  const OnsiteRecord(
++      {required this.ticket,
++      required this.closeVersion,
++      required this.version,
++      required this.store,
++      required this.storeName,
++      required this.device,
++      required this.deviceName,
++      required this.issueType,
++      required this.reason,
++      required this.status,
++      required this.owner,
++      required this.scheduled,
++      required this.canEdit});
++  factory OnsiteRecord.fromJson(OnsiteJson item) {
++    String field(String key) {
++      final value = item[key];
++      if (value is! String || value.isEmpty || value.runes.length > 512) {
++        throw const FormatException('上门记录字段无效');
++      }
++      return value;
++    }
++
++    final ticket = field('ticket_id'),
++        device = field('device_id'),
++        status = field('status'),
++        version = item['version'],
++        closeVersion = item['close_version'],
++        when = item['scheduled_at'];
++    if (!_ticket.hasMatch(ticket) ||
++        !_device.hasMatch(device) ||
++        !onsiteStates.containsKey(status) ||
++        version is! int ||
++        version < 1 ||
++        closeVersion is! int ||
++        closeVersion < 1 ||
++        item['can_edit'] is! bool ||
++        when != null && (when is! int || when < 0 || when > 253402300799)) {
++      throw const FormatException('上门记录格式无效');
++    }
++    return OnsiteRecord(
++        ticket: ticket,
++        closeVersion: closeVersion,
++        version: version,
++        store: field('store_id'),
++        storeName: field('store_name'),
++        device: device,
++        deviceName: field('device_name'),
++        issueType: field('issue_type'),
++        reason: field('reason'),
++        status: status,
++        owner: field('owner'),
++        scheduled: when == null
++            ? null
++            : DateTime.fromMillisecondsSinceEpoch((when as int) * 1000,
++                isUtc: true),
++        canEdit: item['can_edit']);
++  }
++  bool sameRecord(OnsiteRecord other) =>
++      ticket == other.ticket &&
++      closeVersion == other.closeVersion &&
++      store == other.store &&
++      device == other.device;
++}
++
++typedef OnsitePage = ({List<OnsiteRecord> items, int total});
++
++abstract interface class OnsiteAccess {
++  void dispose();
++  bool get current;
++  Future<OnsitePage> deviceHistory(String device, int offset);
++  Future<OnsiteRecord> getRecord(OnsiteRecord row);
++  Future<OnsiteRecord> patch(OnsiteRecord row, String key, OnsiteJson values);
++}
++
++class OnsiteHttp implements OnsiteAccess {
++  final Uri _base;
++  final String _token;
++  final bool Function() _current;
++  final HttpClient client;
++  OnsiteHttp(Uri origin, this._token, this._current, this.client)
++      : _base = opsEndpoint(origin) {
++    if (origin.scheme != 'https' || _token.isEmpty) {
++      throw const OnsiteFailure(401);
++    }
++  }
++  static bool validOrigin(Uri url) {
++    if (url.scheme != 'https') return false;
++    try {
++      opsEndpoint(url);
++      return true;
++    } on ArgumentError {
++      return false;
++    }
++  }
++
++  factory OnsiteHttp.owned(Uri origin, String token, bool Function() current) =>
++      OnsiteHttp(
++          origin,
++          token,
++          current,
++          HttpClient()
++            ..connectionTimeout = const Duration(seconds: 6)
++            ..findProxy = (_) => 'DIRECT');
++  @override
++  void dispose() => client.close(force: true);
++  @override
++  bool get current => _current();
++  Future<OnsiteJson> _request(String method, Uri uri,
++      {String? key, int? version, OnsiteJson? body}) async {
++    if (!current) throw const OnsiteFailure(401);
++    final req =
++        await client.openUrl(method, uri).timeout(const Duration(seconds: 6));
++    if (!current) {
++      req.abort();
++      throw const OnsiteFailure(401);
++    }
++    req.followRedirects = false;
++    req.headers.set(HttpHeaders.authorizationHeader, 'Bearer $_token');
++    req.headers.set(HttpHeaders.acceptHeader, 'application/json');
++    if (key != null) req.headers.set('Idempotency-Key', key);
++    if (version != null) req.headers.set('If-Match', '"$version"');
++    if (body != null) {
++      req.headers.contentType = ContentType.json;
++      final encoded = utf8.encode(jsonEncode(body));
++      req.contentLength = encoded.length;
++      req.add(encoded);
++    }
++    final res = await req.close().timeout(const Duration(seconds: 8));
++    if (res.statusCode != 200 && res.statusCode != 409) {
++      await res.listen((_) {}).cancel();
++      throw OnsiteFailure(res.statusCode);
++    }
++    final bytes = <int>[];
++    await for (final chunk in res.timeout(const Duration(seconds: 8))) {
++      if (bytes.length + chunk.length > 256 * 1024) {
++        throw const FormatException('上门记录过大');
++      }
++      bytes.addAll(chunk);
++    }
++    if (!current) throw const OnsiteFailure(401);
++    final data = jsonDecode(utf8.decode(bytes)) as OnsiteJson;
++    if (res.statusCode == 409) {
++      final latest = data['latest'];
++      throw OnsiteFailure(
++          409, latest is OnsiteJson ? OnsiteRecord.fromJson(latest) : null);
++    }
++    return data;
++  }
++
++  Uri _item(OnsiteRecord row) {
++    if (!_ticket.hasMatch(row.ticket) || row.closeVersion < 1) {
++      throw const OnsiteFailure(400);
++    }
++    return _base.resolve('onsite-followups/${row.ticket}/${row.closeVersion}');
++  }
++
++  OnsiteRecord _same(OnsiteRecord row, OnsiteJson data) {
++    final result = OnsiteRecord.fromJson(data);
++    if (!result.sameRecord(row)) throw const OnsiteFailure(403);
++    return result;
++  }
++
++  @override
++  Future<OnsiteRecord> getRecord(OnsiteRecord row) async =>
++      _same(row, await _request('GET', _item(row)));
++  @override
++  Future<OnsiteRecord> patch(
++      OnsiteRecord row, String key, OnsiteJson values) async {
++    if (!row.canEdit) throw const OnsiteFailure(403);
++    if (values.isEmpty ||
++        values.keys
++            .any((k) => !{'owner', 'scheduled_at', 'status'}.contains(k))) {
++      throw const OnsiteFailure(400);
++    }
++    try {
++      return _same(
++          row,
++          await _request('PATCH', _item(row),
++              key: key, version: row.version, body: values));
++    } on OnsiteFailure catch (e) {
++      if (e.latest != null && !e.latest!.sameRecord(row)) {
++        throw const OnsiteFailure(403);
++      }
++      rethrow;
++    }
++  }
++
++  @override
++  Future<OnsitePage> deviceHistory(String device, int offset) async {
++    if (!_device.hasMatch(device) || offset < 0) throw const OnsiteFailure(400);
++    final data = await _request(
++        'GET',
++        _base.resolve('onsite-followups').replace(queryParameters: {
++          'device_id': device,
++          'limit': '10',
++          'offset': '$offset',
++        }));
++    final items = (data['items'] as List)
++        .cast<OnsiteJson>()
++        .map(OnsiteRecord.fromJson)
++        .toList();
++    final total = data['total'];
++    if (total is! int ||
++        total < 0 ||
++        items.length > 10 ||
++        items.any((r) => r.device != device)) {
++      throw const FormatException('上门记录范围无效');
++    }
++    return (items: items, total: total);
++  }
++}
+diff --git a/flutter/lib/steaddesk/onsite/device.dart b/flutter/lib/steaddesk/onsite/device.dart
+new file mode 100644
+index 0000000..2121ece
+--- /dev/null
++++ b/flutter/lib/steaddesk/onsite/device.dart
+@@ -0,0 +1,123 @@
++import 'dart:async';
++import 'package:flutter/material.dart';
++import 'data.dart';
++import 'widgets.dart';
++
++class DeviceOnsiteHistory extends StatefulWidget {
++  final String device;
++  final OnsiteAccess Function() open;
++  final Widget additional;
++  const DeviceOnsiteHistory(
++      {super.key,
++      required this.device,
++      required this.open,
++      required this.additional});
++  @override
++  State<DeviceOnsiteHistory> createState() => _DeviceOnsiteHistoryState();
++}
++
++class _DeviceOnsiteHistoryState extends State<DeviceOnsiteHistory> {
++  late final api = widget.open();
++  Timer? poll, guard;
++  OnsitePage? page;
++  int offset = 0, generation = 0;
++  bool loading = false;
++  @override
++  void initState() {
++    super.initState();
++    read();
++    poll = Timer.periodic(const Duration(seconds: 15), (_) {
++      if (!loading && api.current) read();
++    });
++    guard = Timer.periodic(const Duration(seconds: 1), (_) {
++      if (!api.current && page != null) setState(() => page = null);
++    });
++  }
++
++  Future<void> read({int? start}) async {
++    final generation = ++this.generation;
++    if (!api.current) return;
++    final target = start ?? offset;
++    setState(() {
++      loading = true;
++      if (target != offset) page = null;
++    });
++    try {
++      final fresh = await api.deviceHistory(widget.device, target);
++      if (!mounted || !api.current || generation != this.generation) return;
++      if (target > 0 && fresh.items.isEmpty && fresh.total <= target) {
++        await read(start: fresh.total == 0 ? 0 : (fresh.total - 1) ~/ 10 * 10);
++        return;
++      }
++      setState(() {
++        page = fresh;
++        offset = target;
++      });
++    } catch (_) {
++      if (mounted && generation == this.generation) setState(() => page = null);
++    } finally {
++      if (mounted && generation == this.generation) {
++        setState(() => loading = false);
++      }
++    }
++  }
++
++  @override
++  void dispose() {
++    generation++;
++    guard?.cancel();
++    poll?.cancel();
++    api.dispose();
++    super.dispose();
++  }
++
++  @override
++  Widget build(BuildContext context) {
++    final data = page;
++    if (!api.current || data == null) return widget.additional;
++    return NestedScrollView(
++        headerSliverBuilder: (_, __) => [
++              SliverToBoxAdapter(
++                  child: Padding(
++                      padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
++                      child: Column(
++                          crossAxisAlignment: CrossAxisAlignment.stretch,
++                          children: [
++                            Row(children: [
++                              Expanded(
++                                  child: Text('上门记录',
++                                      style: Theme.of(context)
++                                          .textTheme
++                                          .titleMedium)),
++                              IconButton(
++                                  tooltip: '刷新上门记录',
++                                  onPressed: loading ? null : read,
++                                  icon: const Icon(Icons.refresh, size: 16))
++                            ]),
++                            if (data.items.isEmpty) const Text('暂无上门记录。'),
++                            for (final r in data.items)
++                              OnsiteTile(r,
++                                  api: api,
++                                  current: () => mounted && api.current,
++                                  refresh: read),
++                            if (offset > 0 ||
++                                offset + data.items.length < data.total)
++                              Wrap(alignment: WrapAlignment.end, children: [
++                                TextButton(
++                                    onPressed: !loading && offset > 0
++                                        ? () => read(start: offset - 10)
++                                        : null,
++                                    child: const Text('上一页')),
++                                TextButton(
++                                    onPressed: !loading &&
++                                            offset + data.items.length <
++                                                data.total
++                                        ? () => read(start: offset + 10)
++                                        : null,
++                                    child: const Text('下一页')),
++                              ]),
++                          ]))),
++            ],
++        body: widget.additional);
++  }
++}
+diff --git a/flutter/lib/steaddesk/onsite/widgets.dart b/flutter/lib/steaddesk/onsite/widgets.dart
+new file mode 100644
+index 0000000..84461c0
+--- /dev/null
++++ b/flutter/lib/steaddesk/onsite/widgets.dart
+@@ -0,0 +1,322 @@
++import 'dart:async';
++import 'package:flutter/material.dart';
++import 'package:uuid/uuid.dart';
++import '../cases/case_dialog.dart' show caseCategoryLabels;
++import '../support_appearance.dart';
++import 'data.dart';
++
++String onsiteLocalTime(DateTime? stamp) {
++  if (stamp == null) return '未预约';
++  final d = stamp.toLocal();
++  String pad(int n) => n.toString().padLeft(2, '0');
++  return '${d.year}-${pad(d.month)}-${pad(d.day)} ${pad(d.hour)}:${pad(d.minute)}';
++}
++
++DateTime? _appointment(String input) {
++  if (input.trim().isEmpty) return null;
++  final s = input.trim();
++  final m = RegExp(r'^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2})$').firstMatch(s);
++  if (m == null) throw const FormatException();
++  int n(int i) => int.parse(m.group(i)!);
++  final d = DateTime(n(1), n(2), n(3), n(4), n(5));
++  if (d.year < 1970 || onsiteLocalTime(d) != s) throw const FormatException();
++  return d.toUtc();
++}
++
++class OnsiteTile extends StatelessWidget {
++  final OnsiteRecord row;
++  final OnsiteAccess? api;
++  final bool Function() current;
++  final Future<void> Function() refresh;
++  const OnsiteTile(this.row,
++      {super.key,
++      required this.api,
++      required this.current,
++      required this.refresh});
++
++  @override
++  Widget build(BuildContext context) {
++    final access = api;
++    return InkWell(
++        onTap: access == null || !current() || !access.current
++            ? null
++            : () async {
++                await showDialog<void>(
++                    context: context,
++                    builder: (ctx) => _Editor(row, access, current));
++                if (current() && access.current) await refresh();
++              },
++        child: Container(
++            padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 4),
++            decoration: BoxDecoration(
++                border: Border(top: BorderSide(color: context.supportLine))),
++            child: Row(children: [
++              Expanded(
++                  child: Column(
++                      crossAxisAlignment: CrossAxisAlignment.start,
++                      children: [
++                    Text('${row.storeName} · ${row.deviceName}',
++                        style: Theme.of(context)
++                            .textTheme
++                            .titleSmall
++                            ?.copyWith(color: context.supportInk)),
++                    Text(
++                        '${caseCategoryLabels[row.issueType] ?? row.issueType} · ${row.reason}',
++                        style: Theme.of(context).textTheme.bodyMedium),
++                    Text(
++                        '${onsiteStates[row.status]} · ${onsiteLocalTime(row.scheduled)} · ${row.owner}',
++                        style: Theme.of(context)
++                            .textTheme
++                            .bodySmall
++                            ?.copyWith(color: context.supportMuted)),
++                  ])),
++              if (access != null)
++                Icon(Icons.chevron_right,
++                    size: 16, color: context.supportMuted),
++            ])));
++  }
++}
++
++class _Editor extends StatefulWidget {
++  final OnsiteRecord row;
++  final OnsiteAccess api;
++  final bool Function() current;
++  const _Editor(this.row, this.api, this.current);
++  @override
++  State<_Editor> createState() => _EditorState();
++}
++
++class _EditorState extends State<_Editor> {
++  final owner = TextEditingController(), appointment = TextEditingController();
++  final changed = <String>{};
++  OnsiteRecord? base, conflict;
++  String status = 'open';
++  bool busy = false, verified = false;
++  String? message, key;
++  late final Timer guard;
++  Timer? poll;
++  bool get active => mounted && widget.current() && widget.api.current;
++  @override
++  void initState() {
++    super.initState();
++    read();
++    guard = Timer.periodic(const Duration(seconds: 1), (_) {
++      if (!active) dismiss();
++    });
++    poll = Timer.periodic(const Duration(seconds: 12), (_) {
++      if (active && !busy) read(background: true);
++    });
++  }
++
++  void dismiss() {
++    if (!mounted) return;
++    final route = ModalRoute.of(context);
++    if (route != null && route.isActive) route.navigator?.removeRoute(route);
++  }
++
++  void apply(OnsiteRecord record) {
++    if (!record.sameRecord(widget.row)) throw const OnsiteFailure(403);
++    final previous = base;
++    final hasDraft = changed.isNotEmpty && record.canEdit;
++    if (!hasDraft || !changed.contains('owner')) owner.text = record.owner;
++    if (!hasDraft || !changed.contains('status')) status = record.status;
++    if (!hasDraft || !changed.contains('scheduled_at')) {
++      appointment.text =
++          record.scheduled == null ? '' : onsiteLocalTime(record.scheduled);
++    }
++    if (!record.canEdit) changed.clear();
++    if (hasDraft && previous != null && previous.version != record.version) {
++      conflict = record;
++      key = null;
++      message = '这条上门记录刚被别人改过，已显示最新内容，请确认后再保存。';
++    }
++    base = record;
++    verified = true;
++  }
++
++  Future<void> read({bool background = false}) async {
++    if (!active || busy) return;
++    if (!background) setState(() => busy = true);
++    final expected = base?.version, readRevision = _revision;
++    try {
++      final record = await widget.api.getRecord(widget.row);
++      if (!active ||
++          readRevision != _revision ||
++          background && (busy || base?.version != expected)) return;
++      setState(() => apply(record));
++    } catch (e) {
++      if (!active || readRevision != _revision) return;
++      if (e is OnsiteFailure && {401, 403, 404}.contains(e.code)) {
++        dismiss();
++        return;
++      }
++      setState(() {
++        verified = false;
++        message = '暂时无法读取上门记录，请重新读取。';
++      });
++    } finally {
++      if (active && !background) setState(() => busy = false);
++    }
++  }
++
++  int _revision = 0;
++  void edit(String field, VoidCallback update) => setState(() {
++        changed.add(field);
++        update();
++        key = null;
++        if (conflict == null) message = null;
++      });
++
++  Future<void> save() async {
++    final old = base;
++    if (!active ||
++        busy ||
++        !verified ||
++        old == null ||
++        !old.canEdit ||
++        changed.isEmpty) return;
++    final assignee = owner.text.trim();
++    if (assignee.isEmpty ||
++        assignee.runes.length > 128 ||
++        RegExp(r'[\x00-\x1f\x7f]').hasMatch(assignee)) {
++      setState(() => message = '请输入有效的负责人账号。');
++      return;
++    }
++    DateTime? scheduled;
++    try {
++      scheduled = changed.contains('scheduled_at')
++          ? _appointment(appointment.text)
++          : old.scheduled;
++    } on FormatException {
++      setState(() => message = '请输入有效的本地预约时间，格式为 YYYY-MM-DD HH:mm。');
++      return;
++    }
++    if (status == 'scheduled' && scheduled == null) {
++      setState(() => message = '已预约状态需要预约时间。');
++      return;
++    }
++    final body = <String, dynamic>{
++      if (changed.contains('owner')) 'owner': assignee,
++      if (changed.contains('status')) 'status': status,
++      if (changed.contains('scheduled_at'))
++        'scheduled_at':
++            scheduled == null ? null : scheduled.millisecondsSinceEpoch ~/ 1000,
++    };
++    key ??= const Uuid().v4();
++    _revision++;
++    setState(() => busy = true);
++    try {
++      await widget.api.patch(old, key!, body);
++      if (active) Navigator.pop(context);
++    } on OnsiteFailure catch (e) {
++      if (!active) return;
++      if ({401, 404}.contains(e.code)) {
++        dismiss();
++        return;
++      }
++      if (e.code == 409 && e.latest != null) {
++        setState(() => apply(e.latest!));
++      } else if (e.code == 403) {
++        setState(() {
++          verified = false;
++          message = '无权修改此记录或指定此负责人，请重新读取。';
++        });
++      } else {
++        setState(() => message = e.code == 400 || e.code == 422
++            ? '请检查负责人账号、状态和预约时间。'
++            : '提交未确认，请重试。');
++      }
++    } catch (_) {
++      if (active) setState(() => message = '提交未确认，请重试。');
++    } finally {
++      if (active) setState(() => busy = false);
++    }
++  }
++
++  @override
++  void dispose() {
++    _revision++;
++    guard.cancel();
++    poll?.cancel();
++    owner.dispose();
++    appointment.dispose();
++    super.dispose();
++  }
++
++  @override
++  Widget build(BuildContext context) {
++    final row = base;
++    final editable = active && verified && !busy && row?.canEdit == true;
++    return AlertDialog(
++        scrollable: true,
++        title: const Text('上门跟进'),
++        content: SizedBox(
++            width: 420,
++            child: Column(
++                crossAxisAlignment: CrossAxisAlignment.stretch,
++                mainAxisSize: MainAxisSize.min,
++                children: [
++                  if (row != null) ...[
++                    Text('${row.storeName} · ${row.deviceName}',
++                        style: Theme.of(context).textTheme.titleMedium),
++                    SelectableText(
++                        '${caseCategoryLabels[row.issueType] ?? row.issueType} · ${row.reason}'),
++                    const SizedBox(height: 12),
++                    if (row.canEdit) ...[
++                      DropdownButtonFormField<String>(
++                          value: status,
++                          decoration: const InputDecoration(labelText: '状态'),
++                          items: [
++                            for (final s in onsiteStates.entries)
++                              DropdownMenuItem(
++                                  value: s.key, child: Text(s.value))
++                          ],
++                          onChanged: editable
++                              ? (v) => edit('status', () {
++                                    status = v!;
++                                    if (status == 'open') {
++                                      appointment.clear();
++                                      changed.add('scheduled_at');
++                                    }
++                                  })
++                              : null),
++                      TextField(
++                          controller: appointment,
++                          enabled: editable && status != 'open',
++                          decoration: const InputDecoration(
++                              labelText: '预约时间（客服本地时间）',
++                              hintText: 'YYYY-MM-DD HH:mm'),
++                          onChanged: (_) => edit('scheduled_at', () {})),
++                      TextField(
++                          controller: owner,
++                          enabled: editable,
++                          decoration: const InputDecoration(labelText: '负责人账号'),
++                          onChanged: (_) => edit('owner', () {})),
++                    ] else
++                      Text(
++                          '${onsiteStates[row.status]} · ${onsiteLocalTime(row.scheduled)} · 负责人 ${row.owner}'),
++                  ],
++                  if (busy) const LinearProgressIndicator(),
++                  if (message != null)
++                    Padding(
++                        padding: const EdgeInsets.only(top: 8),
++                        child: Text(message!,
++                            style: TextStyle(
++                                color: Theme.of(context).colorScheme.error))),
++                  if (conflict case final latest?)
++                    Text(
++                        '服务器版本 ${latest.version} · ${onsiteStates[latest.status]} · ${onsiteLocalTime(latest.scheduled)} · ${latest.owner}'),
++                ])),
++        actions: [
++          if (!verified && !busy)
++            TextButton(onPressed: () => read(), child: const Text('重新读取')),
++          TextButton(
++              onPressed: busy ? null : () => Navigator.pop(context),
++              child: Text(row?.canEdit == true ? '取消' : '关闭')),
++          if (row?.canEdit == true)
++            FilledButton(
++                onPressed: editable && changed.isNotEmpty ? save : null,
++                child: Text(conflict == null ? '保存' : '确认后保存')),
++        ]);
++  }
++}
+diff --git a/flutter/lib/steaddesk/onsite_reason.dart b/flutter/lib/steaddesk/onsite_reason.dart
+new file mode 100644
+index 0000000..eb4f819
+--- /dev/null
++++ b/flutter/lib/steaddesk/onsite_reason.dart
+@@ -0,0 +1,16 @@
++final _nonPrintable = RegExp(r'[\p{C}\p{Z}]', unicode: true);
++
++bool validOnsiteReason(String reason) =>
++    reason.trim().isNotEmpty &&
++    reason.runes.length <= 200 &&
++    !_nonPrintable.hasMatch(reason.replaceAll(' ', ''));
++
++const onsiteReasonHint = '请填写 1–200 字的单行上门说明';
++const onsiteConfirmedText = '已建上门跟进';
++
++class OnsiteCloseError implements Exception {
++  final String message;
++  const OnsiteCloseError(this.message);
++  @override
++  String toString() => message;
++}
+diff --git a/flutter/lib/steaddesk/support_help.dart b/flutter/lib/steaddesk/support_help.dart
+index e9e74f1..50564e2 100644
+--- a/flutter/lib/steaddesk/support_help.dart
++++ b/flutter/lib/steaddesk/support_help.dart
+@@ -1,3 +1,4 @@
++import 'onsite_reason.dart';
+ import 'dart:convert';
+ import 'dart:io';
+ 
+@@ -260,6 +261,19 @@ class SupportHelpApi {
+     }
+     final id = record['help_id'] as String;
+     final version = record['help_version'] as int;
++    final onsite = result == 'onsite';
++    final rawReason = record['onsite_reason'];
++    if (onsite && (rawReason is! String || !validOnsiteReason(rawReason))) {
++      throw const OnsiteCloseError(onsiteReasonHint);
++    }
++    final reason = rawReason is String ? rawReason.trim() : null;
++    void confirmOnsite(dynamic receipt, int closeVersion) {
++      if (receipt is! Map || receipt['ticket_id'] != id ||
++          receipt['close_version'] != closeVersion ||
++          receipt['issue_type'] != issue || receipt['reason'] != reason) {
++        throw const OnsiteCloseError('未收到与本次结案相符的上门跟进记录，请核对工单。');
++      }
++    }
+     final before = await detail(id);
+     // A lost response (or a failed local file write) can be retried after restart,
+     // even after the merchant reopened the ticket and the next round began.
+@@ -272,12 +286,15 @@ class SupportHelpApi {
+     final later = history.where((e) => e['version'] > version);
+     for (final e in later) {
+       if (e['kind'] == 'help.closed') {
+-        final same = (before['case_records'] as List).cast<HelpRow>().any((r) =>
++        final matches = (before['case_records'] as List).cast<HelpRow>().where((r) =>
+             r['version'] == e['version'] &&
+             r['closed_by'] == account &&
+             r['category'] == issue &&
+             r['result'] == result);
+-        if (same) return;
++        if (matches.isNotEmpty) {
++          if (onsite) confirmOnsite(matches.first['onsite_followup'], e['version'] as int);
++          return;
++        }
+         throw const HelpStaffError(409);
+       }
+       if (e['state'] != 'claimed' ||
+@@ -289,11 +306,20 @@ class SupportHelpApi {
+     if (before['state'] != 'claimed' || before['handler'] != account)
+       throw const HelpStaffError(409);
+     final expected = before['version'] as int;
+-    await _request('${_ticket(id)}/close',
+-        version: expected,
+-        key:
+-            const Uuid().v5(record['id'] as String, '$expected:$issue:$result'),
+-        body: {'close_issue_type': issue, 'close_result': result});
++    final key = onsite ? jsonEncode([expected, issue, result, reason]) : '$expected:$issue:$result';
++    try {
++      final closed = await _request('${_ticket(id)}/close',
++          version: expected,
++          key: const Uuid().v5(record['id'] as String, key),
++          body: {'close_issue_type': issue, 'close_result': result,
++            if (onsite) 'onsite_reason': reason});
++      if (onsite) confirmOnsite(closed['onsite_followup'], expected + 1);
++    } on HelpStaffError catch (e) {
++      if (onsite && e.status == 409) {
++        throw const OnsiteCloseError('未确认上门跟进。请核对工单状态和设备的门店归属。');
++      }
++      rethrow;
++    }
+   }
+ }
+ 
+diff --git a/flutter/lib/steaddesk/support_help_host.dart b/flutter/lib/steaddesk/support_help_host.dart
+index 113be94..4a7ef80 100644
+--- a/flutter/lib/steaddesk/support_help_host.dart
++++ b/flutter/lib/steaddesk/support_help_host.dart
+@@ -2,6 +2,8 @@ import 'dart:async';
+ import 'dart:convert';
+ import 'package:flutter/material.dart';
+ import 'package:uuid/uuid.dart';
++import 'onsite/data.dart';
++import 'onsite/device.dart';
+ 
+ import '../common.dart' show connect, gFFI;
+ import '../models/platform_model.dart' show bind;
+@@ -294,3 +296,14 @@ class _SupportHelpHeaderState extends State<SupportHelpHeader> {
+               '求助 ${tickets?.where((r) => r['state'] != 'claimed').length ?? '—'}'
+               '${supportCallbacksEnabled && (tickets?.any((r) => isDueCallback(r, login?.account ?? '')) ?? false) ? ' · 回电到时' : ''}'));
+ }
++
++
++const onsiteHistoryEnabled = true;
++Widget supportOnsiteHistory(String device, Widget additional) {
++  final login=_login(), origin=_configuredOrigin();
++  if(login==null || origin==null || !OnsiteHttp.validOrigin(origin)) return additional;
++  final admin=gFFI.userModel.isAdmin.value;
++  bool current()=>_login()==login && _configuredOrigin()==origin && admin==gFFI.userModel.isAdmin.value;
++  return DeviceOnsiteHistory(key:ValueKey((device,login,origin,admin)), device:device,
++    open:()=>OnsiteHttp.owned(origin,login.token,current), additional:additional);
++}
+diff --git a/flutter/lib/steaddesk/support_help_off.dart b/flutter/lib/steaddesk/support_help_off.dart
+index bb3759a..bd0e7d6 100644
+--- a/flutter/lib/steaddesk/support_help_off.dart
++++ b/flutter/lib/steaddesk/support_help_off.dart
+@@ -10,3 +10,7 @@ Future<void> writeHelpCase(
+     Map<String, dynamic> row, String issue, String result) async {
+   throw StateError('求助服务未启用');
+ }
++
++
++const onsiteHistoryEnabled = false;
++Widget supportOnsiteHistory(String device, Widget additional) => additional;
+diff --git a/flutter/lib/steaddesk/support_help_queue.dart b/flutter/lib/steaddesk/support_help_queue.dart
+index 8c596f5..0dc4eb9 100644
+--- a/flutter/lib/steaddesk/support_help_queue.dart
++++ b/flutter/lib/steaddesk/support_help_queue.dart
+@@ -1,3 +1,4 @@
++import 'onsite_reason.dart';
+ import 'package:flutter/material.dart';
+ import 'package:uuid/uuid.dart';
+ import 'cases/case_dialog.dart' show caseCategoryLabels, caseResultLabels;
+@@ -65,53 +66,71 @@ class _SupportHelpQueueState extends State<SupportHelpQueue> {
+   }
+ 
+   Future<void> _manualClose(HelpRow row) async {
++    final api = widget.api;
++    final record = {'id': const Uuid().v4(), 'agent': api.account,
++      ...helpCaseFields(api, row)};
+     String category = helpCategories[row['category']] ?? 'other';
+-    String? result;
+-    final confirmed = await showDialog<bool>(
++    String? result, error;
++    String reason = '';
++    bool saving = false;
++    final onsite = await showDialog<bool>(
+         context: context,
+         useRootNavigator: false,
+-        builder: (ctx) => StatefulBuilder(
+-            builder: (_, change) => AlertDialog(
+-                    title: const Text('人工跟进结案'),
+-                    content: Column(mainAxisSize: MainAxisSize.min, children: [
+-                      Text('求助 #${row['id']}'),
+-                      DropdownButtonFormField<String>(
+-                          value: category,
+-                          decoration: const InputDecoration(labelText: '问题类型'),
+-                          items: [
+-                            for (final e in caseCategoryLabels.entries)
+-                              DropdownMenuItem(
+-                                  value: e.key, child: Text(e.value))
+-                          ],
+-                          onChanged: (v) => change(() => category = v!)),
+-                      DropdownButtonFormField<String>(
+-                          value: result,
+-                          decoration: const InputDecoration(labelText: '处理结果'),
+-                          items: [
+-                            for (final e in caseResultLabels.entries)
+-                              DropdownMenuItem(
+-                                  value: e.key, child: Text(e.value))
+-                          ],
+-                          onChanged: (v) => change(() => result = v)),
+-                    ]),
+-                    actions: [
+-                      TextButton(
+-                          onPressed: () => Navigator.pop(ctx, false),
+-                          child: const Text('返回')),
+-                      TextButton(
+-                          onPressed: result == null
+-                              ? null
+-                              : () => Navigator.pop(ctx, true),
+-                          child: const Text('保存结案')),
+-                    ])));
+-    if (!mounted ||
+-        confirmed != true ||
+-        await widget.allowAction?.call(row, 'help') == false) return;
+-    await widget.api.closeCase({
+-      'id': const Uuid().v4(),
+-      'agent': widget.api.account,
+-      ...helpCaseFields(widget.api, row)
+-    }, category, result!);
++        barrierDismissible: false,
++        builder: (ctx) => StatefulBuilder(builder: (_, change) {
++          Future<void> submit() async {
++            if (saving || result == null) return;
++            change(() { saving = true; error = null; });
++            try {
++              if (!mounted || !identical(widget.api, api) || !api.current() ||
++                  await widget.allowAction?.call(row, 'help') == false) {
++                throw const HelpStaffError(403);
++              }
++              await api.closeCase({...record,
++                if (result == 'onsite') 'onsite_reason': reason.trim()}, category, result!);
++              if (ctx.mounted) Navigator.pop(ctx, result == 'onsite');
++            } catch (e) {
++              if (ctx.mounted) change(() {
++                saving = false;
++                error = e is OnsiteCloseError || e is HelpStaffError
++                    ? e.toString() : const HelpStaffError(0).toString();
++              });
++            }
++          }
++
++          return PopScope(canPop: !saving, child: AlertDialog(
++              title: const Text('人工跟进结案'),
++              content: SingleChildScrollView(child: Column(mainAxisSize: MainAxisSize.min, children: [
++                Text('求助 #${row['id']}'),
++                DropdownButtonFormField<String>(
++                    value: category,
++                    decoration: const InputDecoration(labelText: '问题类型'),
++                    items: [for (final e in caseCategoryLabels.entries)
++                      DropdownMenuItem(value: e.key, child: Text(e.value))],
++                    onChanged: saving ? null : (v) => change(() => category = v!)),
++                DropdownButtonFormField<String>(
++                    value: result,
++                    decoration: const InputDecoration(labelText: '处理结果'),
++                    items: [for (final e in caseResultLabels.entries)
++                      DropdownMenuItem(value: e.key, child: Text(e.value))],
++                    onChanged: saving ? null : (v) => change(() => result = v)),
++                if (result == 'onsite')
++                  TextFormField(initialValue: reason, maxLength: 200, enabled: !saving,
++                      decoration: const InputDecoration(labelText: '上门说明', hintText: onsiteReasonHint),
++                      onChanged: (v) => change(() => reason = v)),
++                if (error != null) Semantics(liveRegion: true, child: Text(error!)),
++              ])),
++              actions: [
++                TextButton(onPressed: saving ? null : () => Navigator.pop(ctx, false),
++                    child: const Text('返回')),
++                TextButton(onPressed: saving || result == null ||
++                    result == 'onsite' && !validOnsiteReason(reason) ? null : submit,
++                    child: const Text('保存结案')),
++              ]));
++        }));
++    if (mounted && onsite == true && identical(widget.api, api) && api.current()) {
++      ScaffoldMessenger.maybeOf(context)?.showSnackBar(const SnackBar(content: Text(onsiteConfirmedText)));
++    }
+   }
+ 
+   Future<void> _act(HelpRow row) async {
+diff --git a/flutter/lib/steaddesk/today/data.dart b/flutter/lib/steaddesk/today/data.dart
+index 90f9958..cbf6bf6 100644
+--- a/flutter/lib/steaddesk/today/data.dart
++++ b/flutter/lib/steaddesk/today/data.dart
+@@ -1,3 +1,4 @@
++import '../onsite/data.dart';
+ import 'dart:async';
+ import 'dart:convert';
+ import 'dart:io';
+@@ -18,6 +19,7 @@ const sections = {
+   'manual': ['stopped', 'paused'],
+   'updates': ['attempts', 'batches', 'safety'],
+   'self_heal': ['self_heal'],
++  'onsite': ['onsite'],
+ };
+ 
+ abstract interface class TodayApi {
+@@ -49,6 +51,8 @@ class TodayHttp implements TodayApi {
+     return {...result, 'sections': groups};
+   }
+ 
++  late final OnsiteAccess onsite = OnsiteHttp(base,token,current,http);
++
+   bool visibleSection(String group, TodayJson result) {
+     final compiled = switch (group) {
+       'offline' || 'alerts' || 'manual' || 'self_heal' => opsHealthEnabled,
+@@ -145,6 +149,11 @@ class TodayStore extends ChangeNotifier {
+   Timer? _poll, _retry, _coalesce;
+   StreamSubscription<String>? _feed;
+   bool get active => !_retired && current();
++  OnsiteAccess? get onsite {
++    final source = api;
++    return source is TodayHttp ? source.onsite : null;
++  }
++
+   bool permits(String field) =>
+       visible.values.any((section) => section.counts.containsKey(field));
+   bool _unauthorized(Object e) =>
+@@ -207,6 +216,7 @@ class TodayStore extends ChangeNotifier {
+         'help.',
+         'fleet.',
+         'device.',
++        'onsite.',
+         'self_heal.'
+       ].any(kind.startsWith)) {
+         return;
+diff --git a/flutter/lib/steaddesk/today/panel.dart b/flutter/lib/steaddesk/today/panel.dart
+index cc07514..0e2a3d9 100644
+--- a/flutter/lib/steaddesk/today/panel.dart
++++ b/flutter/lib/steaddesk/today/panel.dart
+@@ -1,2 +1,4 @@
+ import 'dart:math' as math;
++import '../onsite/data.dart';
++import '../onsite/widgets.dart';
+ import 'package:flutter/material.dart';
+@@ -12,2 +14,3 @@ const _titles = {
+   'self_heal': '今日自愈动作',
++  'onsite': '待上门',
+ };
+@@ -21,2 +24,3 @@ const _icons = {
+   'self_heal': Icons.healing_outlined,
++  'onsite': Icons.event_note_outlined,
+ };
+@@ -36,2 +40,3 @@ const _filters = {
+   'self_heal': '已观测动作',
++  'onsite': '查看待上门',
+ };
+@@ -154,3 +159,3 @@ class TodayPanel extends StatelessWidget {
+                           SizedBox(
+-                              width: width,
++                              width: section.key == 'onsite' ? box.maxWidth - 24 : width,
+                               child: _Section(
+@@ -261,2 +266,5 @@ class _Section extends StatelessWidget {
+               ]),
++              if (name == 'onsite' && raw['preview'] is List)
++                for (final row in (raw['preview'] as List).whereType<TodayJson>().take(3))
++                  _onsiteTile(store,row),
+               for (final line in info)
+@@ -323,3 +331,5 @@ class _Details extends StatelessWidget {
+                   itemBuilder: (_, i) {
+-                    final row = store.rows[i], id = row['id'] as String;
++                    final row = store.rows[i];
++                    if (filter == 'onsite') return _onsiteTile(store,row);
++                    final id = row['id'] as String;
+                     final state = row['state'];
+@@ -370 +380,13 @@ class _Details extends StatelessWidget {
+ }
++
++
++Widget _onsiteTile(TodayStore store,TodayJson row) {
++  try {
++    final item=OnsiteRecord.fromJson(row);
++    return OnsiteTile(item,api:store.onsite,
++      current:()=>store.active && !store.denied && store.permits('onsite'),
++      refresh:store.refresh);
++  } on FormatException {
++    return const SizedBox.shrink();
++  }
++}
+diff --git a/flutter/test/steaddesk/case_dialog_test.dart b/flutter/test/steaddesk/case_dialog_test.dart
+index 93b26b6..82a8a10 100644
+--- a/flutter/test/steaddesk/case_dialog_test.dart
++++ b/flutter/test/steaddesk/case_dialog_test.dart
+@@ -14,8 +14,8 @@ class _Store extends Fake implements CaseStore {
+   Future<bool> isAppendOnly(String account, String id) async => expired;
+ 
+   @override
+-  Future<void> save(String account, String id,
+-      {String? category,
++  Future<bool> save(String account, String id,
++      {String? onsiteReason, String? category,
+       String? result,
+       Map<String, dynamic>? followUp,
+       String? transferredTo,
+@@ -30,11 +30,12 @@ class _Store extends Fake implements CaseStore {
+       'transferred_to': transferredTo,
+       'note': note
+     };
++    return false;
+   }
+ 
+   @override
+   Future<void> defer(String account, String id,
+-      {required String note, bool? expectedAppendOnly}) async {
++      {required String note, bool? expectedAppendOnly, Map<String,dynamic>? onsiteDraft}) async {
+     deferred = note;
+   }
+ }
+diff --git a/flutter/test/steaddesk/case_inbox_test.dart b/flutter/test/steaddesk/case_inbox_test.dart
+index 10f5d29..e808cff 100644
+--- a/flutter/test/steaddesk/case_inbox_test.dart
++++ b/flutter/test/steaddesk/case_inbox_test.dart
+@@ -19,7 +19,7 @@ class _Store implements CaseStore {
+   Future<bool> isAppendOnly(String account, String id) async => false;
+   @override
+   Future<void> defer(String account, String id,
+-      {required String note, bool? expectedAppendOnly}) async {}
++      {required String note, bool? expectedAppendOnly, Map<String,dynamic>? onsiteDraft}) async {}
+   @override
+   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+ }
+diff --git a/flutter/test/steaddesk/onsite_close_test.dart b/flutter/test/steaddesk/onsite_close_test.dart
+new file mode 100644
+index 0000000..fcac1a0
+--- /dev/null
++++ b/flutter/test/steaddesk/onsite_close_test.dart
+@@ -0,0 +1,313 @@
++import 'dart:convert';
++import 'dart:io';
++
++import 'package:flutter/material.dart';
++import 'package:flutter_test/flutter_test.dart';
++import 'package:flutter_hbb/steaddesk/cases/case_dialog.dart';
++import 'package:flutter_hbb/steaddesk/cases/case_store.dart';
++import 'package:flutter_hbb/steaddesk/onsite_reason.dart';
++import 'package:flutter_hbb/steaddesk/support_help.dart';
++import 'package:flutter_hbb/steaddesk/support_help_queue.dart';
++
++const ticket = 'h_0123456789abcdef0123456789abcdef';
++const id = '00000000-0000-4000-8000-000000000007';
++const account = 'fixture';
++const reason = '更换收据打印机电源';
++final claim = {
++  'kind': 'help.claimed',
++  'version': 2,
++  'state': 'claimed',
++  'handler': account
++};
++final receipt = {
++  'ticket_id': ticket,
++  'close_version': 3,
++  'issue_type': 'printer',
++  'reason': reason
++};
++
++HelpRow draft(String origin, {bool linked = true}) => {
++      'id': id,
++      'agent': account,
++      'device_id': '123456789',
++      'display_name': 'Fixture POS',
++      'started_at': '2026-11-02T02:04:00.000Z',
++      'ended_at': '2026-11-02T02:07:00.000Z',
++      'note': '待核对电源',
++      'status': 'draft',
++      if (linked) ...{
++        'help_id': ticket,
++        'help_version': 2,
++        'help_origin': origin,
++        'category': 'printer'
++      }
++    };
++
++// dart:io loopback transport; the test server owns its ephemeral port.
++class _Loopback extends HttpOverrides {}
++
++class _Manual extends SupportHelpApi {
++  final row = {
++    'id': 'u_0123456789abcdef0123456789abcdef',
++    'version': 2,
++    'state': 'claimed',
++    'lane': 'unverified',
++    'handler': account,
++    'created_at': 0,
++    'category': 'printer',
++    'history': [claim]
++  };
++  final attempts = <String>[];
++  _Manual()
++      : super(Uri.parse('https://fixture.invalid'), account, 'fixture-token',
++            () => true);
++  @override
++  Future<HelpRow> detail(String id) async => Map.of(row);
++  @override
++  Future<void> closeCase(HelpRow r, String issue, String result) async {
++    attempts.add(r['onsite_reason'] as String);
++    throw const OnsiteCloseError('工单门店尚未核验');
++  }
++}
++
++class _DialogStore extends Fake implements CaseStore {
++  bool ack = false;
++  String? submitted;
++  @override
++  Future<bool> isAppendOnly(String account, String id) async => false;
++  @override
++  Future<bool> save(String account, String id,
++      {String? onsiteReason,
++      String? category,
++      String? result,
++      Map<String, dynamic>? followUp,
++      String? transferredTo,
++      required String note,
++      bool? expectedAppendOnly}) async {
++    submitted = onsiteReason;
++    if (!ack) throw const OnsiteCloseError('服务端尚未确认');
++    return true;
++  }
++}
++
++void main() {
++  test('onsite reason is single-line and counts Unicode code points', () {
++    for (final value in [
++      '',
++      ' ',
++      'line\nline',
++      'line\u2028break',
++      'a' * 201,
++      'a\u200db'
++    ]) {
++      expect(validOnsiteReason(value), isFalse);
++    }
++    expect(validOnsiteReason('🧰' * 200), isTrue);
++    expect(validOnsiteReason(reason), isTrue);
++  });
++
++  test(
++      'real store survives lost confirmation; retry verifies the same close round and never repeats POST',
++      () async {
++    final path = await Directory.systemTemp.createTemp('onsite-close-');
++    addTearDown(() => path.delete(recursive: true));
++    await HttpOverrides.runWithHttpOverrides(() async {
++      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
++      final origin = Uri.parse('http://127.0.0.1:${server.port}');
++      final api = SupportHelpApi(origin, account, 'fixture-token', () => true);
++      addTearDown(() => server.close(force: true));
++      addTearDown(api.dispose);
++      bool closed = false;
++      int posts = 0;
++      bool includeReceipt = false;
++      final bodies = <Map>[];
++      server.listen((req) async {
++        expect(req.headers.value('Authorization'), 'Bearer fixture-token');
++        final res = req.response..headers.contentType = ContentType.json;
++        if (req.method == 'POST') {
++          expect(req.uri.path, '/ops/v1/help/requests/$ticket/close');
++          expect(req.headers.value('If-Match'), '"2"');
++          expect(req.headers.value('Idempotency-Key'), isNotEmpty);
++          bodies.add(jsonDecode(await utf8.decoder.bind(req).join()) as Map);
++          posts++;
++          closed = true;
++          res.write(jsonEncode({'state': 'closed', 'version': 3}));
++        } else {
++          expect(req.method, 'GET');
++          expect(req.uri.path, '/ops/v1/help/requests/$ticket');
++          res.write(jsonEncode(closed
++              ? {
++                  'state': 'claimed',
++                  'version': 5,
++                  'handler': 'another-handler',
++                  'onsite_followup': {
++                    ...receipt,
++                    'reason': 'wrong later round',
++                    'close_version': 9
++                  },
++                  'history': [
++                    claim,
++                    {'kind': 'help.closed', 'state': 'closed', 'version': 3},
++                    {'kind': 'help.reopened', 'state': 'queued', 'version': 4},
++                    {
++                      'kind': 'help.claimed',
++                      'state': 'claimed',
++                      'version': 5,
++                      'handler': 'another-handler'
++                    }
++                  ],
++                  'case_records': [
++                    {
++                      'version': 3,
++                      'closed_by': account,
++                      'category': 'printer',
++                      'result': 'onsite',
++                      if (includeReceipt) 'onsite_followup': receipt
++                    }
++                  ]
++                }
++              : {
++                  'state': 'claimed',
++                  'version': 2,
++                  'handler': account,
++                  'history': [claim],
++                  'case_records': []
++                }));
++        }
++        await res.close();
++      });
++      LocalCaseStore open() => LocalCaseStore(
++          file: () async => File('${path.path}/$caseStoreFileName'),
++          writeHelp: api.closeCase);
++      final db = open();
++      await db.addDraft(account, draft(api.base.toString()));
++      Future<bool> submit(LocalCaseStore store, String why) =>
++          store.save(account, id,
++              category: 'printer',
++              result: 'onsite',
++              note: '待核对电源',
++              onsiteReason: why);
++      await expectLater(submit(db, ''), throwsFormatException);
++      await expectLater(submit(db, reason), throwsA(isA<OnsiteCloseError>()));
++      expect(posts, 1);
++      expect(bodies.single, {
++        'close_issue_type': 'printer',
++        'close_result': 'onsite',
++        'onsite_reason': reason
++      });
++      final restarted = open();
++      final savedDraft = (await restarted.pending(account)).single;
++      expect(savedDraft['status'], 'draft');
++      expect(savedDraft['pending_onsite']['reason'], reason);
++      // A top-level receipt from a different round cannot confirm an earlier close.
++      await expectLater(
++          submit(restarted, reason), throwsA(isA<OnsiteCloseError>()));
++      includeReceipt = true;
++      await expectLater(
++          submit(restarted, '其他原因'), throwsA(isA<OnsiteCloseError>()));
++      expect(await submit(restarted, reason), isTrue);
++      expect(posts, 1);
++      expect(await open().pending(account), isEmpty);
++      final row = (await open().history(
++              account, const CaseHistoryScope('123456789', null, null)))
++          .single;
++      expect(row['onsite_reason'], reason);
++      expect(row.containsKey('pending_onsite'), isFalse);
++    }, _Loopback());
++  });
++
++  test(
++      'pure local case still requires explanation and cannot claim server followup',
++      () async {
++    final dir = await Directory.systemTemp.createTemp('onsite-local-');
++    addTearDown(() => dir.delete(recursive: true));
++    final store = LocalCaseStore(
++        file: () async => File('${dir.path}/cases.json'),
++        writeHelp: (_, __, ___) async =>
++            fail('pure local case must not contact server'));
++    await store.addDraft(account, draft('', linked: false));
++    Future<bool> save(String why) => store.save(account, id,
++        category: 'printer',
++        result: 'onsite',
++        onsiteReason: why,
++        followUp: {'owner': account, 'due': '2026-12-15'},
++        note: '');
++    await expectLater(save(''), throwsFormatException);
++    expect(await save(reason), isFalse);
++    final row = (await store.history(
++            account, const CaseHistoryScope('123456789', null, null)))
++        .single;
++    expect(row['onsite_reason'], reason);
++  });
++
++  testWidgets(
++      'CaseCloseDialog requires reason, preserves remote failure and only then confirms',
++      (t) async {
++    final store = _DialogStore();
++    await t.binding.setSurfaceSize(const Size(1200, 900));
++    addTearDown(() => t.binding.setSurfaceSize(null));
++    await t.pumpWidget(MaterialApp(
++        home: Builder(
++            builder: (context) => Scaffold(
++                body: TextButton(
++                    onPressed: () => showCaseCloseDialog(context,
++                        store: store,
++                        account: account,
++                        record: draft('https://fixture.invalid')),
++                    child: const Text('open'))))));
++    await t.tap(find.text('open'));
++    await t.pumpAndSettle();
++    await t.tap(find.text('需上门'));
++    await t.pumpAndSettle();
++    await t.tap(find.text('保存（Enter）'));
++    await t.pumpAndSettle();
++    expect(store.submitted, isNull);
++    final field = find.widgetWithText(TextField, '上门说明');
++    await t.enterText(field, reason);
++    await t.tap(find.text('保存（Enter）'));
++    await t.pumpAndSettle();
++    expect(store.submitted, reason);
++    expect(find.text('服务端尚未确认'), findsOneWidget);
++    expect(find.text(onsiteConfirmedText), findsNothing);
++    expect(find.text(reason), findsOneWidget);
++    store.ack = true;
++    await t.tap(find.text('保存（Enter）'));
++    await t.pumpAndSettle();
++    expect(find.text(onsiteConfirmedText), findsOneWidget);
++  });
++
++  testWidgets(
++      'manual close retains input on refusal and sends no automatic retries',
++      (t) async {
++    final api = _Manual();
++    addTearDown(api.dispose);
++    await t.pumpWidget(MaterialApp(
++        home: Scaffold(
++            body: SupportHelpQueue(
++                api: api,
++                rows: [api.row],
++                error: null,
++                onRefresh: () async {},
++                onConnect: (_) async => fail('no connection')))));
++    await t.pumpAndSettle();
++    await t.ensureVisible(find.text('人工结案'));
++    await t.tap(find.text('人工结案'));
++    await t.pumpAndSettle();
++    await t.tap(find.byType(DropdownButtonFormField<String>).last);
++    await t.pumpAndSettle();
++    await t.tap(find.text('需上门').last);
++    await t.pumpAndSettle();
++    final save = find.widgetWithText(TextButton, '保存结案');
++    expect(t.widget<TextButton>(save).onPressed, isNull);
++    await t.enterText(find.byType(TextFormField), reason);
++    await t.pump();
++    await t.tap(save);
++    await t.pumpAndSettle();
++    expect(find.text(reason), findsOneWidget);
++    expect(find.text('工单门店尚未核验'), findsOneWidget);
++    expect(find.text(onsiteConfirmedText), findsNothing);
++    expect(api.attempts, [reason]);
++    await t.pump(const Duration(seconds: 3));
++    expect(api.attempts, [reason]);
++  });
++}
+diff --git a/flutter/test/steaddesk/onsite_followup_test.dart b/flutter/test/steaddesk/onsite_followup_test.dart
+new file mode 100644
+index 0000000..27ba17e
+--- /dev/null
++++ b/flutter/test/steaddesk/onsite_followup_test.dart
+@@ -0,0 +1,177 @@
++import 'package:flutter/material.dart';
++import 'package:flutter_test/flutter_test.dart';
++import 'package:flutter_hbb/steaddesk/onsite/data.dart';
++import 'package:flutter_hbb/steaddesk/onsite/device.dart';
++import 'package:flutter_hbb/steaddesk/today/data.dart';
++import 'package:flutter_hbb/steaddesk/today/panel.dart';
++import 'today_test.dart' show Fixture;
++
++const sampleDevice = '123456789';
++OnsiteJson sampleVisit(int n, {bool editable = true, String status = 'open'}) =>
++    {
++      'ticket_id': 'h_${n.toRadixString(16).padLeft(32, '0')}',
++      'close_version': 3,
++      'version': 1,
++      'store_id': 'g_south',
++      'store_name': '枫林门店',
++      'device_id': sampleDevice,
++      'device_name': '收银主机',
++      'issue_type': 'hardware',
++      'reason': '后厨打印机进纸不稳，需要检查传纸轮。',
++      'status': status,
++      'owner': 'alex',
++      'scheduled_at': status == 'scheduled'
++          ? DateTime(2026, 11, 20, 16).millisecondsSinceEpoch ~/ 1000
++          : null,
++      'can_edit': editable,
++    };
++
++class VisitFixture extends Fixture implements OnsiteAccess {
++  OnsiteJson visit = sampleVisit(1);
++  final writes = <({OnsiteJson body, String key, int version})>[];
++  final reads = <String>[];
++  bool granted = true;
++  Object? fail;
++  @override
++  bool get current => granted;
++  @override
++  void dispose() {}
++  @override
++  Future<OnsitePage> deviceHistory(String device, int offset) async {
++    reads.add(device);
++    if (!granted || fail != null) throw const OnsiteFailure(403);
++    return (items: [OnsiteRecord.fromJson(visit)], total: 1);
++  }
++
++  @override
++  Future<OnsiteRecord> getRecord(OnsiteRecord row) async {
++    if (fail != null) throw fail!;
++    return OnsiteRecord.fromJson(visit);
++  }
++
++  @override
++  Future<OnsiteRecord> patch(
++      OnsiteRecord row, String key, OnsiteJson values) async {
++    writes.add((body: values, key: key, version: row.version));
++    if (fail != null) throw fail!;
++    if (visit['version'] != row.version) {
++      throw OnsiteFailure(409, OnsiteRecord.fromJson(visit));
++    }
++    visit = {...visit, ...values, 'version': row.version + 1};
++    return OnsiteRecord.fromJson(visit);
++  }
++
++  bool get due => {'open', 'scheduled'}.contains(visit['status']);
++  @override
++  Future<TodayJson> snapshot() async => {
++        'as_of': 1795000000,
++        'sections': {
++          'onsite': {
++            'as_of': 1795000000,
++            'freshness': 'live',
++            'counts': {'onsite': due ? 1 : 0},
++            'preview': [if (due) visit]
++          }
++        }
++      };
++  @override
++  Future<TodayJson> list(String filter, int offset) async => {
++        'filter': filter,
++        'rows': [if (due) visit],
++        'as_of': 1795000000,
++        'freshness': 'live',
++        'next_offset': null,
++      };
++}
++
++class VisitStore extends TodayStore {
++  final VisitFixture fixture;
++  VisitStore(this.fixture) : super(fixture, () => fixture.granted);
++  @override
++  OnsiteAccess get onsite => fixture;
++}
++
++void main() {
++  testWidgets(
++      'Today preview and drill edit a scoped visit; conflict preserves typed status, appointment and owner',
++      (t) async {
++    final fixture = VisitFixture(), store = VisitStore(fixture)..start();
++    await t.binding.setSurfaceSize(const Size(1000, 720));
++    addTearDown(() => t.binding.setSurfaceSize(null));
++    await t.pumpWidget(
++        MaterialApp(home: Scaffold(body: TodayPanel(store: store))));
++    await t.pumpAndSettle();
++    expect(find.text('待上门'), findsOneWidget);
++    expect(find.text('枫林门店 · 收银主机'), findsOneWidget);
++    expect(find.textContaining('传纸轮'), findsOneWidget);
++    await t.tap(find.byKey(const ValueKey('today-filter-onsite')));
++    await t.pumpAndSettle();
++    await t.tap(find.text('枫林门店 · 收银主机'));
++    await t.pumpAndSettle();
++    await t.tap(find.byType(DropdownButtonFormField<String>));
++    await t.pumpAndSettle();
++    await t.tap(find.text('已预约').last);
++    await t.pumpAndSettle();
++    await t.tap(find.text('保存'));
++    await t.pumpAndSettle();
++    expect(find.text('已预约状态需要预约时间。'), findsOneWidget);
++    final fields = find.byType(TextField);
++    await t.enterText(fields.first, '2026-02-30 12:30');
++    await t.tap(find.text('保存'));
++    await t.pumpAndSettle();
++    expect(find.textContaining('请输入有效的本地预约时间'), findsOneWidget);
++    await t.enterText(fields.first, '2026-11-20 13:30');
++    await t.enterText(fields.last, 'maya');
++    fixture.visit = {...fixture.visit, 'owner': 'lee', 'version': 2};
++    await t.tap(find.text('保存'));
++    await t.pumpAndSettle();
++    expect(find.textContaining('服务器版本 2'), findsOneWidget);
++    expect(find.text('maya'), findsOneWidget);
++    expect(find.text('2026-11-20 13:30'), findsOneWidget);
++    expect(fixture.writes, hasLength(1));
++    await t.tap(find.text('确认后保存'));
++    await t.pumpAndSettle();
++    expect(find.byType(AlertDialog), findsNothing);
++    expect(fixture.writes.map((r) => r.version), [1, 2]);
++    expect(fixture.writes.last.body, {
++      'owner': 'maya',
++      'status': 'scheduled',
++      'scheduled_at':
++          DateTime(2026, 11, 20, 13, 30).millisecondsSinceEpoch ~/ 1000
++    });
++    expect(fixture.writes.last.key, isNot(fixture.writes.first.key));
++    expect(find.textContaining('13:30 · maya'), findsOneWidget);
++    await t.pumpWidget(const SizedBox());
++    store.dispose();
++  });
++
++  testWidgets(
++      'device history uses one device, displays read-only records and clears editor when access disappears',
++      (t) async {
++    final api = VisitFixture()
++      ..visit = sampleVisit(2, editable: false, status: 'scheduled');
++    await t.pumpWidget(MaterialApp(
++        home: Scaffold(
++            body: DeviceOnsiteHistory(
++                device: sampleDevice,
++                open: () => api,
++                additional: ListView(children: const [Text('历史报告')])))));
++    await t.pumpAndSettle();
++    expect(api.reads, [sampleDevice]);
++    expect(find.text('上门记录'), findsOneWidget);
++    expect(find.text('历史报告'), findsOneWidget);
++    await t.tap(find.text('枫林门店 · 收银主机'));
++    await t.pumpAndSettle();
++    expect(find.text('上门跟进'), findsOneWidget);
++    expect(find.text('保存'), findsNothing);
++    expect(find.byType(TextField), findsNothing);
++    api.granted = false;
++    await t.pump(const Duration(seconds: 2));
++    await t.pumpAndSettle();
++    expect(find.text('上门跟进'), findsNothing);
++    expect(find.text('上门记录'), findsNothing);
++    expect(find.textContaining('传纸轮'), findsNothing);
++    expect(api.writes, isEmpty);
++    await t.pumpWidget(const SizedBox());
++  });
++}
+diff --git a/flutter/test/steaddesk/support_help_test.dart b/flutter/test/steaddesk/support_help_test.dart
+index 17c0522..e1a7b8f 100644
+--- a/flutter/test/steaddesk/support_help_test.dart
++++ b/flutter/test/steaddesk/support_help_test.dart
+@@ -5,6 +5,8 @@ import '../../lib/steaddesk/support_help_queue.dart';
+ import '../../lib/steaddesk/cases/case_session_ledger.dart';
+ 
+ class FixtureApi extends Fake implements SupportHelpApi {
++  @override
++  bool Function() get current => () => true;
+   @override
+   String get account => 'fixture';
+   @override
+diff --git a/flutter/test/steaddesk/today_test.dart b/flutter/test/steaddesk/today_test.dart
+index 45d7087..02929bd 100644
+--- a/flutter/test/steaddesk/today_test.dart
++++ b/flutter/test/steaddesk/today_test.dart
+@@ -5,6 +5,8 @@ import 'package:flutter_hbb/steaddesk/ops_health.dart' show HealthFailure;
+ import 'package:flutter_hbb/steaddesk/today/data.dart';
+ import 'package:flutter_hbb/steaddesk/today/panel.dart';
+ 
++final baselineSections = Map.of(sections)..remove('onsite');
++
+ final observation =
+     DateTime(2026, 10, 10, 13, 24).millisecondsSinceEpoch ~/ 1000;
+ TodayJson snapshotFor(Map<String, List<String>> grant) => {
+@@ -35,7 +37,7 @@ TodayJson snapshotFor(Map<String, List<String>> grant) => {
+ 
+ class Fixture implements TodayApi {
+   final feed = StreamController<String>.broadcast(sync: true);
+-  TodayJson data = snapshotFor(sections);
++  TodayJson data = snapshotFor(baselineSections);
+   Object? error;
+   Completer<TodayJson>? pendingList, pendingSnapshot;
+   final calls = <(String, int)>[];
+@@ -113,7 +115,7 @@ void main() {
+     final elapsed = Stopwatch()..start();
+     await h.mount(tester);
+     expect(h.fixture.requests, 1);
+-    for (final key in sections.keys) {
++    for (final key in baselineSections.keys) {
+       expect(byKey('today-section-$key').hitTestable(), findsOneWidget);
+     }
+     expect(elapsed.elapsed, lessThan(const Duration(seconds: 2)));
+@@ -128,7 +130,7 @@ void main() {
+         find.descendant(
+             of: byKey('today-filter-offline'), matching: find.text('未知')),
+         findsOneWidget);
+-    for (final filter in sections.values.expand((fields) => fields)) {
++    for (final filter in baselineSections.values.expand((fields) => fields)) {
+       final button = byKey('today-filter-$filter');
+       expect(button.hitTestable(), findsOneWidget);
+       await tester.tap(button);
