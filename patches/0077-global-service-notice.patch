@@ -1,0 +1,1432 @@
+diff --git a/flutter/lib/steaddesk/help_signer.dart b/flutter/lib/steaddesk/help_signer.dart
+index 50f0398..02ffb1c 100644
+--- a/flutter/lib/steaddesk/help_signer.dart
++++ b/flutter/lib/steaddesk/help_signer.dart
+@@ -25,2 +25,13 @@ class MerchantHelpSigner {
+   Map<String, String> signQuickCheck(
++      String operation, int keyVersion, Map<String, dynamic> body) {
++    if (operation == 'notice') {
++      if (keyVersion <= 0 || body.isNotEmpty) {
++        throw ArgumentError('A notice read requires a key version and an empty body');
++      }
++      return _quickCheckCall(operation, keyVersion, body);
++    }
++    return _signDeviceCheck(operation, keyVersion, body);
++  }
++
++  Map<String, String> _signDeviceCheck(
+       String operation, int keyVersion, Map<String, dynamic> body) {
+diff --git a/flutter/lib/steaddesk/merchant_panel.dart b/flutter/lib/steaddesk/merchant_panel.dart
+index f06f4d2..ea52a57 100644
+--- a/flutter/lib/steaddesk/merchant_panel.dart
++++ b/flutter/lib/steaddesk/merchant_panel.dart
+@@ -4,2 +4,3 @@ import 'package:flutter/material.dart';
+ import 'device_id_widgets.dart';
++import 'service_notice.dart';
+ import 'package:window_manager/window_manager.dart';
+@@ -13,3 +14,3 @@ import 'merchant_build.dart';
+ import 'store_feature_gate_stub.dart' if (dart.library.io) 'store_features.dart'
+-    show storeGate;
++    show storeGate, readMerchantServiceNotice;
+ import 'help/merchant_help_off.dart'
+@@ -502,11 +503,15 @@ class _MerchantPanelState extends State<MerchantPanel>
+         body: SafeArea(
+-            child: !fixedMerchantEnabled
+-                ? content()
+-                : Column(children: [
+-                    if ((merchantAndroid ||
+-                            merchantWindows && widget.connectionManager) &&
+-                        sessions.length == 1)
+-                      storeGate('toolbar_actions', null, fixedMerchantNotice()),
+-                    Expanded(child: content()),
+-                  ])),
++            child: MerchantNoticeHost(
++                read: readMerchantServiceNotice,
++                language: language,
++                child: !fixedMerchantEnabled
++                    ? content()
++                    : Column(children: [
++                        if ((merchantAndroid ||
++                                merchantWindows && widget.connectionManager) &&
++                            sessions.length == 1)
++                          storeGate(
++                              'toolbar_actions', null, fixedMerchantNotice()),
++                        Expanded(child: content()),
++                      ]))),
+         bottomNavigationBar: SafeArea(
+diff --git a/flutter/lib/steaddesk/quick/http.dart b/flutter/lib/steaddesk/quick/http.dart
+index 869ef89..ee07676 100644
+--- a/flutter/lib/steaddesk/quick/http.dart
++++ b/flutter/lib/steaddesk/quick/http.dart
+@@ -19,2 +19,4 @@ Future<Json> signedQuickCall(CheckScope scope, String op, int version,
+     'features' => 'store-features',
++    // The fixed global read is one level above the device endpoints.
++    'notice' => '../service-notice',
+     'report' => 'check-reports',
+diff --git a/flutter/lib/steaddesk/service_notice.dart b/flutter/lib/steaddesk/service_notice.dart
+new file mode 100644
+index 0000000..2eb11a2
+--- /dev/null
++++ b/flutter/lib/steaddesk/service_notice.dart
+@@ -0,0 +1,248 @@
++import 'dart:async';
++
++import 'package:flutter/material.dart';
++
++final _noticeLink = RegExp(
++    r'http|[<>]|[a-z][a-z0-9+.\-]*://|www\.|(?:mailto|tel|data|javascript):'
++    r'|(?:[a-z0-9-]+\.)+(?:[a-z]{2,63}|[0-9]{1,3})(?![a-z0-9-])',
++    caseSensitive: false);
++final _noticeControl = RegExp(r'[\p{C}\p{Z}]', unicode: true);
++
++bool validServiceNoticeText(String value) {
++  if (value.trim().isEmpty ||
++      value.runes.length > 140 ||
++      _noticeControl.hasMatch(value.replaceAll(' ', ''))) return false;
++  // Full-width punctuation and letters are commonly entered with a CJK keyboard.
++  final folded = String.fromCharCodes(
++      value.runes.map((r) => r >= 0xff01 && r <= 0xff5e ? r - 0xfee0 : r));
++  return !_noticeLink.hasMatch(folded);
++}
++
++class ServiceNotice {
++  final String level, textZh, textEn, textEs;
++  final DateTime startsAt, endsAt;
++  final int version;
++
++  const ServiceNotice({
++    required this.level,
++    required this.textZh,
++    required this.textEn,
++    required this.textEs,
++    required this.startsAt,
++    required this.endsAt,
++    required this.version,
++  });
++
++  factory ServiceNotice.fromJson(Map<String, dynamic> json) {
++    final level = json['level'];
++    final zh = json['text_zh'], en = json['text_en'], es = json['text_es'];
++    final start = json['starts_at'],
++        end = json['ends_at'],
++        version = json['version'];
++    if (!const {'info', 'degraded', 'outage'}.contains(level) ||
++        zh is! String ||
++        en is! String ||
++        es is! String ||
++        ![zh, en, es].every(validServiceNoticeText) ||
++        start is! int ||
++        end is! int ||
++        start < 0 ||
++        end > 253402300799 ||
++        end <= start ||
++        end - start > 86400 ||
++        version is! int ||
++        version <= 0) {
++      throw const FormatException('Invalid service notice');
++    }
++    return ServiceNotice(
++        level: level,
++        textZh: zh,
++        textEn: en,
++        textEs: es,
++        startsAt:
++            DateTime.fromMillisecondsSinceEpoch(start * 1000, isUtc: true),
++        endsAt: DateTime.fromMillisecondsSinceEpoch(end * 1000, isUtc: true),
++        version: version);
++  }
++
++  static ServiceNotice? fromResponse(Map<String, dynamic> response) {
++    final item = response['notice'];
++    if (item == null && response.containsKey('notice')) return null;
++    if (item is! Map<String, dynamic>) {
++      throw const FormatException('Missing service notice');
++    }
++    return ServiceNotice.fromJson(item);
++  }
++
++  bool activeAt(DateTime now) =>
++      !now.isBefore(startsAt) && now.isBefore(endsAt);
++
++  String textFor(String language) =>
++      switch (language.toLowerCase().split(RegExp('[-_]')).first) {
++        'zh' => textZh,
++        'es' => textEs,
++        _ => textEn,
++      };
++}
++
++class ServiceNoticeBanner extends StatelessWidget {
++  final ServiceNotice notice;
++  final String language;
++  const ServiceNoticeBanner(
++      {super.key, required this.notice, required this.language});
++
++  @override
++  Widget build(BuildContext context) {
++    final dark = Theme.of(context).brightness == Brightness.dark;
++    final (icon, background, foreground) = switch ((notice.level, dark)) {
++      ('degraded', false) => (
++          Icons.warning_amber_rounded,
++          const Color(0xffffefc2),
++          const Color(0xff734600)
++        ),
++      ('degraded', true) => (
++          Icons.warning_amber_rounded,
++          const Color(0xff463315),
++          const Color(0xffffd48a)
++        ),
++      ('outage', false) => (
++          Icons.error_outline,
++          const Color(0xffffe4e2),
++          const Color(0xff98271e)
++        ),
++      ('outage', true) => (
++          Icons.error_outline,
++          const Color(0xff4d252b),
++          const Color(0xffffb9b2)
++        ),
++      (_, true) => (
++          Icons.info_outline,
++          const Color(0xff19394e),
++          const Color(0xffa8ddff)
++        ),
++      _ => (
++          Icons.info_outline,
++          const Color(0xffe0f2ff),
++          const Color(0xff145778)
++        ),
++    };
++    return Semantics(
++        liveRegion: true,
++        child: ColoredBox(
++            color: background,
++            child: Padding(
++                padding:
++                    const EdgeInsets.symmetric(horizontal: 16, vertical: 9),
++                child: Row(children: [
++                  Icon(icon, size: 19, color: foreground),
++                  const SizedBox(width: 9),
++                  Expanded(
++                      child: Text(notice.textFor(language),
++                          style: TextStyle(
++                              color: foreground,
++                              fontSize: 14,
++                              fontWeight: FontWeight.w600,
++                              height: 1.3))),
++                ]))));
++  }
++}
++
++class MerchantNoticeHost extends StatefulWidget {
++  final Future<ServiceNotice?> Function() read;
++  final DateTime Function() now;
++  final String language;
++  final Widget child;
++
++  const MerchantNoticeHost(
++      {super.key,
++      required this.read,
++      required this.language,
++      required this.child,
++      this.now = DateTime.now});
++
++  @override
++  State<MerchantNoticeHost> createState() => _MerchantNoticeHostState();
++}
++
++class _MerchantNoticeHostState extends State<MerchantNoticeHost>
++    with WidgetsBindingObserver {
++  static const interval = Duration(minutes: 5);
++  ServiceNotice? cached;
++  Timer? poll, boundary;
++  DateTime? nextPoll;
++  bool busy = false, foreground = true;
++
++  @override
++  void initState() {
++    super.initState();
++    WidgetsBinding.instance.addObserver(this);
++    refresh();
++  }
++
++  Future<void> refresh() async {
++    if (busy || !foreground) return;
++    busy = true;
++    nextPoll = widget.now().add(interval);
++    try {
++      final value = await widget.read();
++      if (mounted) cached = value;
++    } catch (_) {
++      // Keep the last successful response until its independent expiry.
++    } finally {
++      busy = false;
++      if (mounted && foreground) schedule();
++    }
++  }
++
++  void schedule() {
++    poll?.cancel();
++    boundary?.cancel();
++    final now = widget.now();
++    final value = cached;
++    if (value != null) {
++      if (!now.isBefore(value.endsAt)) {
++        cached = null;
++      } else {
++        final at = now.isBefore(value.startsAt) ? value.startsAt : value.endsAt;
++        boundary = Timer(at.difference(now), schedule);
++      }
++    }
++    setState(() {});
++    if (!busy) poll = Timer((nextPoll ?? now).difference(now), refresh);
++  }
++
++  @override
++  void didChangeAppLifecycleState(AppLifecycleState state) {
++    foreground = state == AppLifecycleState.resumed;
++    if (foreground) {
++      schedule();
++    } else {
++      poll?.cancel();
++      boundary?.cancel();
++    }
++  }
++
++  @override
++  void dispose() {
++    poll?.cancel();
++    boundary?.cancel();
++    WidgetsBinding.instance.removeObserver(this);
++    super.dispose();
++  }
++
++  @override
++  Widget build(BuildContext context) {
++    final now = widget.now();
++    final language = widget.language.isEmpty
++        ? WidgetsBinding.instance.platformDispatcher.locale.toLanguageTag()
++        : widget.language;
++    final notice = cached;
++    // The queued help view is embedded in this panel. Keep a single banner
++    // above its scrollable content throughout the help flow.
++    return Column(children: [
++      if (notice != null && notice.activeAt(now))
++        ServiceNoticeBanner(notice: notice, language: language),
++      Expanded(child: widget.child),
++    ]);
++  }
++}
+diff --git a/flutter/lib/steaddesk/store_feature_gate_stub.dart b/flutter/lib/steaddesk/store_feature_gate_stub.dart
+index 28ff871..1e49d04 100644
+--- a/flutter/lib/steaddesk/store_feature_gate_stub.dart
++++ b/flutter/lib/steaddesk/store_feature_gate_stub.dart
+@@ -1,4 +1,7 @@
+ import 'package:flutter/widgets.dart';
++import 'service_notice.dart';
++
++Future<ServiceNotice?> readMerchantServiceNotice() async => null;
+ 
+ Widget storeGate(String name, String? peer, Widget child) =>
+     const SizedBox.shrink();
+diff --git a/flutter/lib/steaddesk/store_features.dart b/flutter/lib/steaddesk/store_features.dart
+index 9068e79..c3da50a 100644
+--- a/flutter/lib/steaddesk/store_features.dart
++++ b/flutter/lib/steaddesk/store_features.dart
+@@ -11,6 +11,7 @@ import 'ops_health.dart';
+ import 'quick/check.dart' show CheckFailure, validId;
+ import 'quick/http.dart' show signedQuickCall;
+ import 'store_feature_policy.dart';
++import 'service_notice.dart';
+ export 'store_feature_policy.dart';
+ 
+ String operatorContext() {
+@@ -66,6 +67,18 @@ Future<Map<String, dynamic>> _request(_Scope scope,
+     }
+   }
+   if (update != null) throw StateError('Device store features are read-only');
++  return _merchantRead(scope, 'features');
++}
++
++Future<ServiceNotice?> readMerchantServiceNotice() async {
++  final scope = await _scope(null);
++  if (scope == null) throw const CheckFailure('Device identity unavailable.');
++  final response = await _merchantRead(scope, 'notice');
++  if (scope != await _scope(null)) throw const CheckFailure('Device identity changed.');
++  return ServiceNotice.fromResponse(response);
++}
++
++Future<Map<String, dynamic>> _merchantRead(_Scope scope, String operation) async {
+   final signer = PlatformFFI.instance.helpSigner!;
+   final target =
+       (origin: scope.origin, device: scope.device, binding: scope.identity);
+@@ -76,7 +89,7 @@ Future<Map<String, dynamic>> _request(_Scope scope,
+     throw const FormatException('Invalid device identity');
+   }
+   return signedQuickCall(
+-      target, 'features', version, {}, signer.signQuickCheck);
++      target, operation, version, {}, signer.signQuickCheck);
+ }
+ 
+ Future<StoreFeatureSnapshot?> _fetch(_Scope scope) async {
+diff --git a/flutter/lib/steaddesk/today/data.dart b/flutter/lib/steaddesk/today/data.dart
+index 90f9958..6d060ec 100644
+--- a/flutter/lib/steaddesk/today/data.dart
++++ b/flutter/lib/steaddesk/today/data.dart
+@@ -4,6 +4,7 @@ import 'dart:io';
+ import 'dart:typed_data';
+ 
+ import 'package:flutter/foundation.dart';
++import 'notice.dart';
+ import '../ops_health.dart' show HealthFailure, OpsHealthHttp;
+ import '../ops_groups.dart' show opsEndpoint;
+ import '../callback_build.dart' show supportCallbacksEnabled;
+@@ -27,7 +28,7 @@ abstract interface class TodayApi {
+   void close();
+ }
+ 
+-class TodayHttp implements TodayApi {
++class TodayHttp implements TodayApi, StaffNoticeApi {
+   final Uri base;
+   final String token;
+   final bool Function() current;
+@@ -73,9 +74,13 @@ class TodayHttp implements TodayApi {
+     return result;
+   }
+ 
+-  Future<TodayJson> get(Uri uri) async {
++  Future<TodayJson> get(Uri uri) async => (await _request('GET', uri)).body;
++
++  Future<({TodayJson body, String? etag})> _request(String method, Uri uri,
++      {int? version, String? key, TodayJson? body}) async {
+     if (!current()) throw const HealthFailure(401);
+-    final request = await http.getUrl(uri).timeout(const Duration(seconds: 6));
++    final request =
++        await http.openUrl(method, uri).timeout(const Duration(seconds: 6));
+     if (!current()) {
+       request.abort();
+       throw const HealthFailure(401);
+@@ -83,8 +88,17 @@ class TodayHttp implements TodayApi {
+     request.followRedirects = false;
+     request.headers.set(HttpHeaders.authorizationHeader, 'Bearer $token');
+     request.headers.set(HttpHeaders.acceptHeader, 'application/json');
++    if (key != null) request.headers.set('Idempotency-Key', key);
++    if (version != null) request.headers.set('If-Match', '"$version"');
++    if (body != null) {
++      request.headers.contentType = ContentType.json;
++      final encoded = utf8.encode(jsonEncode(body));
++      request.contentLength = encoded.length;
++      request.add(encoded);
++    }
+     final response = await request.close().timeout(const Duration(seconds: 8));
+-    if (response.statusCode != 200) {
++    final conflict = version != null && response.statusCode == 409;
++    if (response.statusCode != 200 && !conflict) {
+       await response.listen((_) {}).cancel();
+       throw HealthFailure(response.statusCode);
+     }
+@@ -96,9 +110,33 @@ class TodayHttp implements TodayApi {
+       bytes.add(chunk);
+     }
+     if (!current()) throw const HealthFailure(401);
+-    return jsonDecode(utf8.decode(bytes.takeBytes())) as TodayJson;
++    final data = jsonDecode(utf8.decode(bytes.takeBytes())) as TodayJson;
++    if (conflict) {
++      final latest = data['latest'];
++      if (latest is TodayJson) {
++        throw NoticeConflict(decodeNotice(latest['version'], latest));
++      }
++      throw const HealthFailure(409);
++    }
++    return (body: data, etag: response.headers.value(HttpHeaders.etagHeader));
++  }
++
++  Future<NoticeSnapshot> _notice(String method,
++      {int? version, String? key, TodayJson? body}) async {
++    final result = await _request(method, base.resolve('service-notice'),
++        version: version, key: key, body: body);
++    final match = RegExp(r'^"(\d+)"$').firstMatch(result.etag ?? '');
++    return decodeNotice(int.tryParse(match?.group(1) ?? ''), result.body);
+   }
+ 
++  @override
++  Future<NoticeSnapshot> fetchNotice() => _notice('GET');
++  @override
++  Future<NoticeSnapshot> changeNotice(
++          int version, String key, TodayJson? body) =>
++      _notice(body == null ? 'DELETE' : 'PUT',
++          version: version, key: key, body: body ?? {});
++
+   @override
+   Stream<String> events() => stream.changes();
+   @override
+@@ -130,7 +168,8 @@ class TodaySection {
+ class TodayStore extends ChangeNotifier {
+   final TodayApi api;
+   final bool Function() current;
+-  TodayStore(this.api, this.current);
++  final StaffNotices? notices;
++  TodayStore(this.api, this.current, {this.notices});
+   Map<String, TodaySection> visible = {};
+   bool loading = true, streamDown = false, offline = false, denied = false;
+   int? asOf;
+@@ -151,6 +190,7 @@ class TodayStore extends ChangeNotifier {
+       e is HealthFailure && {401, 403, 404}.contains(e.status);
+ 
+   void start() {
++    notices?.start();
+     unawaited(refresh());
+     _listen();
+     _poll = Timer.periodic(const Duration(seconds: 10), (_) => refresh());
+@@ -184,10 +224,17 @@ class TodayStore extends ChangeNotifier {
+     if (!active) return;
+     _feed = api.events().listen((kind) {
+       if (!active) return;
++      if (kind == 'service.notice.changed') {
++        notices?.refresh();
++        return;
++      }
+       if (kind == 'connected') {
+         final reconnect = streamDown;
+         streamDown = false;
+-        if (reconnect) unawaited(refresh());
++        if (reconnect) {
++          notices?.refresh();
++          unawaited(refresh());
++        }
+         notifyListeners();
+         return;
+       }
+@@ -198,6 +245,7 @@ class TodayStore extends ChangeNotifier {
+           kind.startsWith('permission.') ||
+           kind.startsWith('auth.');
+       if (permissionChange) {
++        notices?.refresh();
+         _clear();
+         loading = true;
+         notifyListeners();
+@@ -342,6 +390,7 @@ class TodayStore extends ChangeNotifier {
+     _retry?.cancel();
+     _poll?.cancel();
+     _coalesce?.cancel();
++    notices?.dispose();
+     api.close();
+     super.dispose();
+   }
+diff --git a/flutter/lib/steaddesk/today/host.dart b/flutter/lib/steaddesk/today/host.dart
+index aa0838f..3b3cf27 100644
+--- a/flutter/lib/steaddesk/today/host.dart
++++ b/flutter/lib/steaddesk/today/host.dart
+@@ -1,9 +1,11 @@
+ import 'dart:async';
+ import 'package:flutter/material.dart';
+ import '../../common.dart' show gFFI;
+-import '../../models/platform_model.dart' show bind;
++import '../../models/platform_model.dart' show bind, localeName;
++import '../../consts.dart' show kCommConfKeyLang;
+ import '../ops_groups.dart' show opsEndpoint;
+ import 'data.dart';
++import 'notice.dart';
+ import 'panel.dart';
+ 
+ const todayEnabled = true;
+@@ -59,7 +61,9 @@ class _TodayHostState extends State<TodayHost> {
+     who = next;
+     if (next != null) {
+       bool current() => mounted && who == next && _identity() == next;
+-      store = TodayStore(TodayHttp(next.origin, next.token, current), current)
++      final api = TodayHttp(next.origin, next.token, current);
++      store = TodayStore(api, current,
++          notices: StaffNotices(api, current, admin: next.admin))
+         ..start();
+     }
+     setState(() {});
+@@ -75,7 +79,12 @@ class _TodayHostState extends State<TodayHost> {
+   }
+ 
+   @override
+-  Widget build(BuildContext context) => store == null
+-      ? const Center(child: Text('请登录客服账号后查看今天的数据。'))
+-      : TodayPanel(store: store!);
++  Widget build(BuildContext context) {
++    if (store == null) return const Center(child: Text('请登录客服账号后查看今天的数据。'));
++    final saved = bind.mainGetLocalOption(key: kCommConfKeyLang);
++    return TodayPanel(
++        store: store!,
++        noticeLanguage:
++            saved.isEmpty || saved == 'default' ? localeName : saved);
++  }
+ }
+diff --git a/flutter/lib/steaddesk/today/notice.dart b/flutter/lib/steaddesk/today/notice.dart
+new file mode 100644
+index 0000000..5a97754
+--- /dev/null
++++ b/flutter/lib/steaddesk/today/notice.dart
+@@ -0,0 +1,104 @@
++import 'dart:async';
++
++import 'package:flutter/foundation.dart';
++import '../ops_health.dart' show HealthFailure;
++import '../service_notice.dart';
++
++typedef NoticeSnapshot = ({int version, ServiceNotice? notice});
++typedef NoticeBody = Map<String, dynamic>;
++
++NoticeSnapshot decodeNotice(Object? version, NoticeBody data) {
++  if (version is! int || version < 0 || !data.containsKey('notice')) {
++    throw const FormatException('无效的服务提示版本');
++  }
++  final notice = ServiceNotice.fromResponse(data);
++  if (notice != null && notice.version != version) {
++    throw const FormatException('服务提示版本不一致');
++  }
++  return (version: version, notice: notice);
++}
++
++class NoticeConflict implements Exception {
++  final NoticeSnapshot latest;
++  NoticeConflict(this.latest);
++}
++
++abstract interface class StaffNoticeApi {
++  Future<NoticeSnapshot> fetchNotice();
++  Future<NoticeSnapshot> changeNotice(
++      int version, String key, NoticeBody? body);
++}
++
++class StaffNotices extends ChangeNotifier {
++  final StaffNoticeApi api;
++  final bool admin;
++  final bool Function() current;
++  final DateTime Function() now;
++  StaffNotices(this.api, this.current,
++      {required this.admin, DateTime Function()? now})
++      : now = now ?? DateTime.now;
++  NoticeSnapshot? snapshot;
++  Timer? _expiry, _poll;
++  bool _closed = false;
++  bool get active => !_closed && current();
++  ServiceNotice? get visible {
++    final row = snapshot?.notice;
++    return active && row != null && row.activeAt(now()) ? row : null;
++  }
++
++  void start() {
++    unawaited(refresh());
++    _poll = Timer.periodic(const Duration(minutes: 5), (_) => refresh());
++  }
++
++  void _accept(NoticeSnapshot value) {
++    if (!active || value.version < (snapshot?.version ?? -1)) return;
++    snapshot = value;
++    _expiry?.cancel();
++    final row = visible;
++    if (row != null) {
++      _expiry = Timer(row.endsAt.difference(now()), () {
++        if (active) notifyListeners();
++      });
++    }
++    notifyListeners();
++  }
++
++  Future<NoticeSnapshot> read() async {
++    if (!active) throw const HealthFailure(401);
++    final value = await api.fetchNotice();
++    if (!active) throw const HealthFailure(401);
++    _accept(value);
++    return snapshot!;
++  }
++
++  Future<void> refresh() async {
++    try {
++      await read();
++    } catch (e) {
++      if (active && e is HealthFailure && {401, 403}.contains(e.status)) {
++        snapshot = null;
++        _expiry?.cancel();
++        notifyListeners();
++      }
++    }
++  }
++
++  Future<void> write(int version, String key, NoticeBody? body) async {
++    if (!active || !admin) throw const HealthFailure(403);
++    try {
++      _accept(await api.changeNotice(version, key, body));
++    } on NoticeConflict catch (conflict) {
++      _accept(conflict.latest);
++      rethrow;
++    }
++  }
++
++  @override
++  void dispose() {
++    _closed = true;
++    _expiry?.cancel();
++    _poll?.cancel();
++    super.dispose();
++  }
++}
+diff --git a/flutter/lib/steaddesk/today/notice_editor.dart b/flutter/lib/steaddesk/today/notice_editor.dart
+new file mode 100644
+index 0000000..611604d
+--- /dev/null
++++ b/flutter/lib/steaddesk/today/notice_editor.dart
+@@ -0,0 +1,278 @@
++import 'dart:async';
++
++import 'package:flutter/material.dart';
++import 'package:uuid/uuid.dart';
++import '../ops_health.dart' show HealthFailure;
++import '../service_notice.dart';
++import 'notice.dart';
++
++const _levelNames = {'info': '消息', 'degraded': '服务受影响', 'outage': '服务中断'};
++const _languages = {'zh': '中文', 'en': 'English', 'es': 'Español'};
++
++class NoticeEditor extends StatefulWidget {
++  final StaffNotices notices;
++  final String language;
++  const NoticeEditor(this.notices, this.language, {super.key});
++
++  @override
++  State<NoticeEditor> createState() => _NoticeEditorState();
++}
++
++class _NoticeEditorState extends State<NoticeEditor> {
++  final _form = GlobalKey<FormState>();
++  final _texts = {'zh': '', 'en': '', 'es': ''};
++  late String _previewLanguage;
++  String _level = 'info', _minutes = '60';
++  String? _error;
++  NoticeSnapshot? _base, _conflict;
++  bool _busy = true, _clearConfirmation = false;
++  ({String key, NoticeBody? body})? _pending;
++  late final Timer _session;
++
++  bool get _authorized =>
++      mounted && widget.notices.active && widget.notices.admin;
++
++  @override
++  void initState() {
++    super.initState();
++    final saved = widget.language.toLowerCase().split(RegExp('[-_]')).first;
++    _previewLanguage = _languages.containsKey(saved) ? saved : 'en';
++    _load();
++    _session = Timer.periodic(const Duration(milliseconds: 400), (_) {
++      if (mounted && !_authorized) {
++        final route = ModalRoute.of(context);
++        if (route != null && route.isActive) {
++          route.navigator?.removeRoute(route);
++        }
++      }
++    });
++  }
++
++  @override
++  void dispose() {
++    _session.cancel();
++    super.dispose();
++  }
++
++  Future<void> _load() async {
++    setState(() {
++      _busy = true;
++      _error = null;
++    });
++    try {
++      final latest = await widget.notices.read();
++      if (!_authorized) return;
++      final notice = latest.notice;
++      setState(() {
++        _base = latest;
++        if (notice != null) {
++          _level = notice.level;
++          for (final lang in _languages.keys) {
++            _texts[lang] = notice.textFor(lang);
++          }
++          _minutes =
++              ((notice.endsAt.difference(widget.notices.now()).inSeconds / 60)
++                      .ceil()
++                      .clamp(1, 1440))
++                  .toString();
++        }
++      });
++    } catch (_) {
++      if (_authorized) setState(() => _error = '无法读取服务状态提示，请重试。');
++    } finally {
++      if (_authorized) setState(() => _busy = false);
++    }
++  }
++
++  void _changed(VoidCallback apply) => setState(() {
++        apply();
++        _pending = null;
++        _error = null;
++        _clearConfirmation = false;
++      });
++
++  Future<void> _save({bool clear = false}) async {
++    if (_busy || !_authorized || _base == null) return;
++    if (!clear && !_form.currentState!.validate()) return;
++    if (clear && !_clearConfirmation) {
++      setState(() => _clearConfirmation = true);
++      return;
++    }
++    if (_pending == null || (_pending!.body == null) != clear) {
++      final start = widget.notices.now().millisecondsSinceEpoch ~/ 1000;
++      _pending = (
++        key: const Uuid().v4(),
++        body: clear
++            ? null
++            : {
++                'level': _level,
++                for (final lang in _languages.keys) 'text_$lang': _texts[lang]!,
++                'starts_at': start,
++                'ends_at': start + int.parse(_minutes) * 60,
++              }
++      );
++    }
++    final request = _pending!;
++    setState(() {
++      _busy = true;
++      _error = null;
++    });
++    try {
++      await widget.notices.write(_base!.version, request.key, request.body);
++      if (_authorized) Navigator.pop(context);
++    } on NoticeConflict catch (e) {
++      if (_authorized) {
++        setState(() {
++          _base = _conflict = e.latest;
++          _pending = null;
++          _clearConfirmation = false;
++          _error = '这条提示刚被别人改过，已显示最新内容，请确认后再保存。';
++        });
++      }
++    } catch (e) {
++      if (_authorized) {
++        setState(() => _error = switch (e) {
++              HealthFailure(status: 400) => '请检查三种提示文字和时长，不可包含链接或 HTML。',
++              HealthFailure(status: 403) => '只有管理员可以修改服务状态提示。',
++              _ => '提交未确认，请重试。',
++            });
++      }
++    } finally {
++      if (_authorized) setState(() => _busy = false);
++    }
++  }
++
++  Widget _latest(NoticeSnapshot snapshot) {
++    final n = snapshot.notice;
++    final material = MaterialLocalizations.of(context);
++    String format(DateTime value) {
++      final local = value.toLocal();
++      return '${material.formatShortDate(local)} ${material.formatTimeOfDay(TimeOfDay.fromDateTime(local))}';
++    }
++
++    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
++      Text('服务器版本 ${snapshot.version}',
++          style: Theme.of(context).textTheme.titleSmall),
++      if (n == null)
++        const Text('当前没有有效提示。')
++      else ...[
++        Text(
++            '${_levelNames[n.level]} · ${format(n.startsAt)} – ${format(n.endsAt)}'),
++        for (final lang in _languages.keys)
++          Text('${_languages[lang]} · ${n.textFor(lang)}'),
++      ],
++    ]);
++  }
++
++  @override
++  Widget build(BuildContext context) {
++    final editable = !_busy && _authorized;
++    final now = widget.notices.now();
++    final preview = _texts[_previewLanguage]!;
++    return AlertDialog(
++      title: const Text('服务状态提示'),
++      scrollable: true,
++      content: SizedBox(
++          width: 480,
++          child: Form(
++            key: _form,
++            child: Column(
++                mainAxisSize: MainAxisSize.min,
++                crossAxisAlignment: CrossAxisAlignment.stretch,
++                children: [
++                  if (_base != null) ...[
++                    DropdownButtonFormField<String>(
++                        value: _level,
++                        decoration: const InputDecoration(labelText: '级别'),
++                        items: [
++                          for (final level in _levelNames.entries)
++                            DropdownMenuItem(
++                                value: level.key, child: Text(level.value))
++                        ],
++                        onChanged: editable
++                            ? (v) => _changed(() => _level = v!)
++                            : null),
++                    for (final lang in _languages.entries)
++                      TextFormField(
++                          key: ValueKey('notice-${lang.key}'),
++                          initialValue: _texts[lang.key],
++                          enabled: editable,
++                          decoration: InputDecoration(labelText: lang.value),
++                          onChanged: (s) =>
++                              _changed(() => _texts[lang.key] = s),
++                          validator: (s) =>
++                              s != null && validServiceNoticeText(s)
++                                  ? null
++                                  : '请输入 1–140 个字符的单行纯文本，不能包含链接或 HTML。'),
++                    TextFormField(
++                        key: const ValueKey('notice-duration'),
++                        initialValue: _minutes,
++                        enabled: editable,
++                        keyboardType: TextInputType.number,
++                        decoration: const InputDecoration(labelText: '时长（分钟）'),
++                        validator: (s) {
++                          final n = int.tryParse(s ?? '');
++                          return n != null && n >= 1 && n <= 1440
++                              ? null
++                              : '请输入 1 至 1440 分钟。';
++                        },
++                        onChanged: (s) => _changed(() => _minutes = s)),
++                    const SizedBox(height: 12),
++                    Row(children: [
++                      Expanded(
++                          child: Text('预览',
++                              style: Theme.of(context).textTheme.titleSmall)),
++                      DropdownButton<String>(
++                          value: _previewLanguage,
++                          items: [
++                            for (final lang in _languages.entries)
++                              DropdownMenuItem(
++                                  value: lang.key, child: Text(lang.value))
++                          ],
++                          onChanged: (v) =>
++                              setState(() => _previewLanguage = v!)),
++                    ]),
++                    if (validServiceNoticeText(preview))
++                      ServiceNoticeBanner(
++                          notice: ServiceNotice(
++                              level: _level,
++                              textZh: _texts['zh']!,
++                              textEn: _texts['en']!,
++                              textEs: _texts['es']!,
++                              startsAt: now,
++                              endsAt: now.add(const Duration(minutes: 1)),
++                              version: _base!.version),
++                          language: _previewLanguage)
++                    else
++                      const Text('输入提示文字后可预览。'),
++                  ],
++                  if (_busy) const LinearProgressIndicator(),
++                  if (_error != null)
++                    Padding(
++                        padding: const EdgeInsets.symmetric(vertical: 8),
++                        child: Text(_error!,
++                            style: TextStyle(
++                                color: Theme.of(context).colorScheme.error))),
++                  if (_conflict case final latest?) _latest(latest),
++                  if (_clearConfirmation) const Text('确认结束当前服务状态提示？'),
++                ]),
++          )),
++      actions: [
++        if (_base?.notice != null)
++          TextButton(
++              onPressed: editable ? () => _save(clear: true) : null,
++              child: Text(_clearConfirmation ? '确认结束' : '结束提示')),
++        TextButton(
++            onPressed: _busy ? null : () => Navigator.pop(context),
++            child: const Text('取消')),
++        if (_base == null)
++          TextButton(
++              onPressed: editable ? _load : null, child: const Text('重新读取'))
++        else
++          FilledButton(
++              onPressed: editable ? () => _save() : null,
++              child: Text(_conflict == null ? '保存' : '确认后保存')),
++      ],
++    );
++  }
++}
+diff --git a/flutter/lib/steaddesk/today/panel.dart b/flutter/lib/steaddesk/today/panel.dart
+index cc07514..0804bdb 100644
+--- a/flutter/lib/steaddesk/today/panel.dart
++++ b/flutter/lib/steaddesk/today/panel.dart
+@@ -1,6 +1,8 @@
+ import 'dart:math' as math;
+ import 'package:flutter/material.dart';
++import '../service_notice.dart';
+ import 'data.dart';
++import 'notice_editor.dart';
+ 
+ const _titles = {
+   'alerts': '未处理预警',
+@@ -96,7 +98,8 @@ String _wait(dynamic seconds) => seconds is int ? '${seconds ~/ 60} 分' : '未
+ 
+ class TodayPanel extends StatelessWidget {
+   final TodayStore store;
+-  const TodayPanel({super.key, required this.store});
++  final String noticeLanguage;
++  const TodayPanel({super.key, required this.store, this.noticeLanguage = ''});
+   @override
+   Widget build(BuildContext context) => AnimatedBuilder(
+       animation: store,
+@@ -107,6 +110,10 @@ class TodayPanel extends StatelessWidget {
+           return _Details(store: store, filter: selected);
+         }
+         final date = DateTime.now();
++        final notices = store.notices;
++        final language = noticeLanguage.isEmpty
++            ? Localizations.localeOf(context).languageCode
++            : noticeLanguage;
+         return Column(
+             crossAxisAlignment: CrossAxisAlignment.stretch,
+             children: [
+@@ -122,11 +129,33 @@ class TodayPanel extends StatelessWidget {
+                       Flexible(
+                           child: Text(_cutoff(store.asOf),
+                               textAlign: TextAlign.end)),
++                    if (notices != null && notices.admin && notices.active)
++                      TextButton.icon(
++                          onPressed: () => showDialog<void>(
++                              context: context,
++                              builder: (_) => NoticeEditor(notices, language)),
++                          icon: const Icon(Icons.campaign_outlined, size: 17),
++                          label: const Text('服务状态提示')),
+                     IconButton(
+                         tooltip: '刷新',
+-                        onPressed: store.refresh,
++                        onPressed: () {
++                          notices?.refresh();
++                          store.refresh();
++                        },
+                         icon: const Icon(Icons.refresh)),
+                   ])),
++              if (notices != null)
++                AnimatedBuilder(
++                    animation: notices,
++                    builder: (context, _) {
++                      final notice = notices.visible;
++                      return notice == null
++                          ? const SizedBox.shrink()
++                          : Padding(
++                              padding: const EdgeInsets.fromLTRB(12, 2, 12, 8),
++                              child: ServiceNoticeBanner(
++                                  notice: notice, language: language));
++                    }),
+               if (store.visible.isEmpty)
+                 Expanded(
+                     child: Center(
+diff --git a/flutter/test/steaddesk/merchant_service_notice_test.dart b/flutter/test/steaddesk/merchant_service_notice_test.dart
+new file mode 100644
+index 0000000..1ecb47d
+--- /dev/null
++++ b/flutter/test/steaddesk/merchant_service_notice_test.dart
+@@ -0,0 +1,181 @@
++import 'dart:async';
++
++import 'package:flutter/material.dart';
++import 'package:flutter_hbb/steaddesk/help/merchant_help_widget.dart';
++import 'package:flutter_hbb/steaddesk/service_notice.dart';
++import 'package:flutter_test/flutter_test.dart';
++
++Map<String, dynamic> wire(
++        {String level = 'info', int start = 100, int end = 700}) =>
++    {
++      'level': level,
++      'text_zh': '服务维护',
++      'text_en': 'Service maintenance',
++      'text_es': 'Mantenimiento del servicio',
++      'starts_at': start,
++      'ends_at': end,
++      'version': 1
++    };
++
++void main() {
++  test('notice response and full language fallback', () {
++    expect(ServiceNotice.fromResponse({'notice': null}), isNull);
++    expect(() => ServiceNotice.fromResponse({}), throwsFormatException);
++    expect(() => ServiceNotice.fromResponse({'notice': {}}),
++        throwsFormatException);
++    for (final json in [
++      wire(end: 86501),
++      wire(end: 99),
++      wire(start: -1),
++      wire(level: 'other'),
++      {...wire(), 'version': 0},
++      {...wire(), 'text_es': ''}
++    ]) {
++      expect(() => ServiceNotice.fromJson(json), throwsFormatException);
++    }
++    final n = ServiceNotice.fromJson(wire());
++    expect([n.textFor('zh-CN'), n.textFor('es_MX'), n.textFor('fr-FR')],
++        [n.textZh, n.textEs, n.textEn]);
++    expect(n.activeAt(n.startsAt), isTrue);
++    expect(n.activeAt(n.endsAt), isFalse);
++  });
++
++  test('plain text counts Unicode code points and rejects unsafe input', () {
++    for (final text in [
++      '',
++      ' ',
++      'a' * 141,
++      'a\nb',
++      'https',
++      '<',
++      'example.com',
++      'http：／／example.com',
++      'ｗｗｗ．example．com',
++      '192.0.2.1',
++      'mailto:user',
++      'tel:123',
++      'abc\u2028x',
++      'abc\u200Dx'
++    ]) {
++      expect(validServiceNoticeText(text), isFalse, reason: text);
++    }
++    expect(validServiceNoticeText('🧰' * 140), isTrue);
++    expect(validServiceNoticeText('计划维护完成。'), isTrue);
++    expect(validServiceNoticeText('El servicio está disponible.'), isTrue);
++  });
++
++  testWidgets('three severity icons, palettes and locales in both themes',
++      (t) async {
++    final backgrounds = <Color>{};
++    for (final mode in [Brightness.light, Brightness.dark]) {
++      for (final item in [
++        ('info', 'zh-CN', Icons.info_outline),
++        ('degraded', 'es', Icons.warning_amber_rounded),
++        ('outage', 'en', Icons.error_outline)
++      ]) {
++        final n = ServiceNotice.fromJson(wire(level: item.$1));
++        await t.pumpWidget(MaterialApp(
++            themeAnimationDuration: Duration.zero,
++            theme: ThemeData(brightness: mode),
++            home: Scaffold(
++                body: ServiceNoticeBanner(notice: n, language: item.$2))));
++        expect(find.text(n.textFor(item.$2)), findsOneWidget);
++        expect(find.byIcon(item.$3), findsOneWidget);
++        final colored = find.descendant(
++            of: find.byType(ServiceNoticeBanner),
++            matching: find.byType(ColoredBox));
++        backgrounds.add(t.widget<ColoredBox>(colored).color);
++      }
++    }
++    expect(backgrounds, hasLength(6));
++  });
++
++  testWidgets(
++      'panel and queued help share one read, keep cached on failure, expire independently',
++      (t) async {
++    int calls = 0;
++    final start = t.binding.clock.now();
++    final second = start.millisecondsSinceEpoch ~/ 1000;
++    final finish = Completer<ServiceNotice?>();
++    Future<ServiceNotice?> read() async {
++      calls++;
++      if (calls == 1)
++        return ServiceNotice.fromJson(wire(start: second, end: second + 330));
++      if (calls == 2) throw StateError('offline');
++      return finish.future;
++    }
++
++    final wait = HelpWaiting(
++        view: const {'state': 'queued'},
++        cards: const [],
++        now: second,
++        online: false,
++        busy: false,
++        label: (x) => x,
++        act: (_, __) {});
++    Widget host(String lang) => MaterialApp(
++        home: Scaffold(
++            body: MerchantNoticeHost(
++                now: t.binding.clock.now,
++                read: read,
++                language: lang,
++                child: wait)));
++    await t.pumpWidget(host('zh-CN'));
++    await t.pump();
++    expect(find.text('服务维护'), findsOneWidget);
++    expect(find.text('Waiting for 0 min'), findsOneWidget);
++    expect(t.getTopLeft(find.byType(ServiceNoticeBanner)).dy,
++        lessThan(t.getTopLeft(find.byType(HelpWaiting)).dy));
++    await t.pumpWidget(host('es'));
++    expect(find.text('Mantenimiento del servicio'), findsOneWidget);
++    expect(calls, 1);
++    await t.pump(const Duration(minutes: 5));
++    expect(calls, 2);
++    expect(find.byType(ServiceNoticeBanner), findsOneWidget);
++    await t.pump(const Duration(seconds: 30));
++    expect(find.byType(ServiceNoticeBanner), findsNothing);
++    await t.pump(const Duration(minutes: 5));
++    expect(calls, 3);
++    await t.pumpWidget(const SizedBox());
++    finish.complete(null);
++    await t.pump();
++    expect(t.takeException(), isNull);
++  });
++
++  testWidgets(
++      'cold failures, late starts, clear, and resume respect polling interval',
++      (t) async {
++    int calls = 0;
++    final second = t.binding.clock.now().millisecondsSinceEpoch ~/ 1000;
++    Future<ServiceNotice?> read() async {
++      calls++;
++      if (calls == 1) throw StateError('unavailable');
++      if (calls == 2)
++        return ServiceNotice.fromJson(
++            wire(start: second + 310, end: second + 950));
++      return null;
++    }
++
++    await t.pumpWidget(MaterialApp(
++        home: MerchantNoticeHost(
++            language: 'en',
++            read: read,
++            now: t.binding.clock.now,
++            child: const SizedBox())));
++    await t.pump();
++    expect(find.byType(ServiceNoticeBanner), findsNothing);
++    await t.pump(const Duration(minutes: 5));
++    expect(calls, 2);
++    expect(find.byType(ServiceNoticeBanner), findsNothing);
++    await t.pump(const Duration(seconds: 10));
++    expect(find.text('Service maintenance'), findsOneWidget);
++    t.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
++    await t.pump(const Duration(minutes: 5));
++    expect(calls, 2);
++    t.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
++    await t.pump(Duration.zero);
++    expect(calls, 3);
++    expect(find.byType(ServiceNoticeBanner), findsNothing);
++    await t.pumpWidget(const SizedBox());
++  });
++}
+diff --git a/flutter/test/steaddesk/today_notice_test.dart b/flutter/test/steaddesk/today_notice_test.dart
+new file mode 100644
+index 0000000..e6db6ed
+--- /dev/null
++++ b/flutter/test/steaddesk/today_notice_test.dart
+@@ -0,0 +1,189 @@
++import 'package:flutter/material.dart';
++import 'package:flutter_test/flutter_test.dart';
++import 'package:flutter_hbb/steaddesk/ops_health.dart' show HealthFailure;
++import 'package:flutter_hbb/steaddesk/service_notice.dart';
++import 'package:flutter_hbb/steaddesk/today/data.dart';
++import 'package:flutter_hbb/steaddesk/today/notice.dart';
++import 'package:flutter_hbb/steaddesk/today/panel.dart';
++import 'today_test.dart' show Fixture;
++
++class _Api implements StaffNoticeApi {
++  final DateTime now;
++  bool failed = false, uncertain = false;
++  final writes = <({int version, String key, NoticeBody? body})>[];
++  NoticeSnapshot row = (version: 0, notice: null);
++  _Api(this.now);
++  void publish(
++      {String zh = '系统维护',
++      String en = 'Scheduled maintenance',
++      String es = 'Mantenimiento programado',
++      String level = 'info',
++      int seconds = 3600}) {
++    final version = row.version + 1;
++    row = (
++      version: version,
++      notice: ServiceNotice(
++          level: level,
++          textZh: zh,
++          textEn: en,
++          textEs: es,
++          startsAt: now,
++          endsAt: now.add(Duration(seconds: seconds)),
++          version: version)
++    );
++  }
++
++  @override
++  Future<NoticeSnapshot> fetchNotice() async {
++    if (failed) throw const HealthFailure(503);
++    return row;
++  }
++
++  @override
++  Future<NoticeSnapshot> changeNotice(
++      int version, String key, NoticeBody? body) async {
++    writes.add((version: version, key: key, body: body));
++    if (uncertain) throw const HealthFailure(503);
++    if (version != row.version) throw NoticeConflict(row);
++    return row = body == null
++        ? (version: version + 1, notice: null)
++        : decodeNotice(version + 1, {
++            'notice': {...body, 'version': version + 1}
++          });
++  }
++}
++
++class _Harness {
++  final fixture = Fixture();
++  final bool admin;
++  bool current = true;
++  DateTime now = DateTime.utc(2026, 11, 20);
++  late final api = _Api(now);
++  late final notices =
++      StaffNotices(api, () => current, admin: admin, now: () => now);
++  late final store = TodayStore(fixture, () => current, notices: notices);
++  _Harness(this.admin);
++  Future<void> mount(WidgetTester t, {String language = 'zh'}) async {
++    t.view.physicalSize = const Size(1100, 850);
++    t.view.devicePixelRatio = 1;
++    addTearDown(t.view.resetPhysicalSize);
++    addTearDown(t.view.resetDevicePixelRatio);
++    store.start();
++    await t.pumpWidget(MaterialApp(
++        home: Scaffold(
++            body: TodayPanel(store: store, noticeLanguage: language))));
++    await t.pump();
++  }
++
++  Future<void> close(WidgetTester t) async {
++    await t.pumpWidget(const SizedBox());
++    store.dispose();
++  }
++
++  Future<void> open(WidgetTester t) async {
++    await t.tap(find.text('服务状态提示'));
++    await t.pumpAndSettle();
++    expect(find.byType(AlertDialog), findsOneWidget);
++  }
++}
++
++void main() {
++  testWidgets(
++      'staff see only active localized notice; polling failures, SSE and expiry',
++      (t) async {
++    final h = _Harness(false)..api.failed = true;
++    await h.mount(t, language: 'es-MX');
++    expect(find.byType(ServiceNoticeBanner), findsNothing);
++    expect(find.text('服务状态提示'), findsNothing);
++    h.api.failed = false;
++    h.api.publish(seconds: 12, level: 'degraded');
++    h.fixture.feed.add('service.notice.changed');
++    await t.pumpAndSettle();
++    expect(find.text('Mantenimiento programado'), findsOneWidget);
++    h.api.failed = true;
++    await h.notices.refresh();
++    expect(find.text('Mantenimiento programado'), findsOneWidget);
++    h.now = h.now.add(const Duration(seconds: 12));
++    await t.pump(const Duration(seconds: 12));
++    expect(find.byType(ServiceNoticeBanner), findsNothing);
++    await expectLater(
++        h.notices.write(0, 'x', {}), throwsA(isA<HealthFailure>()));
++    expect(h.api.writes, isEmpty);
++    await h.close(t);
++  });
++
++  testWidgets(
++      'stale admin save displays latest, retains drafts and requires explicit resubmit',
++      (t) async {
++    final h = _Harness(true)..api.publish();
++    await h.mount(t);
++    await h.open(t);
++    await t.enterText(find.byKey(const ValueKey('notice-zh')), '我的维护提示');
++    await t.pump();
++    expect(find.text('我的维护提示'), findsNWidgets(2));
++    h.api.publish(zh: '另一位管理员的提示', level: 'outage');
++    await t.tap(find.text('保存'));
++    await t.pumpAndSettle();
++    expect(find.text('这条提示刚被别人改过，已显示最新内容，请确认后再保存。'), findsOneWidget);
++    expect(find.text('中文 · 另一位管理员的提示'), findsOneWidget);
++    expect(find.text('服务器版本 2'), findsOneWidget);
++    expect(find.text('我的维护提示'), findsNWidgets(2));
++    expect(h.api.writes.map((w) => w.version), [1]);
++    await t.tap(find.text('确认后保存'));
++    await t.pumpAndSettle();
++    expect(find.byType(AlertDialog), findsNothing);
++    expect(find.text('我的维护提示'), findsOneWidget);
++    expect(h.api.writes.map((w) => w.version), [1, 2]);
++    expect(h.api.writes.last.key, isNot(h.api.writes.first.key));
++    await h.open(t);
++    await t.tap(find.text('结束提示'));
++    await t.pumpAndSettle();
++    expect(h.api.writes, hasLength(2));
++    await t.tap(find.text('确认结束'));
++    await t.pumpAndSettle();
++    expect(h.api.row.version, 4);
++    expect(h.api.row.notice, isNull);
++    expect(find.byType(ServiceNoticeBanner), findsNothing);
++    await h.close(t);
++  });
++
++  testWidgets(
++      'validates text and duration, retries identical intent and closes on account change',
++      (t) async {
++    final h = _Harness(true);
++    await h.mount(t);
++    await h.open(t);
++    for (final lang in ['zh', 'en', 'es']) {
++      await t.enterText(find.byKey(ValueKey('notice-$lang')),
++          lang == 'en' ? 'https://example.org' : 'Maint');
++    }
++    final duration = find.byKey(const ValueKey('notice-duration'));
++    await t.enterText(duration, '1441');
++    await t.tap(find.text('保存'));
++    await t.pumpAndSettle();
++    expect(find.textContaining('请输入 1–140'), findsOneWidget);
++    expect(find.text('请输入 1 至 1440 分钟。'), findsOneWidget);
++    expect(h.api.writes, isEmpty);
++    await t.enterText(find.byKey(const ValueKey('notice-en')), 'Maintenance');
++    await t.enterText(duration, '1440');
++    h.api.uncertain = true;
++    await t.tap(find.text('保存'));
++    await t.pumpAndSettle();
++    expect(find.text('提交未确认，请重试。'), findsOneWidget);
++    h.now = h.now.add(const Duration(seconds: 10));
++    h.api.uncertain = false;
++    await t.tap(find.text('保存'));
++    await t.pumpAndSettle();
++    expect(h.api.writes, hasLength(2));
++    expect(h.api.writes.first, h.api.writes.last);
++    expect(h.api.row.notice!.endsAt.difference(h.api.row.notice!.startsAt),
++        const Duration(days: 1));
++    await h.open(t);
++    h.current = false;
++    await t.pump(const Duration(seconds: 1));
++    await t.pumpAndSettle();
++    expect(find.byType(AlertDialog), findsNothing);
++    expect(h.api.writes, hasLength(2));
++    await h.close(t);
++  });
++}
+diff --git a/src/steaddesk_check_signer.rs b/src/steaddesk_check_signer.rs
+index 094fe8f..a3dd46e 100644
+--- a/src/steaddesk_check_signer.rs
++++ b/src/steaddesk_check_signer.rs
+@@ -1,2 +1,2 @@
+-//! Merchant-only device proofs for three fixed operations. No key material crosses the C ABI.
++//! Merchant-only device proofs for fixed operations. No key material crosses the C ABI.
+ use hbb_common::{
+@@ -44,2 +44,5 @@ fn proof(input: Input, device: &str, stamp: u64, nonce: &str) -> Option<Vec<u8>>
+         }
++        "notice" if key_version > 0 && body == json!({}) => {
++            ("GET", "/ops/v1/service-notice", body)
++        }
+         "features" if key_version > 0 && body == json!({}) => {
+@@ -181,2 +184,13 @@ mod tests {
+     #[test]
++    fn service_notice_only_signs_its_fixed_read_route() {
++        let bytes = canonical("notice", 1, json!({})).unwrap();
++        let envelope: Value = serde_json::from_slice(&bytes[b"SteadDesk-fleet-v1\0".len()..]).unwrap();
++        assert_eq!(envelope[0], "GET");
++        assert_eq!(envelope[1], "/ops/v1/service-notice");
++        assert_eq!(envelope[2], json!({}));
++        assert!(canonical("notice", 0, json!({})).is_none());
++        assert!(canonical("notice", 1, json!({"method":"PUT"})).is_none());
++        assert!(canonical("/ops/v1/service-notice", 1, json!({})).is_none());
++    }
++    #[test]
+     fn store_features_use_only_the_fixed_get_path() {
