@@ -1,0 +1,565 @@
+diff --git a/flutter/lib/steaddesk/ops_health_host.dart b/flutter/lib/steaddesk/ops_health_host.dart
+index d967582..cc282af 100644
+--- a/flutter/lib/steaddesk/ops_health_host.dart
++++ b/flutter/lib/steaddesk/ops_health_host.dart
+@@ -174,7 +174,8 @@ class _OpsHealthHostState extends State<OpsHealthHost> {
+                     return Text(store.error ?? '设备清单暂不可用。');
+                   }
+                   return storeGate('quick_check', widget.device,
+-                      storeInventory(store, widget.device!));
++                      storeInventory(store, widget.device!,
++                          language: bind.mainGetLocalOption(key: 'lang')));
+                 case HealthSurface.overview:
+                   return ListView(padding: const EdgeInsets.all(16), children: [
+                     if (store.error != null) Text(store.error!),
+diff --git a/flutter/lib/steaddesk/quick/check.dart b/flutter/lib/steaddesk/quick/check.dart
+index 79b2ba5..66a3789 100644
+--- a/flutter/lib/steaddesk/quick/check.dart
++++ b/flutter/lib/steaddesk/quick/check.dart
+@@ -18,6 +18,10 @@ const typeLabels = {
+   'host': '主机',
+   'secondary': '副机',
+   'payment': '支付设备',
++  'kiosk': 'Kiosk',
++  'order_display': '叫号屏',
++  'kds': 'KDS',
++  'tablet': '平板',
+   'other': '其他'
+ };
+ const outcomeLabels = {
+@@ -190,7 +194,9 @@ class MerchantChecks {
+           'Store approval is missing or the offline inventory expired.');
+     }
+     return {
+-      ...data,
++      for (final key in ['device_id', 'store_id', 'allowed', 'revision'])
++        key: data[key],
++      if (data['probe_details'] == true) 'probe_details': true,
+       'expires_at': (data['expires_at'] as int).clamp(now + 1, now + 900),
+       'entries': inventoryEntries(data['entries'])
+     };
+diff --git a/flutter/lib/steaddesk/quick/managed_inventory.dart b/flutter/lib/steaddesk/quick/managed_inventory.dart
+new file mode 100644
+index 0000000..f0d160f
+--- /dev/null
++++ b/flutter/lib/steaddesk/quick/managed_inventory.dart
+@@ -0,0 +1,57 @@
++import 'check.dart' show Json, privateV4, typeLabels;
++
++typedef InventoryDraft = ({String name, String ip, String? type});
++
++List<InventoryDraft> managedSuggestions(Object? raw, List<Json> entries) {
++  if (raw is! List) return [];
++  final seen = {for (final entry in entries) entry['ip']};
++  final suggestions = <InventoryDraft>[];
++  for (final row in raw) {
++    if (row case {'name': String name, 'ip': String ip, 'type': final type}) {
++      if (name.trim().isEmpty ||
++          name.runes.length > 64 ||
++          RegExp(r'[\x00-\x1f\x7f]').hasMatch(name) ||
++          !privateV4(ip) ||
++          !seen.add(ip)) continue;
++      suggestions.add((
++        name: name.trim(),
++        ip: ip,
++        type: type is String && typeLabels.containsKey(type) ? type : null
++      ));
++    }
++  }
++  return suggestions;
++}
++
++String inventoryLabel(String key, String language) {
++  final labels = switch (language.toLowerCase().split(RegExp('[-_]')).first) {
++    'zh' => const {...typeLabels, 'suggestions': '建议添加', 'add': '添加'},
++    'es' => const {
++        'printer': 'Impresora',
++        'host': 'Terminal principal',
++        'secondary': 'Terminal secundaria',
++        'payment': 'Terminal de pago',
++        'kiosk': 'Quiosco',
++        'order_display': 'Pantalla de pedidos',
++        'kds': 'KDS',
++        'tablet': 'Tableta',
++        'other': 'Otro',
++        'suggestions': 'Sugerencias para añadir',
++        'add': 'Añadir',
++      },
++    _ => const {
++        'printer': 'Printer',
++        'host': 'Primary terminal',
++        'secondary': 'Secondary terminal',
++        'payment': 'Payment terminal',
++        'kiosk': 'Kiosk',
++        'order_display': 'Order display',
++        'kds': 'KDS',
++        'tablet': 'Tablet',
++        'other': 'Other',
++        'suggestions': 'Suggested devices',
++        'add': 'Add',
++      },
++  };
++  return labels[key] ?? key;
++}
+diff --git a/flutter/lib/steaddesk/quick/support.dart b/flutter/lib/steaddesk/quick/support.dart
+index d2ff33e..806f8df 100644
+--- a/flutter/lib/steaddesk/quick/support.dart
++++ b/flutter/lib/steaddesk/quick/support.dart
+@@ -3,10 +3,12 @@ import 'package:flutter/material.dart';
+ import '../ops_health.dart';
+ import 'check.dart';
+ import 'result_line.dart';
++import 'managed_inventory.dart';
+ 
+ const supportQuickEnabled = true;
+-Widget storeInventory(HealthStore store, String device) =>
+-    _StoreView(store, device,
++Widget storeInventory(HealthStore store, String device,
++        {String language = ''}) =>
++    _StoreView(store, device, language,
+         key: ValueKey((store, device, store.scopeRevision)));
+ Widget merchantReport(HealthStore store, String device) =>
+     _LatestReport(store, device,
+@@ -15,19 +17,26 @@ Widget merchantReport(HealthStore store, String device) =>
+ class _StoreView extends StatefulWidget {
+   final HealthStore store;
+   final String device;
+-  const _StoreView(this.store, this.device, {super.key});
++  final String language;
++  const _StoreView(this.store, this.device, this.language, {super.key});
+   @override
+   State<_StoreView> createState() => _StoreViewState();
+ }
+ 
+ class _StoreViewState extends State<_StoreView> {
+   List<Json> entries = [];
++  List<InventoryDraft> suggestions = [];
+   Json policy = {};
++  String get language => widget.language.isEmpty
++      ? Localizations.localeOf(context).languageCode
++      : widget.language;
+   bool busy = true;
++  late final int scopeRevision;
+   String? error;
+   String get path => 'devices/${widget.device}';
+   bool get current =>
+       mounted &&
++      widget.store.scopeRevision == scopeRevision &&
+       widget.store.active &&
+       widget.store.devices.containsKey(widget.device) &&
+       (widget.store.storeFeatures == null ||
+@@ -36,6 +45,7 @@ class _StoreViewState extends State<_StoreView> {
+   @override
+   void initState() {
+     super.initState();
++    scopeRevision = widget.store.scopeRevision;
+     load();
+   }
+ 
+@@ -46,6 +56,7 @@ class _StoreViewState extends State<_StoreView> {
+       error = null;
+       policy = {};
+       entries = [];
++      suggestions = [];
+     });
+     try {
+       final data = await Future.wait([
+@@ -55,7 +66,17 @@ class _StoreViewState extends State<_StoreView> {
+       if (current) {
+         setState(() {
+           entries = inventoryEntries(data[1]['entries']);
++          if (data[1].containsKey('store_id') &&
++              data[1]['store_id'] != data[0]['store_id']) {
++            throw const FormatException();
++          }
+           policy = data[0];
++          if (policy['can_edit'] == true &&
++              validId(policy['store_id']) &&
++              data[1]['store_id'] == policy['store_id']) {
++            suggestions =
++                managedSuggestions(data[1]['managed_suggestions'], entries);
++          }
+         });
+       }
+     } catch (e) {
+@@ -86,10 +107,20 @@ class _StoreViewState extends State<_StoreView> {
+     if (current) await load();
+   }
+ 
+-  Future<void> edit([Json? row]) async {
++  Future<void> edit({Json? row, InventoryDraft? draft}) async {
+     if (!editable) return;
++    final store = widget.store;
+     final value = await showDialog<Json>(
+-        context: context, builder: (_) => _Editor(row, entries));
++        context: context,
++        builder: (ctx) => ListenableBuilder(
++            listenable: store,
++            builder: (_, __) => editable
++                ? _Editor(row, entries, draft, language)
++                : AlertDialog(content: const Text('已无权编辑此设备表。'), actions: [
++                    TextButton(
++                        onPressed: () => Navigator.pop(ctx),
++                        child: const Text('关闭'))
++                  ])));
+     if (value != null && editable) {
+       await write(
+           row == null ? 'POST' : 'PATCH',
+@@ -143,19 +174,37 @@ class _StoreViewState extends State<_StoreView> {
+                     onPressed: entries.length < 32 ? () => edit() : null,
+                     icon: const Icon(Icons.add),
+                     label: const Text('新增设备'))),
++          if (editable && suggestions.isNotEmpty) ...[
++            Text(inventoryLabel('suggestions', language),
++                style: Theme.of(context).textTheme.titleMedium),
++            for (final suggestion in suggestions)
++              ListTile(
++                  contentPadding: EdgeInsets.zero,
++                  title: Text(suggestion.name),
++                  subtitle: Text([
++                    suggestion.ip,
++                    if (suggestion.type != null)
++                      inventoryLabel(suggestion.type!, language),
++                  ].join(' · ')),
++                  trailing: TextButton(
++                      onPressed: entries.length < 32
++                          ? () => edit(draft: suggestion)
++                          : null,
++                      child: Text(inventoryLabel('add', language)))),
++          ],
+           if (entries.isEmpty) const Text('暂无已登记设备'),
+           for (final row in entries)
+             ListTile(
+                 contentPadding: EdgeInsets.zero,
+                 title: Text(row['name']),
+                 subtitle: Text(
+-                    "${typeLabels[row['type']] ?? row['type']} · ${row['ip']}\n${row['model']}"),
++                    "${inventoryLabel(row['type'], language)} · ${row['ip']}\n${row['model']}"),
+                 trailing: !editable
+                     ? null
+                     : Wrap(children: [
+                         IconButton(
+                             tooltip: '编辑设备',
+-                            onPressed: () => edit(row),
++                            onPressed: () => edit(row: row),
+                             icon: const Icon(Icons.edit_outlined)),
+                         IconButton(
+                             tooltip: '删除设备',
+@@ -173,7 +222,9 @@ class _StoreViewState extends State<_StoreView> {
+ class _Editor extends StatefulWidget {
+   final Json? row;
+   final List<Json> entries;
+-  const _Editor(this.row, this.entries);
++  final InventoryDraft? draft;
++  final String language;
++  const _Editor(this.row, this.entries, this.draft, this.language);
+   @override
+   State<_Editor> createState() => _EditorState();
+ }
+@@ -181,12 +232,21 @@ class _Editor extends StatefulWidget {
+ class _EditorState extends State<_Editor> {
+   final form = GlobalKey<FormState>();
+   late final values = {
+-    for (final k in ['name', 'ip', 'model']) k: widget.row?[k] as String? ?? ''
++    for (final k in ['name', 'ip', 'model'])
++      k: widget.row?[k] as String? ??
++          switch (k) {
++            'name' => widget.draft?.name ?? '',
++            'ip' => widget.draft?.ip ?? '',
++            _ => '',
++          }
+   };
+-  late String type = typeLabels.containsKey(widget.row?['type'])
+-      ? widget.row!['type'] as String
+-      : 'other';
+-  late bool noPing = widget.row?['no_ping'] == true;
++  late String? type = widget.draft != null
++      ? widget.draft!.type
++      : typeLabels.containsKey(widget.row?['type'])
++          ? widget.row!['type'] as String
++          : 'other';
++  late bool noPing =
++      widget.row == null ? type == 'payment' : widget.row?['no_ping'] == true;
+   @override
+   Widget build(BuildContext context) => AlertDialog(
+           title: Text(widget.row == null ? '新增设备' : '编辑设备'),
+@@ -222,11 +282,14 @@ class _EditorState extends State<_Editor> {
+                           }),
+                     DropdownButtonFormField<String>(
+                         value: type,
++                        validator: (v) => v == null ? '请选择设备类型' : null,
+                         decoration: const InputDecoration(labelText: '类型'),
+                         items: [
+-                          for (final entry in typeLabels.entries)
++                          for (final key in typeLabels.keys)
+                             DropdownMenuItem(
+-                                value: entry.key, child: Text(entry.value))
++                                value: key,
++                                child:
++                                    Text(inventoryLabel(key, widget.language)))
+                         ],
+                         onChanged: (v) {
+                           if (v == null || v == type) return;
+diff --git a/flutter/lib/steaddesk/quick/support_off.dart b/flutter/lib/steaddesk/quick/support_off.dart
+index c4af48a..5c8e32d 100644
+--- a/flutter/lib/steaddesk/quick/support_off.dart
++++ b/flutter/lib/steaddesk/quick/support_off.dart
+@@ -1,5 +1,6 @@
+ import 'package:flutter/widgets.dart';
+ 
+ const supportQuickEnabled = false;
+-Widget storeInventory(Object store, String device) => const SizedBox.shrink();
++Widget storeInventory(Object store, String device, {String language = ''}) =>
++    const SizedBox.shrink();
+ Widget merchantReport(Object store, String device) => const SizedBox.shrink();
+diff --git a/flutter/test/steaddesk/managed_inventory_test.dart b/flutter/test/steaddesk/managed_inventory_test.dart
+new file mode 100644
+index 0000000..a36ed99
+--- /dev/null
++++ b/flutter/test/steaddesk/managed_inventory_test.dart
+@@ -0,0 +1,223 @@
++import 'dart:convert';
++import 'dart:io';
++import 'package:flutter/material.dart';
++import 'package:flutter_test/flutter_test.dart';
++import 'package:flutter_hbb/steaddesk/ops_health.dart';
++import 'package:flutter_hbb/steaddesk/quick/check.dart'
++    show Json, MerchantChecks, inventoryEntries;
++import 'package:flutter_hbb/steaddesk/quick/managed_inventory.dart';
++import 'package:flutter_hbb/steaddesk/quick/support.dart';
++
++const base = 'devices/demo';
++
++class _Api implements HealthApi {
++  bool admin = true;
++  String inventoryStore = 'demo';
++  List<Json>? managed;
++  final entries = <Json>[], writes = <Json>[];
++  @override
++  Future<Json> request(String method, String route, [Json? body]) async {
++    switch ('$method $route') {
++      case 'GET $base/check-policy':
++        return {'can_edit': admin, 'store_id': 'demo'};
++      case 'GET $base/inventory':
++        return {
++          'entries': entries,
++          if (managed != null) ...{
++            'store_id': inventoryStore,
++            'managed_suggestions': managed,
++          }
++        };
++      case 'POST $base/inventory':
++        writes.add(body!);
++        entries.add({...body, 'id': 'i_${entries.length + 1}'});
++        return {};
++      default:
++        throw StateError('Unexpected request');
++    }
++  }
++
++  @override
++  Stream<String> changes() => const Stream.empty();
++  @override
++  void close() {}
++}
++
++class _Store extends HealthStore {
++  _Store(super.api) : super(isCurrent: () => true);
++  void changeScope() {
++    scopeRevision++;
++    notifyListeners();
++  }
++}
++
++Future<_Store> _showInventory(WidgetTester t, _Api api,
++    {String language = 'zh'}) async {
++  final store = _Store(api);
++  store.devices['demo'] = DeviceHealth.from(
++      {'device_id': 'demo', 'status': 'normal', 'reasons': []});
++  await t.pumpWidget(MaterialApp(
++      home: Scaffold(body: storeInventory(store, 'demo', language: language))));
++  await t.pumpAndSettle();
++  return store;
++}
++
++Future<void> tap(WidgetTester t, Finder target) async {
++  await t.ensureVisible(target);
++  await t.tap(target);
++  await t.pumpAndSettle();
++}
++
++void main() {
++  test(
++      'registered merchant inventory accepts all four types and support labels follow language',
++      () {
++    const types = ['kiosk', 'order_display', 'kds', 'tablet'];
++    final entries = inventoryEntries([
++      for (var i = 0; i < types.length; i++)
++        {
++          'id': 'item_$i',
++          'name': 'Demo $i',
++          'type': types[i],
++          'model': '',
++          'ip': '10.2.0.${i + 1}'
++        }
++    ]);
++    expect(entries.map((row) => row['type']), types);
++    List<String> labels(String language) =>
++        [for (final type in types) inventoryLabel(type, language)];
++    expect(labels('zh_CN'), ['Kiosk', '叫号屏', 'KDS', '平板']);
++    expect(labels('en_US'), ['Kiosk', 'Order display', 'KDS', 'Tablet']);
++    expect(
++        labels('es-MX'), ['Quiosco', 'Pantalla de pedidos', 'KDS', 'Tableta']);
++  });
++
++  test('merchant cache keeps registered rows and omits admin-only fields',
++      () async {
++    final dir = await Directory.systemTemp.createTemp('managed-inventory-');
++    addTearDown(() => dir.delete(recursive: true));
++    final file = File('${dir.path}/journal');
++    const now = 1800000000;
++    final owner = (
++      origin: Uri.https('example.invalid'),
++      device: 'demo',
++      binding: 'fixture'
++    );
++    final checks =
++        MerchantChecks(file, () async => owner, (_, op, __, ___) async {
++      if (op == 'identity') return {'key_version': 1};
++      return {
++        'device_id': 'demo',
++        'store_id': 'store',
++        'allowed': true,
++        'expires_at': now + 900,
++        'revision': 'a' * 64,
++        'probe_details': true,
++        'entries': [
++          {
++            'id': 'item_a',
++            'name': 'Front',
++            'ip': '10.1.1.2',
++            'type': 'kiosk',
++            'model': ''
++          }
++        ],
++        'managed_suggestions': [
++          {'name': 'Private candidate', 'ip': '10.1.1.3', 'type': 'tablet'}
++        ]
++      };
++    }, (_) => throw StateError('Unexpected probe'), clock: () => now);
++    await checks.sync();
++    final cached = await file.readAsString();
++    expect(cached, isNot(contains('10.1.1.3')));
++    expect(cached, isNot(contains('managed_suggestions')));
++    final inventory = jsonDecode(cached)['inventory'];
++    expect(inventory['entries'].single['type'], 'kiosk');
++    expect(inventory['probe_details'], true);
++  });
++
++  testWidgets('managed candidates prefill one edit and refresh after save',
++      (t) async {
++    final api = _Api()
++      ..managed = [
++        {'ip': '10.0.0.3', 'name': 'Pickup', 'type': 'order_display'},
++        {'ip': '10.0.0.3', 'name': 'Duplicate', 'type': 'tablet'},
++        {'ip': '10.0.0.4', 'name': 'Spare', 'type': ''},
++        {'ip': '8.8.8.8', 'name': 'Public', 'type': 'tablet'},
++      ];
++    await _showInventory(t, api, language: 'es-MX');
++    expect(find.text('Sugerencias para añadir'), findsOneWidget);
++    expect(find.text('Añadir'), findsNWidgets(2));
++    expect(find.text('Duplicate'), findsNothing);
++    expect(find.text('Public'), findsNothing);
++    expect(find.text('10.0.0.3 · Pantalla de pedidos'), findsOneWidget);
++    await tap(t, find.text('Añadir').first);
++    final fields = find.byType(TextFormField);
++    expect(t.widget<TextFormField>(fields.first).initialValue, 'Pickup');
++    expect(t.widget<TextFormField>(fields.at(1)).initialValue, '10.0.0.3');
++    expect(api.writes, isEmpty);
++    await tap(t, find.text('保存'));
++    expect(api.writes.single, {
++      'ip': '10.0.0.3',
++      'name': 'Pickup',
++      'type': 'order_display',
++      'model': '',
++      'no_ping': false
++    });
++    expect(find.text('Añadir'), findsOneWidget);
++    await tap(t, find.text('Añadir'));
++    await tap(t, find.text('保存'));
++    expect(find.text('请选择设备类型'), findsOneWidget);
++    expect(api.writes.length, 1);
++    await tap(t, find.byType(DropdownButtonFormField<String>));
++    await tap(t, find.text('Tableta').last);
++    await tap(t, find.text('保存'));
++    expect(api.writes.last['type'], 'tablet');
++    expect(find.text('Añadir'), findsNothing);
++  });
++
++  testWidgets('suggestions require matching store and permission on every read',
++      (t) async {
++    final api = _Api()
++      ..admin = false
++      ..managed = [
++        {'ip': '10.0.0.9', 'name': 'Managed A', 'type': 'kiosk'}
++      ];
++    await _showInventory(t, api, language: 'en_US');
++    expect(find.text('Managed A'), findsNothing);
++    api.admin = true;
++    api.inventoryStore = 'different';
++    await tap(t, find.text('刷新设备表'));
++    expect(find.text('Managed A'), findsNothing);
++    api.inventoryStore = 'demo';
++    await tap(t, find.text('刷新设备表'));
++    expect(find.text('Suggested devices'), findsOneWidget);
++    expect(find.text('Managed A'), findsOneWidget);
++    api.admin = false;
++    await tap(t, find.text('刷新设备表'));
++    expect(find.text('Managed A'), findsNothing);
++    expect(find.text('Add'), findsNothing);
++    api.admin = true;
++    api.managed = null;
++    await tap(t, find.text('刷新设备表'));
++    expect(find.text('新增设备'), findsOneWidget);
++    expect(find.text('Suggested devices'), findsNothing);
++  });
++
++  testWidgets(
++      'changing scope closes the managed suggestion editor without writing',
++      (t) async {
++    final api = _Api()
++      ..managed = [
++        {'ip': '10.0.0.9', 'name': 'Tablet', 'type': 'tablet'}
++      ];
++    final store = await _showInventory(t, api, language: 'en');
++    await tap(t, find.text('Add'));
++    store.changeScope();
++    await t.pumpAndSettle();
++    expect(find.text('已无权编辑此设备表。'), findsOneWidget);
++    expect(find.byType(TextFormField), findsNothing);
++    await tap(t, find.text('关闭'));
++    expect(api.writes, isEmpty);
++  });
++}
+diff --git a/flutter/test/steaddesk/quick_support_test.dart b/flutter/test/steaddesk/quick_support_test.dart
+index fa19e5f..3b50b37 100644
+--- a/flutter/test/steaddesk/quick_support_test.dart
++++ b/flutter/test/steaddesk/quick_support_test.dart
+@@ -85,7 +85,7 @@ void main() {
+       await t.pumpAndSettle();
+     }
+ 
+-    await show(storeInventory(store, '123'));
++    await show(storeInventory(store, '123', language: 'zh_CN'));
+     expect(find.text('Demo printer'), findsOneWidget);
+     expect(find.text('新增设备'), findsNothing);
+     expect(t.widget<SwitchListTile>(find.byType(SwitchListTile)).onChanged,
+@@ -106,7 +106,7 @@ void main() {
+             .color,
+         Colors.grey);
+     api.admin = true;
+-    await show(storeInventory(store, '123'));
++    await show(storeInventory(store, '123', language: 'zh_CN'));
+     await t.tap(find.byType(SwitchListTile));
+     await t.pumpAndSettle();
+     await t.tap(find.text('新增设备'));

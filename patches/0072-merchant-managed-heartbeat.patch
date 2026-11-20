@@ -1,0 +1,398 @@
+diff --git a/build.rs b/build.rs
+index f594418..8c954a5 100644
+--- a/build.rs
++++ b/build.rs
+@@ -103,6 +103,12 @@ fn main() {
+     match std::fs::read_to_string(selector).expect("configured edition").trim() {
+         "false" => {
+             println!("cargo:rustc-cfg=steaddesk_help_merchant");
++            if target_os == "windows" {
++                let source = "src/platform/managed_ipv4.cpp";
++                cc::Build::new().cpp(true).std("c++17").file(source).compile("managed_ipv4");
++                println!("cargo:rustc-link-lib=iphlpapi");
++                println!("cargo:rerun-if-changed={source}");
++            }
+             let fixed = "src/steaddesk_fixed_enabled.rs";
+             println!("cargo:rerun-if-changed={fixed}");
+             if matches!(target_os.as_str(), "windows" | "android") &&
+diff --git a/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MainService.kt b/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MainService.kt
+index 3787a9d..ce0358c 100644
+--- a/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MainService.kt
++++ b/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MainService.kt
+@@ -95,6 +95,8 @@ class MainService : Service() {
+     @Keep
+     fun rustGetByName(name: String): String {
+         return when (name) {
++            "steaddesk_managed_ipv4" -> ManagedLanAddress.current(this)
++            "steaddesk_managed_model" -> Build.MODEL.orEmpty()
+             "steaddesk_self_heal_paused" -> MerchantRecovery.paused()
+             "steaddesk_peer_user_stopped" -> MerchantRecovery.peerUserStopped()
+             "steaddesk_fixed_peer_stopped" -> MerchantRecovery.freshPeerUserStopped()
+diff --git a/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/ManagedLanAddress.java b/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/ManagedLanAddress.java
+new file mode 100644
+index 0000000..dd6d9a7
+--- /dev/null
++++ b/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/ManagedLanAddress.java
+@@ -0,0 +1,62 @@
++package com.carriez.flutter_hbb;
++
++import android.content.Context;
++import android.net.ConnectivityManager;
++import android.net.LinkAddress;
++import android.net.LinkProperties;
++import android.net.Network;
++import android.net.NetworkInfo;
++import android.net.RouteInfo;
++import android.os.Build;
++import java.net.Inet4Address;
++import java.net.InetAddress;
++
++final class ManagedLanAddress {
++    private ManagedLanAddress() {}
++
++    @SuppressWarnings("deprecation")
++    private static Network defaultNetwork(ConnectivityManager manager) {
++        if (Build.VERSION.SDK_INT >= 23) return manager.getActiveNetwork();
++
++        // On API 22 an explicitly process-bound Network is authoritative.
++        Network bound = ConnectivityManager.getProcessDefaultNetwork();
++        if (bound != null) return bound;
++        // The legacy active-info API only identifies a transport. A single
++        // visible, connected network with that transport is unambiguous.
++        NetworkInfo active = manager.getActiveNetworkInfo();
++        Network[] networks = manager.getAllNetworks();
++        if (active == null || !active.isConnected() || networks.length != 1) return null;
++        NetworkInfo only = manager.getNetworkInfo(networks[0]);
++        return only != null && only.isConnected() && only.getType() == active.getType()
++            ? networks[0] : null;
++    }
++
++    static String current(Context context) {
++        try {
++            ConnectivityManager manager =
++                (ConnectivityManager) context.getSystemService(Context.CONNECTIVITY_SERVICE);
++            if (manager == null) return "";
++            Network active = defaultNetwork(manager);
++            if (active == null) return "";
++            LinkProperties link = manager.getLinkProperties(active);
++            if (link == null || link.getInterfaceName() == null) return "";
++            boolean defaultV4 = false;
++            for (RouteInfo route : link.getRoutes()) {
++                if (route.isDefaultRoute() && route.getDestination().getAddress() instanceof Inet4Address
++                        && link.getInterfaceName().equals(route.getInterface())) {
++                    defaultV4 = true;
++                    break;
++                }
++            }
++            if (!defaultV4) return "";
++            for (LinkAddress entry : link.getLinkAddresses()) {
++                InetAddress addr = entry.getAddress();
++                if (addr instanceof Inet4Address && addr.isSiteLocalAddress()
++                        && active.equals(defaultNetwork(manager))) return addr.getHostAddress();
++            }
++        } catch (RuntimeException unavailable) {
++            // A disappearing default network or missing access yields an empty report.
++        }
++        return "";
++    }
++}
+diff --git a/src/hbbs_http/managed_heartbeat.rs b/src/hbbs_http/managed_heartbeat.rs
+new file mode 100644
+index 0000000..20cd336
+--- /dev/null
++++ b/src/hbbs_http/managed_heartbeat.rs
+@@ -0,0 +1,195 @@
++//! Private address observation for the registered merchant identity.
++use hbb_common::config::Config;
++use reqwest::{blocking::Client, redirect::Policy, Url};
++use serde_json::{json, Value};
++use std::{
++    collections::BTreeMap,
++    io::Read,
++    net::Ipv4Addr,
++    sync::mpsc::{sync_channel, SyncSender},
++    time::{Duration, Instant},
++};
++
++const IDENTITY: &str = "/ops/v1/device/update-identity";
++const REPORT: &str = "/ops/v1/device/managed-heartbeat";
++
++#[cfg(windows)]
++fn local_observation() -> (Option<Ipv4Addr>, Option<String>) {
++    use winreg::{enums::HKEY_LOCAL_MACHINE, RegKey};
++    extern "C" {
++        fn sd_managed_ipv4(out: *mut u8) -> bool;
++    }
++    let mut addr = [0u8; 4];
++    let ip = unsafe { sd_managed_ipv4(addr.as_mut_ptr()) }.then(|| Ipv4Addr::from(addr));
++    let model = RegKey::predef(HKEY_LOCAL_MACHINE)
++        .open_subkey(r"HARDWARE\DESCRIPTION\System\BIOS")
++        .and_then(|bios| bios.get_value("SystemProductName"))
++        .ok();
++    (ip, model)
++}
++
++#[cfg(target_os = "android")]
++fn local_observation() -> (Option<Ipv4Addr>, Option<String>) {
++    use scrap::android::call_main_service_get_by_name as get;
++    let ip = get("steaddesk_managed_ipv4")
++        .ok()
++        .and_then(|s| s.parse().ok());
++    (ip, get("steaddesk_managed_model").ok())
++}
++
++fn report_body(ip: Option<Ipv4Addr>, model: Option<String>) -> Value {
++    let Some(ip) = ip.filter(Ipv4Addr::is_private) else {
++        return json!({});
++    };
++    let mut body = json!({"lan_ipv4": ip.to_string()});
++    if let Some(model) = model.as_deref().map(str::trim).filter(|m| {
++        !m.is_empty()
++            && m.chars().count() <= 64
++            && m.chars()
++                .all(|c| c.is_alphanumeric() || c == ' ' || c.is_ascii_punctuation())
++    }) {
++        body["model"] = json!(model);
++    }
++    body
++}
++
++fn configured_origin() -> Option<Url> {
++    let url = Url::parse(&Config::get_option("api-server")).ok()?;
++    (url.scheme() == "https"
++        && url.host().is_some()
++        && url.username().is_empty()
++        && url.password().is_none()
++        && url.path() == "/"
++        && url.query().is_none()
++        && url.fragment().is_none())
++    .then_some(url)
++}
++
++fn signed_request(
++    client: &Client,
++    origin: &Url,
++    device: &str,
++    version: u64,
++    body: &Value,
++) -> Option<reqwest::blocking::Response> {
++    let (method, path) = if version == 0 {
++        ("GET", IDENTITY)
++    } else {
++        ("POST", REPORT)
++    };
++    let signed = crate::steaddesk_device_signature::sign(device, version, |id, stamp, nonce| {
++        let mut proof = b"SteadDesk-fleet-v1\0".to_vec();
++        proof.extend(serde_json::to_vec(&(method, path, body, id, version, stamp, nonce)).ok()?);
++        Some(proof)
++    })?;
++    let url = origin.join(path).ok()?;
++    let mut request = if version == 0 {
++        client.get(url)
++    } else {
++        client.post(url).json(body)
++    };
++    for (key, value) in serde_json::from_slice::<BTreeMap<String, String>>(&signed).ok()? {
++        request = request.header(key, value);
++    }
++    let response = request.send().ok()?;
++    (response.status().as_u16() == 200).then_some(response)
++}
++
++fn discover(client: &Client, origin: &Url, device: &str) -> Option<u64> {
++    let response = signed_request(client, origin, device, 0, &json!({}))?;
++    let mut data = Vec::new();
++    response.take(8193).read_to_end(&mut data).ok()?;
++    if data.len() > 8192 {
++        return None;
++    }
++    let value: Value = serde_json::from_slice(&data).ok()?;
++    value["key_version"].as_u64().filter(|v| *v > 0)
++}
++
++pub(super) fn start() -> SyncSender<()> {
++    // Zero capacity: a slow or absent ops service never queues observations
++    // or holds up the legacy RustDesk heartbeat. Only live ticks trigger work.
++    let (sender, ticks) = sync_channel(0);
++    let _ = std::thread::Builder::new()
++        .name("managed-heartbeat".into())
++        .spawn(move || {
++            let Ok(client) = Client::builder()
++                .redirect(Policy::none())
++                .no_proxy()
++                .connect_timeout(Duration::from_secs(3))
++                .timeout(Duration::from_secs(7))
++                .build()
++            else {
++                return;
++            };
++            let mut cached: Option<(Url, String, u64)> = None;
++            let mut next = Instant::now();
++            while ticks.recv().is_ok() {
++                if Instant::now() < next {
++                    continue;
++                }
++                let Some(origin) = configured_origin() else {
++                    continue;
++                };
++                let device = Config::get_id_or(String::new());
++                let version = cached
++                    .as_ref()
++                    .filter(|(url, id, _)| url == &origin && id == &device)
++                    .map(|(_, _, v)| *v)
++                    .or_else(|| discover(&client, &origin, &device));
++                let accepted = version.and_then(|v| {
++                    let (ip, model) = local_observation();
++                    signed_request(&client, &origin, &device, v, &report_body(ip, model))?;
++                    Some((origin, device, v))
++                });
++                // Retry old servers, rotated keys and transport failures at most once per 5 minutes.
++                let delay = if accepted.is_some() {
++                    super::TIME_HEARTBEAT
++                } else {
++                    Duration::from_secs(300)
++                };
++                next = Instant::now() + delay;
++                cached = accepted;
++            }
++        });
++    sender
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn report_contains_only_a_private_ipv4_and_an_optional_bounded_model() {
++        for ip in ["10.0.0.1", "172.16.0.1", "172.31.255.254", "192.168.1.1"] {
++            assert_eq!(
++                report_body(ip.parse().ok(), Some(" KDS 2 ".into())),
++                json!({"lan_ipv4":ip,"model":"KDS 2"})
++            );
++        }
++        for ip in [
++            "",
++            "::1",
++            "0.0.0.0",
++            "127.0.0.1",
++            "169.254.1.1",
++            "100.64.0.2",
++            "172.15.2.1",
++            "172.32.2.1",
++            "192.0.2.8",
++            "224.1.1.1",
++            "8.8.8.8",
++        ] {
++            assert_eq!(
++                report_body(ip.parse().ok(), Some("Tablet".into())),
++                json!({})
++            );
++        }
++        for model in ["".into(), "a".repeat(65), "a\nb".into()] {
++            assert_eq!(
++                report_body("10.0.1.2".parse().ok(), Some(model)),
++                json!({"lan_ipv4":"10.0.1.2"})
++            );
++        }
++    }
++}
+diff --git a/src/hbbs_http/sync.rs b/src/hbbs_http/sync.rs
+index 78e11f7..2239da1 100644
+--- a/src/hbbs_http/sync.rs
++++ b/src/hbbs_http/sync.rs
+@@ -15,6 +15,10 @@ use base::config::keys;
+ use serde::{Deserialize, Serialize};
+ use serde_json::{json, Value};
+ 
++#[cfg(all(steaddesk_help_merchant, any(windows, target_os = "android")))]
++#[path = "managed_heartbeat.rs"]
++mod managed_heartbeat;
++
+ const TIME_HEARTBEAT: Duration = Duration::from_secs(15);
+ const UPLOAD_SYSINFO_TIMEOUT: Duration = Duration::from_secs(120);
+ const TIME_CONN: Duration = Duration::from_secs(3);
+@@ -89,6 +93,8 @@ async fn start_hbbs_sync_async() {
+         Instant::now() + TIME_CONN,
+         TIME_CONN,
+     ));
++    #[cfg(all(steaddesk_help_merchant, any(windows, target_os = "android")))]
++    let managed = managed_heartbeat::start();
+     let mut last_sent: Option<Instant> = None;
+     let mut info_uploaded = InfoUploaded::default();
+     let mut sysinfo_ver = "".to_owned();
+@@ -233,6 +239,8 @@ async fn start_hbbs_sync_async() {
+                     continue;
+                 }
+                 last_sent = Some(Instant::now());
++                #[cfg(all(steaddesk_help_merchant, any(windows, target_os = "android")))]
++                let _ = managed.try_send(());
+                 let mut v = Value::default();
+                 v["id"] = json!(id);
+                 v["uuid"] = json!(crate::encode64(hbb_common::get_uuid()));
+diff --git a/src/platform/managed_ipv4.cpp b/src/platform/managed_ipv4.cpp
+new file mode 100644
+index 0000000..f449b7e
+--- /dev/null
++++ b/src/platform/managed_ipv4.cpp
+@@ -0,0 +1,60 @@
++#ifndef _WIN32_WINNT
++#define _WIN32_WINNT 0x0600
++#endif
++#include <winsock2.h>
++#include <ws2tcpip.h>
++#include <iphlpapi.h>
++#include <netioapi.h>
++#include <cstdint>
++#include <cstring>
++#include <limits>
++
++// Rank only live IPv4 default routes. Equal-cost routes on different
++// interfaces have no unique winner. Never fall through to a secondary NIC.
++extern "C" bool sd_managed_ipv4(unsigned char* out) {
++    MIB_IPFORWARD_TABLE2* routes = nullptr;
++    if (GetIpForwardTable2(AF_INET, &routes) != NO_ERROR) return false;
++    auto cost = (std::numeric_limits<std::uint64_t>::max)();
++    NET_IFINDEX best = 0;
++    for (ULONG i = 0; i < routes->NumEntries; ++i) {
++        const auto& row = routes->Table[i];
++        if (row.DestinationPrefix.PrefixLength != 0 || row.ValidLifetime == 0) continue;
++        MIB_IPINTERFACE_ROW iface{};
++        InitializeIpInterfaceEntry(&iface);
++        iface.Family = AF_INET;
++        iface.InterfaceLuid = row.InterfaceLuid;
++        if (GetIpInterfaceEntry(&iface) != NO_ERROR) {
++            // Its cost is unknown. We cannot prove another interface won.
++            best = 0;
++            break;
++        }
++        if (!iface.Connected || iface.DisableDefaultRoutes) continue;
++        const auto candidate = static_cast<std::uint64_t>(row.Metric) + iface.Metric;
++        if (candidate < cost) {
++            cost = candidate;
++            best = row.InterfaceIndex;
++        } else if (candidate == cost && row.InterfaceIndex != best) {
++            best = 0;
++        }
++    }
++    FreeMibTable(routes);
++    if (best == 0) return false;
++
++    MIB_UNICASTIPADDRESS_TABLE* ips = nullptr;
++    if (GetUnicastIpAddressTable(AF_INET, &ips) != NO_ERROR) return false;
++    bool found = false;
++    for (ULONG i = 0; i < ips->NumEntries; ++i) {
++        const auto& row = ips->Table[i];
++        if (row.InterfaceIndex != best || row.SkipAsSource || row.DadState != IpDadStatePreferred)
++            continue;
++        const auto* b = reinterpret_cast<const unsigned char*>(&row.Address.Ipv4.sin_addr);
++        if (b[0] == 10 || (b[0] == 172 && b[1] >= 16 && b[1] <= 31)
++                || (b[0] == 192 && b[1] == 168)) {
++            std::memcpy(out, b, 4);
++            found = true;
++            break;
++        }
++    }
++    FreeMibTable(ips);
++    return found;
++}
