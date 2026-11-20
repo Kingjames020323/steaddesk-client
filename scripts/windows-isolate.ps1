@@ -18,6 +18,11 @@ $prefix = $product.Replace(' ', '')
 $package = (Resolve-Path "$PackageDir/$prefix-$releaseVersion-x64.exe").Path
 $resource = (Get-Item -LiteralPath $package).VersionInfo
 if ($resource.FileVersion -cne $releaseVersion -or $resource.ProductVersion -cne $releaseVersion) { throw 'Unexpected package version resource' }
+if ($releaseVersion -ceq '1.5.0-sd.8-test') {
+  $fileTuple = $resource.FileMajorPart, $resource.FileMinorPart, $resource.FileBuildPart, $resource.FilePrivatePart
+  $productTuple = $resource.ProductMajorPart, $resource.ProductMinorPart, $resource.ProductBuildPart, $resource.ProductPrivatePart
+  if (($fileTuple -join '.') -cne '1.5.0.8' -or ($productTuple -join '.') -cne '1.5.0.8') { throw 'Unexpected numeric sd.8 package version' }
+}
 if ((Get-AuthenticodeSignature -LiteralPath $package).Status -ne 'NotSigned') { throw 'Expected an unsigned EXE' }
 $expected = ((Get-Content (Join-Path $PackageDir SHA256SUMS)) -split '\s+')[0]
 if ((Get-FileHash $package).Hash -ne $expected) { throw 'Package checksum mismatch' }

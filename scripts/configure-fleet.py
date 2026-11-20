@@ -52,7 +52,8 @@ def configure(tree, merchant):
 
     if enabled:
         release = (tree / "RELEASE_VERSION").read_text().strip()
-        match = re.fullmatch(r"1\.5\.0-sd\.([1-9][0-9]{0,4})", release)
+        numeric_version = "1.5.0-sd.8" if release == "1.5.0-sd.8-test" else release
+        match = re.fullmatch(r"1\.5\.0-sd\.([1-9][0-9]{0,4})", numeric_version)
         if not match or int(match[1]) > 65535:
             raise ValueError("Unsupported Windows release version")
         windows_profile = os.environ.get("STEADDESK_FLEET_WINDOWS_PROFILE", "").strip()

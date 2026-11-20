@@ -74,7 +74,8 @@ def archive(source, output):
         tree = Path(scratch).resolve() / "source"
         repos = clone_pinned(source, tree, head)
         version = (tree / "RELEASE_VERSION").read_text().strip()
-        release = re.fullmatch(r"1\.5\.0-sd\.([1-9][0-9]{0,4})", version)
+        numeric_version = "1.5.0-sd.8" if version == "1.5.0-sd.8-test" else version
+        release = re.fullmatch(r"1\.5\.0-sd\.([1-9][0-9]{0,4})", numeric_version)
         if not release or int(release[1]) > 65535:
             raise ValueError("invalid RELEASE_VERSION")
         subprocess.run(["bash", tree / "scripts/apply-patches.sh", tree / "upstream"],

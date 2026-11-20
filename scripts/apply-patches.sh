@@ -3,12 +3,14 @@ set -euo pipefail
 queue=$(cd "$(dirname "$0")/.." && pwd)
 source_tree=${1:-"$queue/upstream"}
 release_version=$(<"$queue/RELEASE_VERSION")
+numeric_release=$release_version
+if [[ $release_version == 1.5.0-sd.8-test ]]; then numeric_release=${release_version%-test}; fi
 # Each fixed Windows version component is an unsigned 16-bit word.
-if [[ ! $release_version =~ ^1\.5\.0-sd\.([1-9][0-9]{0,4})$ ]] || (( BASH_REMATCH[1] > 65535 )); then
+if [[ ! $numeric_release =~ ^1\.5\.0-sd\.([1-9][0-9]{0,4})$ ]] || (( BASH_REMATCH[1] > 65535 )); then
   echo "Expected RELEASE_VERSION 1.5.0-sd.N, with N between 1 and 65535" >&2
   exit 1
 fi
-windows_version=${release_version/-sd./.}
+windows_version=${numeric_release/-sd./.}
 cd "$source_tree"
 test "$(git rev-parse HEAD)" = fada664df7a294d1d1a9ca3e7cd3637069122f17
 test "$(git -C libs/hbb_common rev-parse HEAD)" = 229b904508364c8997aad0fb5af57effac859f60

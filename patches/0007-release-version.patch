@@ -27,7 +27,7 @@ index be7946a..6b5cbe8 100644
 -}
 +def releaseVersion = rootProject.file('../../RELEASE_VERSION').getText('UTF-8').trim()
 +// The previous distribution used Android versionCode 68.
-+def releaseCode = 68 + releaseVersion.tokenize('.').last().toInteger()
++def releaseCode = 68 + releaseVersion.tokenize('.').last().tokenize('-').first().toInteger()
  
  // Add rustls-platform-verifier Android support
  String findRustlsPlatformVerifierMavenDir() {
@@ -79,7 +79,7 @@ index 74e7cc7..2125567 100644
 +
 +        let release = include_str!("../../RELEASE_VERSION").trim();
 +        let mut numeric = 0u64;
-+        for component in release.replace("-sd.", ".").split('.') {
++        for component in release.trim_end_matches("-test").replace("-sd.", ".").split('.') {
 +            numeric = (numeric << 16) | u64::from(component.parse::<u16>()?);
 +        }
          let mut res = winres::WindowsResource::new();

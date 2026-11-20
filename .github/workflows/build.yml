@@ -61,11 +61,12 @@ name: Build SteadDesk
 permissions:
   contents: read
 env:
-  STEADDESK_POWER_MENU: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/preview/ui-v7' && inputs.steaddesk_power_menu && 'true' || 'false' }}
+  STEADDESK_POWER_MENU: ${{ github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/preview/ui-v7' || github.ref == 'refs/heads/integration/sd8') && inputs.steaddesk_power_menu && 'true' || 'false' }}
+  SD8_TEST_BUILD: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/integration/sd8' && 'true' || 'false' }}
   VERIFY_OPS_PROFILE: ${{ inputs.steaddesk_ops_integration && 'true' || 'false' }}
-  STEADDESK_TODAY: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/preview/ui-v7' && inputs.steaddesk_today && 'true' || 'false' }}
-  STEADDESK_KB: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/preview/ui-v7' && inputs.steaddesk_kb && 'true' || 'false' }}
-  STEADDESK_CALLBACK: ${{ github.event_name == 'workflow_dispatch' && github.ref_type == 'branch' && github.ref == 'refs/heads/preview/ui-v7' && inputs.steaddesk_callback && 'true' || 'false' }}
+  STEADDESK_TODAY: ${{ github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/preview/ui-v7' || github.ref == 'refs/heads/integration/sd8') && inputs.steaddesk_today && 'true' || 'false' }}
+  STEADDESK_KB: ${{ github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/preview/ui-v7' || github.ref == 'refs/heads/integration/sd8') && inputs.steaddesk_kb && 'true' || 'false' }}
+  STEADDESK_CALLBACK: ${{ github.event_name == 'workflow_dispatch' && github.ref_type == 'branch' && (github.ref == 'refs/heads/preview/ui-v7' || github.ref == 'refs/heads/integration/sd8') && inputs.steaddesk_callback && 'true' || 'false' }}
   STEADDESK_TOOLBAR: ${{ github.event_name == 'workflow_dispatch' && github.ref_type == 'branch' && inputs.steaddesk_toolbar && 'true' || 'false' }}
   STEADDESK_TOOLBAR_ACTIONS: ${{ github.event_name == 'workflow_dispatch' && github.ref_type == 'branch' && inputs.steaddesk_toolbar_actions && 'true' || 'false' }}
   STEADDESK_FLEET_ADMIN: ${{ github.event_name == 'workflow_dispatch' && github.ref_type == 'branch' && inputs.steaddesk_fleet_admin && 'true' || 'false' }}
@@ -110,7 +111,11 @@ jobs:
       shell: bash
       run: |
         version=$(cat RELEASE_VERSION)
-        [[ $version =~ ^1\.5\.0-sd\.[1-9][0-9]*$ ]]
+        if [[ "$SD8_TEST_BUILD" == true ]]; then
+          test "$version" = 1.5.0-sd.8-test
+        else
+          [[ $version =~ ^1\.5\.0-sd\.[1-9][0-9]*$ ]] || exit 1
+        fi
         if [[ $GITHUB_REF_TYPE == tag ]]; then
           test "$GITHUB_REF_NAME" = "v$version"
         fi
@@ -537,6 +542,9 @@ jobs:
         build_tools=$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -1)
         "$build_tools/aapt" dump badging "$apk" > "$RUNNER_TEMP/badging"
         grep -F "package: name='com.steaddesk.remote'" "$RUNNER_TEMP/badging" | grep -F "versionName='$version'"
+        if [[ "$SD8_TEST_BUILD" == true ]]; then
+          grep -F "package: name='com.steaddesk.remote'" "$RUNNER_TEMP/badging" | grep -F "versionCode='76'"
+        fi
         unzip -tq "$apk"
         "$build_tools/apksigner" version
         python3 - "$apk" <<'PYTHON'
@@ -577,7 +585,11 @@ jobs:
         with:
           name: SteadDesk-Android-universal
           path: merchant-apk
+      - name: Verify the downloaded merchant APK checksum
+        working-directory: merchant-apk
+        run: sha256sum --strict -c SHA256SUMS
       - name: Start AOSP API 34 emulator
+        if: env.SD8_TEST_BUILD != 'true'
         shell: bash
         run: |
           export JAVA_HOME="$JAVA_HOME_17_X64"
@@ -615,10 +627,10 @@ jobs:
             sleep 2
           done
       - name: Test provider across Binder and adb stdin
+        if: env.SD8_TEST_BUILD != 'true'
         run: |
           export JAVA_HOME="$JAVA_HOME_17_X64"
           export PATH="$ANDROID_HOME/platform-tools:$JAVA_HOME/bin:$PATH"
-          (cd merchant-apk && sha256sum --strict -c SHA256SUMS)
           STAGING_PYTHON=/usr/bin/python3 bash scripts/tests/staging/run.sh "merchant-apk/SteadDesk-$(cat RELEASE_VERSION)-universal.apk"
 
   windows:
@@ -664,7 +676,7 @@ jobs:
       run: bash .distribution/scripts/apply-patches.sh "$GITHUB_WORKSPACE"
     - name: Test signed Windows fleet packages with a disposable installer
       timeout-minutes: 15
-      if: matrix.edition == 'merchant' && matrix.job.arch == 'x86_64'
+      if: matrix.edition == 'merchant' && matrix.job.arch == 'x86_64' && env.SD8_TEST_BUILD != 'true'
       shell: pwsh
       run: |
         pwsh -NoLogo -NoProfile -NonInteractive -File .distribution/scripts/tests/windows-fleet/run.ps1 -RepoRoot .distribution
@@ -981,6 +993,9 @@ jobs:
         mkdir dist
         cp "artifacts/SteadDesk-Windows-x64-merchant/SteadDesk-$version-x64.exe" "dist/SteadDesk-$version-x64.unsigned.exe"
         cp "artifacts/SteadDesk-Android-universal/SteadDesk-$version-universal.apk" "dist/SteadDesk-$version-universal.unsigned.apk"
+        if [[ "$SD8_TEST_BUILD" == true ]]; then
+          cp "artifacts/SteadDesk-Windows-x64-support/SteadDeskSupport-$version-x64.exe" "dist/SteadDeskSupport-$version-x64.unsigned.exe"
+        fi
         cp "artifacts/SteadDesk-source/SteadDesk-$version-source.tar.gz" dist/
         (cd dist && sha256sum SteadDesk-* > SHA256SUMS && sha256sum --strict -c SHA256SUMS)
         echo "version=$version" >> "$GITHUB_OUTPUT"
