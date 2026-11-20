@@ -13,13 +13,16 @@ printf '#define STEADDESK_PRODUCT "%s"\n' "$product" > "$tree/flutter/windows/ru
 # Compile the merchant UI with the same edition selector as the native policy.
 mkdir -p "$tree/flutter/lib/steaddesk"
 staging_assets=$(cd "$(dirname "$0")/../android-staging" && pwd)
-python3 - "$tree" "$support" "$staging_assets" <<'PY'
+python3 -B - "$tree" "$support" "$staging_assets" "$(dirname "$0")" <<'PY'
 import json
 import os
 import re
 import shutil
 from pathlib import Path
 import sys
+
+sys.path.insert(0, str(Path(sys.argv[4]).resolve()))
+from edition_selectors import selectors
 
 tree = Path(sys.argv[1])
 merchant = sys.argv[2] == "false"
@@ -32,8 +35,6 @@ lib = tree / "flutter/lib/steaddesk"
 today = os.environ.get("STEADDESK_TODAY", "").strip().lower()
 if today not in ("", "0", "1", "false", "true"):
     raise ValueError("STEADDESK_TODAY must be true, false, 1 or 0")
-today_module = "host" if not merchant and today in ("1", "true") else "off"
-(lib / "today_api.dart").write_text(f"export 'today/{today_module}.dart';\n", encoding="utf-8")
 quick = os.environ.get("STEADDESK_QUICK_CHECK", "").strip().lower()
 if quick not in ("", "0", "1", "false", "true"):
     raise ValueError("STEADDESK_QUICK_CHECK must be true, false, 1 or 0")
@@ -51,19 +52,6 @@ fixed = os.environ.get("STEADDESK_TOOLBAR_ACTIONS", "").strip().lower()
 if fixed not in ("", "0", "1", "false", "true"):
     raise ValueError("STEADDESK_TOOLBAR_ACTIONS must be true, false, 1 or 0")
 fixed_enabled = fixed in ("true", "1")
-(lib / "fixed_build.dart").write_text(
-    f"const fixedSupportEnabled = {str(fixed_enabled and not merchant).lower()};\n"
-    f"const readToolbarEnabled = {str(toolbar_enabled and not merchant).lower()};\n", encoding="utf-8")
-selected = "merchant" if fixed_enabled and merchant else "off"
-(lib / "fixed_merchant_api.dart").write_text(f"export 'fixed/{selected}.dart';\n", encoding="utf-8")
-(tree / "src/steaddesk_fixed_enabled.rs").write_text(str(fixed_enabled and merchant).lower() + "\n", encoding="utf-8")
-fixed_java = tree / "flutter/android/app/src/main/java/com/carriez/flutter_hbb/FixedActionBuild.java"
-fixed_java.parent.mkdir(parents=True, exist_ok=True)
-fixed_java.write_text("package com.carriez.flutter_hbb;\nfinal class FixedActionBuild { static final boolean ENABLED = "
-    + str(fixed_enabled and merchant).lower() + "; }\n", encoding="utf-8")
-module = "host" if (toolbar_enabled or fixed_enabled) and not merchant else "off"
-(lib / "toolbar_api.dart").write_text(f"export 'toolbar/{module}.dart';\n", encoding="utf-8")
-(tree / "src/steaddesk_tb.rs").write_text(str(toolbar_enabled and merchant).lower() + "\n", encoding="utf-8")
 fleet_admin = os.environ.get("STEADDESK_FLEET_ADMIN", "").strip().lower()
 if fleet_admin not in ("", "0", "1", "false", "true"):
     raise ValueError("STEADDESK_FLEET_ADMIN must be true, false, 1 or 0")
@@ -77,19 +65,15 @@ callback = os.environ.get("STEADDESK_CALLBACK", "").strip().lower()
 if callback not in ("", "0", "1", "false", "true"):
     raise ValueError("STEADDESK_CALLBACK must be true, false, 1 or 0")
 callback_enabled = callback in ("true", "1")
-(lib / "callback_build.dart").write_text(
-    f"const merchantCallbacksEnabled = {str(callback_enabled and merchant).lower()};\n"
-    f"const supportCallbacksEnabled = {str(callback_enabled and not merchant).lower()};\n",
-    encoding="utf-8")
 kb = os.environ.get("STEADDESK_KB", "").strip().lower()
 if kb not in ("", "0", "1", "false", "true"):
     raise ValueError("STEADDESK_KB must be true, false, 1 or 0")
 kb = kb in ("true", "1")
-(lib / "kb_build.dart").write_text(
-    f"const merchantKbEnabled = {str(kb and merchant).lower()};\n"
-    f"const supportKbEnabled = {str(kb and not merchant).lower()};\n", encoding="utf-8")
-editor = "admin_host" if kb and not merchant else "admin_off"
-(lib / "kb_admin_api.dart").write_text(f"export 'kb/{editor}.dart';\n", encoding="utf-8")
+for name, content in selectors(merchant=merchant, today=today in ("1", "true"),
+        toolbar=toolbar_enabled, fixed=fixed_enabled, callback=callback_enabled, kb=kb).items():
+    dest = tree / name
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(content, encoding="utf-8")
 # Merchant cards live in the help waiting room; the admin editor is independent.
 help_enabled = help_flag in ("true", "1") or callback_enabled or (kb and merchant)
 support_help = not merchant and help_enabled
