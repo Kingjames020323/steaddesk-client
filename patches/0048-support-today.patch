@@ -43,15 +43,6 @@ index e98fa66..bbac98f 100644
    devices('Devices', Icons.devices_outlined),
    recent('Recent connections', Icons.history),
    favorites('Favorites', Icons.star_outline),
-@@ -109,7 +111,7 @@ class _SupportHomeState extends State<SupportHome> {
-     }
-   }
- 
--  var page = SupportPage.devices;
-+  var page = todayEnabled ? SupportPage.today : SupportPage.devices;
-   final search = TextEditingController();
-   final directoryKeys = {
-     for (final p in [
 @@ -399,6 +401,8 @@ class _SupportHomeState extends State<SupportHome> {
  
    Widget _body() {
@@ -61,15 +52,21 @@ index e98fa66..bbac98f 100644
        case SupportPage.devices:
        case SupportPage.recent:
        case SupportPage.favorites:
-@@ -545,8 +549,9 @@ class _SupportHomeState extends State<SupportHome> {
+@@ -545,8 +549,15 @@ class _SupportHomeState extends State<SupportHome> {
        Expanded(
            child: ListView(children: [
          for (final p in SupportPage.values)
 -          item(translate(p.label), p.icon, () => _navigate(p),
 -              selected: page == p)
 +          if (p != SupportPage.today || todayEnabled)
-+            item(translate(p.label), p.icon, () => _navigate(p),
-+                selected: page == p)
++            Semantics(
++                button: true,
++                selected: page == p,
++                label: translate(p.label),
++                excludeSemantics: true,
++                onTap: () => _navigate(p),
++                child: item(translate(p.label), p.icon, () => _navigate(p),
++                    selected: page == p))
        ])),
        Obx(() {
          final user = gFFI.userModel;

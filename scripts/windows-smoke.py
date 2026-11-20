@@ -156,6 +156,23 @@ send_keys("{ESC}")
 
 # Exercise the packaged directory and its explicit action without dialing a peer.
 wait_for("support directory", lambda: by_name(window, "Devices"))
+wait_for("device list status column on startup", lambda: by_name(window, "Status"))
+if os.environ.get("STEADDESK_TODAY") == "true":
+    # Navigation labels and page content have different roles. A visible rail
+    # button alone does not prove that its page was actually opened.
+    def nav_button(*labels):
+        return next((c for c in controls(window, labels.__contains__)
+                     if c.element_info.control_type == "Button"), None)
+
+    click_control(wait_for("Today navigation button", lambda: nav_button("今天", "Today")))
+    offline_states = {"请登录客服账号后查看今天的数据。", "暂时无法读取今天的数据。",
+                      "无权查看今天的数据。", "暂无可查看的项目。"}
+    today_state = wait_for("offline Today page", lambda: next(
+        iter(controls(window, offline_states.__contains__)), None))
+    save_evidence(window, "support-today", [today_state])
+    click_control(wait_for("Devices navigation button", lambda: nav_button("Devices")))
+    wait_for("device list status column after Today", lambda: by_name(window, "Status"))
+
 send_keys("^k")
 if recent_fixture:
     heading = wait_for("recent search heading", lambda: by_name(window, "Recent searches"))
