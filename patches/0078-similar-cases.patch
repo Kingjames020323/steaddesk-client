@@ -1,0 +1,1353 @@
+diff --git a/flutter/lib/steaddesk/cases/case_inbox.dart b/flutter/lib/steaddesk/cases/case_inbox.dart
+index feb3183..040ac2e 100644
+--- a/flutter/lib/steaddesk/cases/case_inbox.dart
++++ b/flutter/lib/steaddesk/cases/case_inbox.dart
+@@ -48,10 +48,16 @@ class CaseInbox extends ChangeNotifier {
+   }
+ }
+ 
+-final _inbox = CaseInbox(LocalCaseStore(
++final _localStore = LocalCaseStore(
+     file: () async => File(
+         '${(await getApplicationSupportDirectory()).path}/$caseStoreFileName'),
+-    writeHelp: writeHelpCase, onCorrupt: _reportRecovery));
++    writeHelp: writeHelpCase, onCorrupt: _reportRecovery);
++final _inbox = CaseInbox(_localStore);
++
++Future<List<CaseRecord>> readLinkedHelpHistory(
++        String account, String origin, String ticket, String suffix) =>
++    _localStore.savedHelpSessions(account, origin, ticket, suffix);
++
+ void _reportRecovery() => _inbox.reportRecovery();
+ Future<bool> caseEnded(Map<String, dynamic> event) =>
+     normalCasesEnabled || event['help_id'] != null ? _inbox.ended(event) : Future.value(true);
+diff --git a/flutter/lib/steaddesk/cases/case_store.dart b/flutter/lib/steaddesk/cases/case_store.dart
+index 2907f24..a365052 100644
+--- a/flutter/lib/steaddesk/cases/case_store.dart
++++ b/flutter/lib/steaddesk/cases/case_store.dart
+@@ -227,11 +227,24 @@ class LocalCaseStore implements CaseStore {
+                 scope.contains(row, storeWide: false) ||
+                 (includeStore && scope.contains(row, storeWide: true)))
+             .toList();
+-        rows.sort((a, b) {
+-          final byTime =
+-              _timestamp(b['ended_at']).compareTo(_timestamp(a['ended_at']));
+-          return byTime != 0 ? byTime : (a['id'] as String).compareTo(b['id']);
+-        });
++        rows.sort(_bySessionEnd);
++        return rows;
++      });
++
++  static int _bySessionEnd(CaseRecord a, CaseRecord b) {
++    final byTime = _timestamp(b['ended_at']).compareTo(_timestamp(a['ended_at']));
++    return byTime != 0 ? byTime : (a['id'] as String).compareTo(b['id']);
++  }
++
++  Future<List<CaseRecord>> savedHelpSessions(String account, String origin,
++          String ticket, String suffix) =>
++      _locked((_, accounts) async {
++        final rows = (accounts[account] ?? const <CaseRecord>[])
++            .where((row) => row['status'] == 'saved' &&
++                row['help_origin'] == origin && row['help_id'] == ticket &&
++                row['device_id'] is String &&
++                (row['device_id'] as String).endsWith(suffix))
++            .toList()..sort(_bySessionEnd);
+         return rows;
+       });
+ 
+diff --git a/flutter/lib/steaddesk/cases/history_ui.dart b/flutter/lib/steaddesk/cases/history_ui.dart
+index 8367ca6..102b426 100644
+--- a/flutter/lib/steaddesk/cases/history_ui.dart
++++ b/flutter/lib/steaddesk/cases/history_ui.dart
+@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
+ import 'package:flutter/services.dart';
+ 
+ import '../theme.dart';
++import '../support_appearance.dart';
+ import 'case_dialog.dart' show caseCategoryLabels, caseResultLabels;
+ 
+ const _caption = TextStyle(fontSize: 12, color: SteadDeskTheme.secondaryText);
+@@ -142,11 +143,19 @@ class CaseHistoryDrawer extends StatefulWidget {
+       required this.onEditDevice,
+       this.translate = _english,
+       required this.onAppend,
+-      this.clock});
++      this.clock}) : ticketSummary = null;
++
++  CaseHistoryDrawer.ticket({super.key, required Widget summary,
++      required List<Map<String, dynamic>> sessions, required this.onClose})
++      : ticketSummary = summary, data = {'device': sessions},
++        translate = _english, onEditDevice = null, onAppend = null, clock = null;
++
++  final Widget? ticketSummary;
+   final Map<String, dynamic> data;
+   final String Function(String) translate;
+-  final VoidCallback onClose, onEditDevice;
+-  final Future<void> Function(String scope, String id, String text) onAppend;
++  final VoidCallback onClose;
++  final VoidCallback? onEditDevice;
++  final Future<void> Function(String scope, String id, String text)? onAppend;
+   final DateTime Function()? clock;
+ 
+   @override
+@@ -191,17 +200,20 @@ class _CaseHistoryDrawerState extends State<CaseHistoryDrawer> {
+         child:
+             Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+           Row(children: [
+-            const Expanded(
++            Expanded(
+                 child: Text('历史报告',
+                     style: TextStyle(
+                         fontSize: 18,
+                         fontWeight: FontWeight.w700,
+-                        color: SteadDeskTheme.heading))),
++                        color: widget.ticketSummary == null ? SteadDeskTheme.heading : context.supportInk))),
+             IconButton(
+                 tooltip: '关闭历史报告',
+                 onPressed: widget.onClose,
+                 icon: const Icon(Icons.close, size: 19))
+           ]),
++          if (widget.ticketSummary != null)
++            widget.ticketSummary!
++          else ...[
+           Text(stats, style: _text),
+           const SizedBox(height: 4),
+           const Text('只显示本机记录，团队共享记录上线后自动合并', style: _caption),
+@@ -262,12 +274,14 @@ class _CaseHistoryDrawerState extends State<CaseHistoryDrawer> {
+                             : Icons.check_box_outline_blank,
+                         size: 16),
+                     label: const Text('只看未解决')),
+-              ])
++              ]),
++          ]
+         ]));
+     final timeline = SliverPadding(
+         padding: const EdgeInsets.symmetric(horizontal: 18),
+-        sliver: visible.isEmpty
+-            ? const SliverToBoxAdapter(
++        sliver: visible.isEmpty && widget.ticketSummary != null
++            ? const SliverToBoxAdapter(child: SizedBox.shrink())
++            : visible.isEmpty ? const SliverToBoxAdapter(
+                 child: Padding(
+                     padding: EdgeInsets.all(16),
+                     child: Center(child: Text('暂无记录', style: _caption))))
+@@ -279,8 +293,8 @@ class _CaseHistoryDrawerState extends State<CaseHistoryDrawer> {
+                     row: row,
+                     translate: widget.translate,
+                     showDevice: scope == 'store',
+-                    onAppend: (text) =>
+-                        widget.onAppend(scope, row['id'], text));
++                    onAppend: widget.onAppend == null ? null :
++                        (text) => widget.onAppend!(scope, row['id'], text));
+               }, childCount: visible.length)));
+     return Focus(
+         autofocus: true,
+@@ -303,11 +317,12 @@ class _CaseHistoryDrawerState extends State<CaseHistoryDrawer> {
+                     translation: Offset(x, 0), child: child),
+                 child: Material(
+                     elevation: 8,
+-                    color: Colors.white,
++                    color: widget.ticketSummary == null
++                        ? Colors.white : context.shade(Colors.white, Night.overlay),
+                     child: LayoutBuilder(builder: (context, box) {
+                       // Keep the pinned note visible at desktop height. Short viewports and
+                       // large accessibility text can scroll the header along with the list.
+-                      final fixed = box.maxHeight >= 490 &&
++                      final fixed = widget.ticketSummary == null && box.maxHeight >= 490 &&
+                           box.maxWidth >= 320 &&
+                           MediaQuery.textScalerOf(context).scale(14) <= 18;
+                       return Column(children: [
+@@ -353,7 +368,7 @@ class _Entry extends StatefulWidget {
+   final Map row;
+   final String Function(String) translate;
+   final bool showDevice;
+-  final Future<void> Function(String text) onAppend;
++  final Future<void> Function(String text)? onAppend;
+   @override
+   State<_Entry> createState() => _EntryState();
+ }
+@@ -376,7 +391,7 @@ class _EntryState extends State<_Entry> {
+       error = null;
+     });
+     try {
+-      await widget.onAppend(text);
++      await widget.onAppend!(text);
+       if (!mounted) return;
+       addition.clear();
+       setState(() => writing = false);
+@@ -390,6 +405,10 @@ class _EntryState extends State<_Entry> {
+   @override
+   Widget build(BuildContext context) {
+     final row = widget.row;
++    final readOnlyDark = widget.onAppend == null && context.night;
++    final captionStyle = readOnlyDark ? _caption.copyWith(color: Night.muted) : _caption;
++    final textStyle = readOnlyDark ? _text.copyWith(color: Night.text) : _text;
++    final labelStyle = readOnlyDark ? _label.copyWith(color: Night.text) : _label;
+     final note = row['note'] as String? ?? '';
+     final elapsed = DateTime.parse(row['ended_at'])
+         .difference(DateTime.parse(row['started_at']));
+@@ -409,17 +428,17 @@ class _EntryState extends State<_Entry> {
+               Expanded(
+                   child: Text(
+                       '${_localTime(row['ended_at'])} · ${row['agent']}',
+-                      style: _caption)),
+-              Text('${elapsed.inMinutes} 分钟', style: _caption)
++                      style: captionStyle)),
++              Text('${elapsed.inMinutes} 分钟', style: captionStyle)
+             ]),
+             if (widget.showDevice)
+-              Text(row['display_name'] ?? row['device_id'], style: _caption),
++              Text(row['display_name'] ?? row['device_id'], style: captionStyle),
+             const SizedBox(height: 6),
+             LayoutBuilder(builder: (context, bounds) {
+-              final heading = TextSpan(style: _text, children: [
+-                TextSpan(text: caseCategoryLabels[row['category']] ?? '未填写', style: _label),
++              final heading = TextSpan(style: textStyle, children: [
++                TextSpan(text: caseCategoryLabels[row['category']] ?? '未填写', style: labelStyle),
+                 const TextSpan(text: ' · '),
+-                TextSpan(text: caseResultLabels[result] ?? '未填写', style: _text.copyWith(color: resultColor)),
++                TextSpan(text: caseResultLabels[result] ?? '未填写', style: textStyle.copyWith(color: readOnlyDark ? Night.text : resultColor)),
+                 if (note.trim().isNotEmpty) TextSpan(text: ' · $note'),
+               ]);
+               final painter = TextPainter(text: heading, textDirection: Directionality.of(context),
+@@ -444,8 +463,8 @@ class _EntryState extends State<_Entry> {
+                               color: SteadDeskTheme.divider, width: 2))),
+                   child: Text(
+                       '追加 · ${_localTime(append['at'])} · ${append['by']}\n${append['text']}',
+-                      style: _caption)),
+-            Wrap(spacing: 8, children: [
++                      style: captionStyle)),
++            if (widget.onAppend != null) Wrap(spacing: 8, children: [
+               TextButton(
+                   style: _linkStyle,
+                   onPressed: note.isEmpty
+diff --git a/flutter/lib/steaddesk/cases/similar_report.dart b/flutter/lib/steaddesk/cases/similar_report.dart
+new file mode 100644
+index 0000000..339e264
+--- /dev/null
++++ b/flutter/lib/steaddesk/cases/similar_report.dart
+@@ -0,0 +1,120 @@
++import 'dart:async';
++
++import 'package:flutter/material.dart';
++import '../similar_cases.dart';
++import '../support_appearance.dart';
++import 'case_inbox.dart' show readLinkedHelpHistory;
++import 'history_ui.dart';
++
++typedef ReadLinkedHelpHistory = Future<List<Map<String, dynamic>>> Function(
++    String account, String origin, String ticket, String suffix);
++
++Future<void> openSimilarCaseReport(
++    BuildContext context, SimilarCase row, bool Function() current,
++    {required String account,
++    required String origin,
++    ReadLinkedHelpHistory read = readLinkedHelpHistory}) async {
++  if (!context.mounted || !current() || account.isEmpty) return;
++  await showDialog<void>(
++      context: context,
++      builder: (dialog) => _SimilarReport(
++          row: row,
++          current: current,
++          read: read,
++          account: account,
++          origin: origin));
++}
++
++class _SimilarReport extends StatefulWidget {
++  final SimilarCase row;
++  final bool Function() current;
++  final String account, origin;
++  final ReadLinkedHelpHistory read;
++  const _SimilarReport(
++      {required this.row,
++      required this.current,
++      required this.account,
++      required this.origin,
++      required this.read});
++
++  @override
++  State<_SimilarReport> createState() => _SimilarReportState();
++}
++
++class _SimilarReportState extends State<_SimilarReport> {
++  List<Map<String, dynamic>> sessions = const [];
++  bool loading = true, readFailed = false;
++  Timer? guard;
++
++  @override
++  void initState() {
++    super.initState();
++    guard = Timer.periodic(const Duration(seconds: 1), (_) {
++      if (!widget.current()) dismiss();
++    });
++    if (widget.current() && widget.row.match != 'other_store') load();
++  }
++
++  void dismiss() {
++    final route = ModalRoute.of(context);
++    if (route != null && route.isActive) route.navigator?.removeRoute(route);
++  }
++
++  Future<void> load() async {
++    try {
++      final rows = await widget.read(widget.account, widget.origin,
++          widget.row.id, widget.row.deviceSuffix);
++      if (!mounted || !widget.current()) return;
++      sessions = rows;
++    } catch (_) {
++      readFailed = true;
++    } finally {
++      if (mounted && widget.current()) setState(() => loading = false);
++    }
++  }
++
++  @override
++  void dispose() {
++    guard?.cancel();
++    super.dispose();
++  }
++
++  @override
++  Widget build(BuildContext context) {
++    if (!widget.current()) return const SizedBox.shrink();
++    final row = widget.row, other = row.match == 'other_store';
++    final local = other
++        ? '其他门店 · 仅显示结案摘要'
++        : loading
++            ? '正在读取本机报告…'
++            : readFailed
++                ? '本机会话记录读取失败'
++                : sessions.isEmpty
++                    ? '本机没有关联的已保存会话'
++                    : '关联的本机会话（${sessions.length}）';
++    final summary =
++        Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
++      SelectableText('求助单 ${row.id}',
++          style: TextStyle(
++              color: context.supportInk, fontWeight: FontWeight.w600)),
++      const SizedBox(height: 8),
++      Text('${row.dayLabel} · 设备尾号 ${row.deviceSuffix}'),
++      if (other && row.storeName != null) Text('门店 · ${row.storeName}'),
++      Text('${row.categoryLabel} · ${row.issueLabel} · ${row.resultLabel}'),
++      Text('${row.handlerLabel} · ${row.durationLabel}'),
++      if (row.card != null)
++        Text('步骤卡 · ${row.card!.title ?? row.card!.id}（v${row.card!.version}）'),
++      const SizedBox(height: 12),
++      Text(local, style: TextStyle(color: context.supportMuted)),
++      const SizedBox(height: 8),
++    ]);
++    return Dialog(
++        child: SizedBox(
++            width: 520,
++            height: 550,
++            child: CaseHistoryDrawer.ticket(
++                summary: summary,
++                sessions: sessions,
++                onClose: () => Navigator.pop(context))));
++  }
++}
+diff --git a/flutter/lib/steaddesk/device_card.dart b/flutter/lib/steaddesk/device_card.dart
+index 1822064..08dd7be 100644
+--- a/flutter/lib/steaddesk/device_card.dart
++++ b/flutter/lib/steaddesk/device_card.dart
+@@ -8,7 +8,7 @@ enum _DeviceTab {
+           bool.fromEnvironment('STEADDESK_DEVICE_PERIPHERALS')),
+   features('门店功能', true),
+   reports(
+-      'Historical reports', bool.fromEnvironment('STEADDESK_DEVICE_REPORTS'));
++      'Historical reports', supportDeviceHistoryEnabled || bool.fromEnvironment('STEADDESK_DEVICE_REPORTS'));
+ 
+   final String label;
+   final bool enabled;
+@@ -209,6 +209,10 @@ class _DeviceCardState extends State<_DeviceCard> {
+       ]));
+ 
+   Widget _additionalTab(String device) {
++    if (tab == _DeviceTab.reports) {
++      return ListView(padding: const EdgeInsets.all(16),
++          children: [supportDeviceSimilarCases(device)]);
++    }
+     if (tab == _DeviceTab.features) return StoreFeatureAdmin(device: device);
+     if (tab == _DeviceTab.peripherals && supportQuickEnabled) {
+       return OpsHealthHost(HealthSurface.inventory, device: device);
+diff --git a/flutter/lib/steaddesk/similar_case.dart b/flutter/lib/steaddesk/similar_case.dart
+new file mode 100644
+index 0000000..4b075a7
+--- /dev/null
++++ b/flutter/lib/steaddesk/similar_case.dart
+@@ -0,0 +1,127 @@
++typedef SimilarCard = ({String id, int version, String? title});
++
++final _historicalTicket = RegExp(r'^h_[a-f0-9]{32}$');
++
++class SimilarCase {
++  final String id, match, deviceSuffix, category;
++  final String? closeIssueType, closeResult, handler, storeName;
++  final DateTime endedAt;
++  final int? durationSeconds;
++  final SimilarCard? card;
++
++  const SimilarCase({
++    required this.id,
++    required this.match,
++    required this.deviceSuffix,
++    required this.category,
++    required this.closeIssueType,
++    required this.closeResult,
++    required this.handler,
++    required this.storeName,
++    required this.endedAt,
++    required this.durationSeconds,
++    required this.card,
++  });
++
++  // A reopened case, changed store or changed projection cannot authorize an older report.
++  bool sameReport(SimilarCase other) =>
++      (
++        id,
++        match,
++        deviceSuffix,
++        category,
++        closeIssueType,
++        closeResult,
++        handler,
++        storeName,
++        endedAt,
++        durationSeconds,
++        card
++      ) ==
++      (
++        other.id,
++        other.match,
++        other.deviceSuffix,
++        other.category,
++        other.closeIssueType,
++        other.closeResult,
++        other.handler,
++        other.storeName,
++        other.endedAt,
++        other.durationSeconds,
++        other.card
++      );
++
++  static String? _text(Object? value, {int max = 256}) {
++    if (value == null) return null;
++    if (value is! String ||
++        value.runes.length > max ||
++        RegExp(r'[\x00-\x1f\x7f]').hasMatch(value)) {
++      throw const FormatException('相似案例字段无效');
++    }
++    return value.isEmpty ? null : value;
++  }
++
++  factory SimilarCase.fromJson(Map<String, dynamic> row) {
++    final id = row['id'],
++        match = row['match'],
++        suffix = row['device_suffix'],
++        ended = row['ended_at'],
++        duration = row['duration_seconds'],
++        category = row['category'];
++    if (id is! String ||
++        !_historicalTicket.hasMatch(id) ||
++        !const {'device', 'store', 'other_store'}.contains(match) ||
++        suffix is! String ||
++        !RegExp(r'^\d{4}$').hasMatch(suffix) ||
++        ended is! int ||
++        ended < 0 ||
++        ended > 253402300799 ||
++        duration != null && (duration is! int || duration < 0) ||
++        category is! String ||
++        _text(category, max: 64) == null) {
++      throw const FormatException('相似案例格式无效');
++    }
++    final raw = row['card'];
++    SimilarCard? card;
++    if (raw != null) {
++      if (raw is! Map<String, dynamic> ||
++          _text(raw['id'], max: 128) == null ||
++          raw['version'] is! int ||
++          raw['version'] < 1) {
++        throw const FormatException('步骤卡格式无效');
++      }
++      card = (
++        id: raw['id'] as String,
++        version: raw['version'] as int,
++        title: _text(raw['title'])
++      );
++    }
++    return SimilarCase(
++        id: id,
++        match: match as String,
++        deviceSuffix: suffix,
++        endedAt: DateTime.fromMillisecondsSinceEpoch(ended * 1000, isUtc: true),
++        durationSeconds: duration as int?,
++        category: category,
++        closeIssueType: _text(row['close_issue_type'], max: 64),
++        closeResult: _text(row['close_result'], max: 64),
++        handler: _text(row['handler']),
++        storeName: match == 'other_store' ? _text(row['store_name']) : null,
++        card: card);
++  }
++
++  static List<SimilarCase> fromResponse(Map<String, dynamic> data,
++      {String? exclude}) {
++    final raw = data['items'];
++    if (raw is! List) throw const FormatException('相似案例列表无效');
++    final seen = <String>{if (exclude != null) exclude};
++    final items = <SimilarCase>[];
++    for (final row in raw.take(5)) {
++      if (row is! Map<String, dynamic>) throw const FormatException('相似案例格式无效');
++      final item = SimilarCase.fromJson(row);
++      if (seen.add(item.id)) items.add(item);
++    }
++    return List.unmodifiable(items);
++  }
++}
+diff --git a/flutter/lib/steaddesk/similar_cases.dart b/flutter/lib/steaddesk/similar_cases.dart
+new file mode 100644
+index 0000000..c874416
+--- /dev/null
++++ b/flutter/lib/steaddesk/similar_cases.dart
+@@ -0,0 +1,206 @@
++import 'dart:async';
++
++import 'package:flutter/material.dart';
++import 'cases/case_dialog.dart' show caseCategoryLabels, caseResultLabels;
++import 'similar_case.dart';
++import 'support_appearance.dart';
++import 'support_help.dart' show helpReasons;
++export 'similar_case.dart';
++
++class SimilarCasesSection extends StatefulWidget {
++  final Object scope;
++  final bool Function() current;
++  final Future<List<SimilarCase>> Function() load;
++  final Future<void> Function(BuildContext, SimilarCase, bool Function())
++      openReport;
++
++  const SimilarCasesSection(
++      {super.key,
++      required this.scope,
++      required this.current,
++      required this.load,
++      required this.openReport});
++
++  @override
++  State<SimilarCasesSection> createState() => _SimilarCasesSectionState();
++}
++
++class _SimilarCasesSectionState extends State<SimilarCasesSection> {
++  List<SimilarCase> _rows = const [];
++  Timer? _guard, _poll;
++  int _generation = 0, _scopeEpoch = 0;
++  bool _permitted = false, _opening = false;
++  DateTime? _expires;
++  bool get _active => mounted && widget.current();
++  bool get _fresh => _expires?.isAfter(DateTime.now()) ?? false;
++
++  @override
++  void initState() {
++    super.initState();
++    _permitted = _active;
++    if (_permitted) unawaited(_read());
++    _guard = Timer.periodic(const Duration(seconds: 1), (_) {
++      if (_permitted != _active) {
++        _permitted = _active;
++        _invalidate();
++        if (_permitted) unawaited(_read());
++      } else if (_rows.isNotEmpty && !_fresh) {
++        setState(() => _rows = const []);
++      }
++    });
++    _poll = Timer.periodic(const Duration(seconds: 15), (_) {
++      if (_active && !_opening) unawaited(_read());
++    });
++  }
++
++  void _invalidate() {
++    _generation++;
++    _scopeEpoch++;
++    _opening = false;
++    _expires = null;
++    if (_rows.isNotEmpty) setState(() => _rows = const []);
++  }
++
++  @override
++  void didUpdateWidget(SimilarCasesSection old) {
++    super.didUpdateWidget(old);
++    if (old.scope != widget.scope || _permitted != _active) {
++      _invalidate();
++      _permitted = _active;
++      if (_permitted) unawaited(_read());
++    }
++  }
++
++  Future<List<SimilarCase>> _read() async {
++    final generation = ++_generation;
++    try {
++      final rows = await widget.load();
++      if (!_active || generation != _generation) return const [];
++      setState(() {
++        _rows = rows.take(5).toList(growable: false);
++        _expires = DateTime.now().add(const Duration(seconds: 30));
++      });
++      return _rows;
++    } catch (_) {
++      if (mounted && generation == _generation) {
++        _expires = null;
++        setState(() => _rows = const []);
++      }
++      return const [];
++    }
++  }
++
++  Future<void> _open(SimilarCase row) async {
++    if (_opening || !_active || !_fresh) return;
++    final epoch = _scopeEpoch;
++    _opening = true;
++    try {
++      final latest = await _read();
++      if (!_active || epoch != _scopeEpoch) return;
++      for (final item in latest) {
++        if (item.id != row.id) continue;
++        bool current() =>
++            _active &&
++            epoch == _scopeEpoch &&
++            _fresh &&
++            _rows.any(item.sameReport);
++        if (current()) {
++          // The report stays subject to the same periodic permission checks as its list.
++          _opening = false;
++          await widget.openReport(context, item, current);
++        }
++        return;
++      }
++    } finally {
++      if (mounted && epoch == _scopeEpoch) _opening = false;
++    }
++  }
++
++  @override
++  void dispose() {
++    _generation++;
++    _guard?.cancel();
++    _poll?.cancel();
++    super.dispose();
++  }
++
++  @override
++  Widget build(BuildContext context) {
++    if (!_active || !_fresh || _rows.isEmpty) return const SizedBox.shrink();
++    return Padding(
++        padding: const EdgeInsets.only(top: 10, bottom: 4),
++        child:
++            Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
++          Text('以前类似的单子',
++              style: Theme.of(context).textTheme.titleSmall?.copyWith(
++                  fontWeight: FontWeight.w600, color: context.supportInk)),
++          const SizedBox(height: 4),
++          for (final row in _rows)
++            InkWell(
++                onTap: () => _open(row),
++                child: Container(
++                    padding: const EdgeInsets.symmetric(vertical: 7),
++                    decoration: BoxDecoration(
++                        border: Border(
++                            top: BorderSide(color: context.supportLine))),
++                    child: Row(children: [
++                      Expanded(
++                          child: Column(
++                              crossAxisAlignment: CrossAxisAlignment.start,
++                              children: [
++                            Text(
++                                '${row.dayLabel} · ${row.categoryLabel} · ${row.issueLabel}',
++                                style: Theme.of(context)
++                                    .textTheme
++                                    .bodyMedium
++                                    ?.copyWith(color: context.supportInk)),
++                            Text(
++                                [
++                                  if (row.storeName != null) row.storeName!,
++                                  row.resultLabel,
++                                  row.handlerLabel,
++                                  row.durationLabel,
++                                ].join(' · '),
++                                style: Theme.of(context)
++                                    .textTheme
++                                    .bodySmall
++                                    ?.copyWith(color: context.supportMuted)),
++                            if (row.card case final card?)
++                              Text(
++                                  '步骤卡 · ${card.title ?? '${card.id} · v${card.version}'}',
++                                  style: Theme.of(context)
++                                      .textTheme
++                                      .bodySmall
++                                      ?.copyWith(color: context.supportAccent)),
++                          ])),
++                      Icon(Icons.chevron_right,
++                          size: 16, color: context.supportMuted),
++                    ]))),
++        ]));
++  }
++}
++
++String _date(DateTime date) {
++  final d = date.toLocal();
++  String pad(int n) => n.toString().padLeft(2, '0');
++  return '${d.year}-${pad(d.month)}-${pad(d.day)}';
++}
++
++String _duration(int sec) {
++  if (sec < 60) return '用时 $sec 秒';
++  if (sec < 3600) return '用时 ${sec ~/ 60} 分';
++  return '用时 ${sec ~/ 3600} 小时 ${sec % 3600 ~/ 60} 分';
++}
++
++extension SimilarCaseLabels on SimilarCase {
++  String get dayLabel => _date(endedAt);
++  String get categoryLabel => helpReasons[category] ?? '其他';
++  String get issueLabel => caseCategoryLabels[closeIssueType] ?? '未记录问题类型';
++  String get resultLabel => closeResult == 'self_resolved'
++      ? '商户自助解决'
++      : caseResultLabels[closeResult] ?? '未记录结果';
++  String get handlerLabel =>
++      handler ?? (closeResult == 'self_resolved' ? '商户' : '未记录处理人');
++  String get durationLabel =>
++      durationSeconds == null ? '用时未记录' : _duration(durationSeconds!);
++}
+diff --git a/flutter/lib/steaddesk/support_help.dart b/flutter/lib/steaddesk/support_help.dart
+index e9e74f1..377cbb6 100644
+--- a/flutter/lib/steaddesk/support_help.dart
++++ b/flutter/lib/steaddesk/support_help.dart
+@@ -3,6 +3,7 @@ import 'dart:io';
+ 
+ import 'package:uuid/uuid.dart';
+ import 'ops_groups.dart' show opsEndpoint;
++import 'similar_case.dart';
+ 
+ typedef HelpRow = Map<String, dynamic>;
+ const helpCategories = {
+@@ -202,6 +203,25 @@ class SupportHelpApi {
+ 
+   Future<HelpRow> detail(String id) => _request(_ticket(id));
+ 
++  Future<List<SimilarCase>> similarForTicket(String id) {
++    _ticket(id);
++    return _similar('help/tickets/$id/similar', exclude: id);
++  }
++
++  Future<List<SimilarCase>> similarForDevice(String device) {
++    if (!RegExp(r'^[0-9]{9,10}$').hasMatch(device)) {
++      throw const HelpStaffError(404);
++    }
++    return _similar('help/devices/$device/similar');
++  }
++
++  Future<List<SimilarCase>> _similar(String route, {String? exclude}) async {
++    if (base.scheme != 'https') throw const HelpStaffError(403);
++    final data = await _request(route, method: 'GET');
++    check();
++    return SimilarCase.fromResponse(data, exclude: exclude);
++  }
++
+   Future<HelpRow> callbackOutcome(HelpRow row, String outcome) {
+     if (!ownsCallback(row, account) ||
+         row['callback']['due'] != true ||
+diff --git a/flutter/lib/steaddesk/support_help_host.dart b/flutter/lib/steaddesk/support_help_host.dart
+index 113be94..692cfc1 100644
+--- a/flutter/lib/steaddesk/support_help_host.dart
++++ b/flutter/lib/steaddesk/support_help_host.dart
+@@ -6,8 +6,11 @@ import 'package:uuid/uuid.dart';
+ import '../common.dart' show connect, gFFI;
+ import '../models/platform_model.dart' show bind;
+ import 'callback_build.dart';
++import 'similar_cases.dart';
++import 'cases/similar_report.dart';
+ import 'case_session_api.dart' show CaseSession;
+ import 'support_help.dart';
++import 'ops_groups.dart' show opsEndpoint;
+ import 'store_feature_rows.dart';
+ import 'store_features.dart';
+ import 'support_help_queue.dart';
+@@ -28,6 +31,29 @@ _Login? _login() {
+ Uri? _configuredOrigin() =>
+     Uri.tryParse(bind.mainGetOptionSync(key: 'api-server'));
+ 
++const supportDeviceHistoryEnabled = true;
++
++Widget supportDeviceSimilarCases(String device) {
++  final login = _login(), origin = _configuredOrigin();
++  if (login == null || origin == null) return const SizedBox.shrink();
++  bool current() => login == _login() && origin == _configuredOrigin();
++  return SimilarCasesSection(
++    scope: (login, origin, device),
++    current: current,
++    load: () async {
++      final api = SupportHelpApi(origin, login.account, login.token, current);
++      try {
++        return await api.similarForDevice(device);
++      } finally {
++        api.dispose();
++      }
++    },
++    openReport: (context, row, permitted) => openSimilarCaseReport(
++        context, row, permitted, account: login.account,
++        origin: opsEndpoint(origin).toString()),
++  );
++}
++
+ Future<void> writeHelpCase(HelpRow row, String issue, String result) async {
+   final login = _login();
+   if (login == null || login.account != row['agent'])
+@@ -236,6 +262,10 @@ class _SupportHelpHeaderState extends State<SupportHelpHeader> {
+                     valueListenable: queueChanges,
+                     builder: (_, revision, __) => SupportHelpQueue(
+                         api: active,
++                        openSimilarReport: (context, row, current) =>
++                            openSimilarCaseReport(context, row, current,
++                                account: active.account,
++                                origin: active.base.toString()),
+                         allowAction: (row, feature) async {
+                           final peer = verifiedHelpDevice(row);
+                           if (peer == null) return false;
+diff --git a/flutter/lib/steaddesk/support_help_off.dart b/flutter/lib/steaddesk/support_help_off.dart
+index bb3759a..a8646da 100644
+--- a/flutter/lib/steaddesk/support_help_off.dart
++++ b/flutter/lib/steaddesk/support_help_off.dart
+@@ -1,5 +1,8 @@
+ import 'package:flutter/widgets.dart';
+ 
++const supportDeviceHistoryEnabled = false;
++Widget supportDeviceSimilarCases(String device) => const SizedBox.shrink();
++
+ class SupportHelpHeader extends StatelessWidget {
+   const SupportHelpHeader({super.key});
+   @override
+diff --git a/flutter/lib/steaddesk/support_help_queue.dart b/flutter/lib/steaddesk/support_help_queue.dart
+index 8c596f5..0c0926b 100644
+--- a/flutter/lib/steaddesk/support_help_queue.dart
++++ b/flutter/lib/steaddesk/support_help_queue.dart
+@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
+ import 'package:uuid/uuid.dart';
+ import 'cases/case_dialog.dart' show caseCategoryLabels, caseResultLabels;
+ import 'support_help.dart';
++import 'similar_cases.dart';
+ import 'callback_build.dart';
+ import 'package:flutter_hbb/steaddesk/toolbar_api.dart';
+ 
+@@ -13,6 +14,7 @@ class SupportHelpQueue extends StatefulWidget {
+   final Future<void> Function() onRefresh;
+   final Future<bool> Function(HelpRow row, String feature)? allowAction;
+   final Future<void> Function(HelpRow) onConnect;
++  final Future<void> Function(BuildContext, SimilarCase, bool Function())? openSimilarReport;
+   const SupportHelpQueue(
+       {super.key,
+       required this.api,
+@@ -20,6 +22,7 @@ class SupportHelpQueue extends StatefulWidget {
+       required this.error,
+       this.callbacksEnabled = supportCallbacksEnabled,
+       this.allowAction,
++      this.openSimilarReport,
+       required this.onRefresh,
+       required this.onConnect});
+   @override
+@@ -33,6 +36,10 @@ class _SupportHelpQueueState extends State<SupportHelpQueue> {
+   @override
+   void didUpdateWidget(SupportHelpQueue old) {
+     super.didUpdateWidget(old);
++    if (!identical(widget.api,old.api)) {
++      details.clear();
++      stores.clear();
++    }
+     if (!identical(widget.rows, old.rows)) {
+       final activeKeys = (widget.rows ?? const <HelpRow>[])
+           .map((r) => (r['id'] as String, r['version'] as int))
+@@ -43,14 +50,18 @@ class _SupportHelpQueueState extends State<SupportHelpQueue> {
+   }
+ 
+   Future<HelpRow> _detail(HelpRow row) async {
+-    final data = await widget.api.detail(row['id']);
+-    if (data['state'] != row['state'] || data['version'] != row['version'])
++    final api = widget.api;
++    final data = await api.detail(row['id']);
++    if (!mounted || !identical(widget.api, api)) throw const HelpStaffError(401);
++    if (data['state'] != row['state'] || data['version'] != row['version'] ||
++        row['group_id'] != null && data['group_id'] != row['group_id']) {
+       throw const HelpStaffError(409);
++    }
+     final group = data['group_id'];
+     if (group is String && data['lane'] == 'verified') {
+       try {
+         data['store_name'] =
+-            await stores.putIfAbsent(group, () => widget.api.storeName(group));
++            await stores.putIfAbsent(group, () => api.storeName(group));
+       } on HelpStaffError catch (e) {
+         stores.remove(group);
+         if (e.status != 404 && e.status != 403) rethrow;
+@@ -59,8 +70,9 @@ class _SupportHelpQueueState extends State<SupportHelpQueue> {
+     final history = (data['history'] as List).cast<HelpRow>();
+     if (history.any((e) => e['kind'] == 'help.diagnostic_updated') &&
+         data['lane'] == 'unverified') {
+-      data['client_health'] = await widget.api.clientHealth(row['id']);
++      data['client_health'] = await api.clientHealth(row['id']);
+     }
++    if (!mounted || !identical(widget.api, api)) throw const HelpStaffError(401);
+     return data;
+   }
+ 
+@@ -185,6 +197,24 @@ class _SupportHelpQueueState extends State<SupportHelpQueue> {
+     }
+   }
+ 
++  Widget _similar(HelpRow row) {
++    final id = row['id'];
++    final report = widget.openSimilarReport;
++    if (report == null || row['lane'] != 'verified' || id is! String ||
++        !RegExp(r'^h_[a-f0-9]{32}$').hasMatch(id)) {
++      return const SizedBox.shrink();
++    }
++    final api = widget.api;
++    final version = row['version'], group = row['group_id'];
++    return SimilarCasesSection(
++      scope: (api, id, version, group),
++      current: () => mounted && identical(widget.api,api) && api.current() &&
++          (widget.rows?.any((r) => r['id']==id && r['version']==version && r['group_id']==group) ?? false),
++      load: () => api.similarForTicket(id),
++      openReport: report,
++    );
++  }
++
+   Widget _callbackEntry(HelpRow row) {
+     final cb = row['callback'] as Map;
+     final stamp = cb['due_at'];
+@@ -229,12 +259,13 @@ class _SupportHelpQueueState extends State<SupportHelpQueue> {
+               ])
+             else
+               const Text('其他客服已认领'),
++            _similar(row),
+           ]),
+         ));
+   }
+ 
+   Widget _entry(HelpRow row) => FutureBuilder<HelpRow>(
+-      key: ValueKey((row['id'], row['version'])),
++      key: ValueKey((widget.api, row['id'], row['version'])),
+       future:
+           details.putIfAbsent((row['id'], row['version']), () => _detail(row)),
+       builder: (_, snap) {
+@@ -261,25 +292,27 @@ class _SupportHelpQueueState extends State<SupportHelpQueue> {
+             '电话：未提供',
+           ]
+         ];
+-        return ListTile(
++        return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
++          ListTile(
+             title: Text('$store · ${helpReasons[row['category']] ?? '其他'}'),
+-            subtitle: toolbarEnabled && verified && claimed
+-                ? Column(
+-                    crossAxisAlignment: CrossAxisAlignment.start,
+-                    children: [
+-                        Text(caption.join(' · ')),
+-                        toolbarCaseAttachments(
+-                            account: widget.api.account,
+-                            peer: row['device_id'] ?? '',
+-                            caseId: '',
+-                            ticket: row['id'],
+-                            origin: widget.api.base.toString()),
+-                      ])
+-                : Text(caption.join(' · ')),
++            subtitle: Column(
++              crossAxisAlignment: CrossAxisAlignment.start, children: [
++                Text(caption.join(' · ')),
++                if (toolbarEnabled && verified && claimed)
++                  toolbarCaseAttachments(
++                      account: widget.api.account,
++                      peer: row['device_id'] ?? '',
++                      caseId: '',
++                      ticket: row['id'],
++                      origin: widget.api.base.toString()),
++              ]),
+             trailing: TextButton(
+                 onPressed:
+                     busy == null && detail != null ? () => _act(row) : null,
+-                child: Text(claimed ? (verified ? '连接' : '人工结案') : '认领')));
++                child: Text(claimed ? (verified ? '连接' : '人工结案') : '认领'))),
++          if (detail != null)
++            Padding(padding: const EdgeInsets.symmetric(horizontal: 16), child: _similar(row)),
++        ]);
+       });
+ 
+   @override
+diff --git a/flutter/test/steaddesk/similar_cases_test.dart b/flutter/test/steaddesk/similar_cases_test.dart
+new file mode 100644
+index 0000000..f1ca107
+--- /dev/null
++++ b/flutter/test/steaddesk/similar_cases_test.dart
+@@ -0,0 +1,208 @@
++import 'dart:async';
++import 'package:flutter/material.dart';
++import 'package:flutter_test/flutter_test.dart';
++import 'package:flutter_hbb/steaddesk/similar_cases.dart';
++import 'package:flutter_hbb/steaddesk/cases/similar_report.dart';
++import 'package:flutter_hbb/steaddesk/support_help.dart';
++import 'package:flutter_hbb/steaddesk/support_help_queue.dart';
++
++String ticketId(int n) => 'h_${n.toRadixString(16).padLeft(32, '0')}';
++
++Map<String, dynamic> projection(int num,
++        {String match = 'device', bool self = false}) =>
++    {
++      'id': ticketId(num),
++      'match': match,
++      'device_suffix': '7890',
++      'category': 'printer',
++      'close_issue_type': 'network',
++      'close_result': self ? 'self_resolved' : 'resolved',
++      'handler': self ? null : '林敏',
++      'ended_at': 1795000000 - num * 86400,
++      'duration_seconds': self ? null : 540,
++      'store_name': match == 'other_store' ? '河畔门店' : '不得展示内部名',
++      'card': self
++          ? {'id': 'receipt-paper', 'version': 3, 'title': '检查收据纸卷方向'}
++          : null,
++      'message': '私密留言',
++      'screenshot': '私密截图',
++      'device_id': '123457890',
++    };
++
++class SimilarFixtureApi extends Fake implements SupportHelpApi {
++  @override
++  String get account => 'fixture';
++  @override
++  Uri get base => Uri.parse('https://example.invalid/ops/v1/');
++  final rows = <String, HelpRow>{};
++  @override
++  Future<HelpRow> detail(String id) async => rows[id]!;
++  @override
++  Future<String?> storeName(String? id) async => '枫林门店';
++  final cases = <SimilarCase>[];
++  bool allowed = true;
++  @override
++  bool Function() get current => () => allowed;
++  @override
++  Future<List<SimilarCase>> similarForTicket(String id) async => cases;
++}
++
++class Source {
++  Object scope = 'first';
++  bool granted = true;
++  bool Function()? guard;
++  Future<void> Function(BuildContext, SimilarCase, bool Function())? open;
++  Future<List<SimilarCase>> Function() fetch = () async => [];
++  Widget page() => MaterialApp(
++          home: Scaffold(
++              body: SimilarCasesSection(
++        scope: scope,
++        current: () => granted,
++        load: () => fetch(),
++        openReport: (context, item, current) async {
++          guard = current;
++          await open?.call(context, item, current);
++        },
++      )));
++}
++
++void main() {
++  test(
++      'projection excludes source, duplicates and private fields and caps at five',
++      () {
++    final docs = [for (var i = 1; i <= 8; i++) projection(i)];
++    final seen = SimilarCase.fromResponse({'items': docs});
++    expect(seen.map((r) => r.id), [for (var i = 1; i <= 5; i++) ticketId(i)]);
++    expect(seen.first.storeName, isNull);
++    expect(
++        SimilarCase.fromResponse({
++          'items': [docs.first, docs.first, docs[1]]
++        }, exclude: ticketId(2)),
++        hasLength(1));
++    for (final map in [
++      {'device_suffix': '123456789'},
++      {'match': 'private'},
++      {'id': '../../help'},
++      {'duration_seconds': -1}
++    ]) {
++      expect(() => SimilarCase.fromJson({...docs.first, ...map}),
++          throwsFormatException);
++    }
++    final api = SupportHelpApi(
++        Uri.parse('http://127.0.0.1'), 'fixture', 'test', () => true);
++    addTearDown(api.dispose);
++    expect(() => api.similarForTicket('h_../../credentials'),
++        throwsA(isA<HelpStaffError>()));
++    expect(() => api.similarForDevice('123456789/..'),
++        throwsA(isA<HelpStaffError>()));
++    return expectLater(api.similarForTicket(ticketId(1)),
++        throwsA(isA<HelpStaffError>().having((e) => e.status, 'status', 403)));
++  });
++
++  testWidgets(
++      'verified intake renders authorized fields, self-help card and never shows private extras',
++      (t) async {
++    final api = SimilarFixtureApi()
++      ..cases.addAll([
++        SimilarCase.fromJson(projection(1)),
++        SimilarCase.fromJson(projection(2, match: 'store')),
++        SimilarCase.fromJson(projection(3, match: 'other_store', self: true)),
++      ]);
++    final id = ticketId(10);
++    api.rows[id] = {
++      'id': id,
++      'version': 1,
++      'lane': 'verified',
++      'state': 'queued',
++      'group_id': 'g_fixture',
++      'device_id': '123457890',
++      'created_at': 1795000000,
++      'category': 'printer',
++      'history': []
++    };
++    await t.binding.setSurfaceSize(const Size(1100, 800));
++    addTearDown(() => t.binding.setSurfaceSize(null));
++    await t.pumpWidget(MaterialApp(
++        home: SupportHelpQueue(
++            api: api,
++            rows: api.rows.values.toList(),
++            error: null,
++            onRefresh: () async {},
++            openSimilarReport: (ctx, r, current) => openSimilarCaseReport(
++                ctx, r, current,
++                account: api.account,
++                origin: api.base.toString(),
++                read: (_, __, ___, ____) async =>
++                    fail('Cross-store local read')),
++            onConnect: (_) async {})));
++    await t.pumpAndSettle();
++    expect(find.text('以前类似的单子'), findsOneWidget);
++    expect(find.textContaining('打印机 · 网络'), findsNWidgets(3));
++    expect(find.textContaining('已解决 · 林敏 · 用时 9 分'), findsNWidgets(2));
++    expect(find.textContaining('河畔门店 · 商户自助解决'), findsOneWidget);
++    expect(find.text('步骤卡 · 检查收据纸卷方向'), findsOneWidget);
++    for (final forbidden in ['不得展示内部名', '私密留言', '私密截图', '123457890']) {
++      expect(find.textContaining(forbidden), findsNothing);
++    }
++    await t.tap(find.text('步骤卡 · 检查收据纸卷方向'));
++    await t.pumpAndSettle();
++    expect(find.text('历史报告'), findsOneWidget);
++    expect(find.text('其他门店 · 仅显示结案摘要'), findsOneWidget);
++    api.allowed = false;
++    await t.pump(const Duration(seconds: 2));
++    await t.pumpAndSettle();
++    expect(find.text('历史报告'), findsNothing);
++    expect(find.text('以前类似的单子'), findsNothing);
++    await t.pumpWidget(const SizedBox());
++  });
++
++  testWidgets(
++      'empty and revoked sections disappear; a delayed old ticket cannot cross accounts',
++      (t) async {
++    final stale = Completer<List<SimilarCase>>();
++    final source = Source()..fetch = (() => stale.future);
++    await t.pumpWidget(source.page());
++    expect(find.text('以前类似的单子'), findsNothing);
++    source.scope = 'second';
++    source.fetch = () async => [];
++    await t.pumpWidget(source.page());
++    stale.complete([SimilarCase.fromJson(projection(1))]);
++    await t.pumpAndSettle();
++    expect(find.text('以前类似的单子'), findsNothing);
++    source.scope = 'third';
++    source.fetch = () async =>
++        [SimilarCase.fromJson(projection(3, match: 'other_store', self: true))];
++    await t.pumpWidget(source.page());
++    await t.pumpAndSettle();
++    expect(find.textContaining('河畔门店'), findsOneWidget);
++    source.granted = false;
++    await t.pump(const Duration(seconds: 1));
++    expect(find.text('以前类似的单子'), findsNothing);
++    await t.pumpWidget(const SizedBox());
++  });
++
++  testWidgets(
++      'tap rechecks visibility and an open report loses authority when the same case changes tier',
++      (t) async {
++    final source = Source();
++    var row = SimilarCase.fromJson(projection(3));
++    source.fetch = () async => [row];
++    await t.pumpWidget(source.page());
++    await t.pumpAndSettle();
++    final anchor = find.textContaining('林敏');
++    await t.tap(anchor);
++    await t.pumpAndSettle();
++    expect(source.guard!(), isTrue);
++    row = SimilarCase.fromJson(projection(3, match: 'other_store', self: true));
++    await t.pump(const Duration(seconds: 15));
++    await t.pumpAndSettle();
++    expect(source.guard!(), isFalse);
++    source.guard = null;
++    source.fetch = () async => throw const HelpStaffError(404);
++    await t.tap(find.textContaining('河畔门店'));
++    await t.pumpAndSettle();
++    expect(source.guard, isNull);
++    expect(find.text('以前类似的单子'), findsNothing);
++    await t.pumpWidget(const SizedBox());
++  });
++}
+diff --git a/flutter/test/steaddesk/similar_report_test.dart b/flutter/test/steaddesk/similar_report_test.dart
+new file mode 100644
+index 0000000..aa53824
+--- /dev/null
++++ b/flutter/test/steaddesk/similar_report_test.dart
+@@ -0,0 +1,152 @@
++import 'dart:io';
++import 'package:flutter/material.dart';
++import 'package:flutter_test/flutter_test.dart';
++import 'package:flutter_hbb/steaddesk/cases/case_store.dart';
++import 'package:flutter_hbb/steaddesk/cases/history_ui.dart';
++import 'package:flutter_hbb/steaddesk/cases/similar_report.dart';
++import 'package:flutter_hbb/steaddesk/similar_cases.dart';
++
++const origin = 'https://fixture.invalid/ops/v1/';
++const ticket = 'h_0123456789abcdef0123456789abcdef';
++const account = 'fixture-support';
++
++Map<String, dynamic> entry(int i, String owner, String suffix,
++        {String help = ticket, String host = origin}) =>
++    {
++      'id': '00000000-0000-4000-8000-${i.toString().padLeft(12, '0')}',
++      'device_id': '12345$suffix',
++      'help_id': help,
++      'help_origin': host,
++      'started_at': '2026-11-02T02:04:00.000Z',
++      'ended_at': '2026-11-02T02:07:00.000Z',
++      'agent': owner,
++      'note': 'local note $i',
++      'category': 'printer',
++      'result': 'resolved',
++      'appends': [],
++    };
++
++SimilarCase historical(String match) => SimilarCase.fromJson({
++      'id': ticket,
++      'match': match,
++      'device_suffix': '6789',
++      'ended_at': 1793585400,
++      'category': 'printer',
++      'close_issue_type': 'printer',
++      'close_result': 'resolved',
++      'handler': 'fixture-handler',
++      'duration_seconds': 303,
++      'card': {'id': 'fixture-card', 'version': 3, 'title': 'Paper check'},
++      if (match == 'other_store') 'store_name': 'Sample west',
++    });
++
++Future<void> mountSection(WidgetTester tester, String match,
++    ReadLinkedHelpHistory read, bool Function() current,
++    {Brightness brightness = Brightness.light}) async {
++  await tester.pumpWidget(MaterialApp(
++      theme: ThemeData(brightness: brightness),
++      home: Scaffold(
++          body: SimilarCasesSection(
++              scope: match,
++              current: current,
++              load: () async => [historical(match)],
++              openReport: (context, row, canRead) => openSimilarCaseReport(
++                  context, row, canRead,
++                  account: account, origin: origin, read: read)))));
++  await tester.pump();
++  expect(find.text('以前类似的单子'), findsOneWidget);
++  await tester.tap(find
++      .descendant(
++          of: find.byType(SimilarCasesSection), matching: find.byType(InkWell))
++      .first);
++  await tester.pumpAndSettle();
++}
++
++void main() {
++  test(
++      'local history reopens only same account, origin, ticket, suffix, and saved state',
++      () async {
++    final dir = await Directory.systemTemp.createTemp('similar-history-test');
++    addTearDown(() => dir.delete(recursive: true));
++    LocalCaseStore store() => LocalCaseStore(
++        file: () async => File('${dir.path}/$caseStoreFileName'),
++        writeHelp: (_, __, ___) async {});
++    final db = store();
++    for (var i = 0; i < 7; i++) {
++      final owner = i == 2 ? 'different-account' : account;
++      final row = entry(i, owner, i == 3 ? '0000' : '6789',
++          help: i == 4 ? 'different-ticket' : ticket,
++          host: i == 5 ? 'https://another.invalid/ops/v1/' : origin);
++      await db.addDraft(owner, row);
++      if (i != 6)
++        await db.save(owner, row['id'],
++            category: 'printer', result: 'resolved', note: row['note']);
++    }
++    final rows =
++        await store().savedHelpSessions(account, origin, ticket, '6789');
++    expect(rows.map((r) => r['note']),
++        unorderedEquals(['local note 0', 'local note 1']));
++    expect(
++        rows.every((r) => r['id'] != ticket && r['help_id'] == ticket), isTrue);
++  });
++
++  testWidgets(
++      'selected same-store ticket displays exact local session in 0025, read-only',
++      (t) async {
++    int reads = 0;
++    await mountSection(t, 'store', (a, o, id, suffix) async {
++      reads++;
++      expect([a, o, id, suffix], [account, origin, ticket, '6789']);
++      return [entry(1, account, '6789')];
++    }, () => true, brightness: Brightness.dark);
++    expect(reads, 1);
++    expect(find.byType(CaseHistoryDrawer), findsOneWidget);
++    expect(find.text('历史报告'), findsOneWidget);
++    expect(find.text('求助单 $ticket'), findsOneWidget);
++    expect(find.text('3 分钟'), findsOneWidget);
++    expect(find.textContaining('local note 1', findRichText: true),
++        findsOneWidget);
++    expect(find.textContaining('用时 5 分'), findsWidgets);
++    expect(find.text('追加说明'), findsNothing);
++    expect(find.text('编辑'), findsNothing);
++    expect(find.text('其他门店 · 仅显示结案摘要'), findsNothing);
++    await t.tap(find.byTooltip('关闭历史报告'));
++    await t.pumpAndSettle();
++    expect(find.byType(CaseHistoryDrawer), findsNothing);
++    await t.pumpWidget(const SizedBox());
++  });
++
++  testWidgets('missing local session still opens ticket and discloses source',
++      (t) async {
++    await mountSection(t, 'device', (_, __, ___, ____) async => [], () => true);
++    expect(find.text('本机没有关联的已保存会话'), findsOneWidget);
++    expect(find.text('求助单 $ticket'), findsOneWidget);
++    expect(find.text('暂无记录'), findsNothing);
++    await t.pumpWidget(const SizedBox());
++  });
++
++  testWidgets(
++      'other-store opens projected report without reading local notes; revoked scope closes it',
++      (t) async {
++    bool allowed = true;
++    int reads = 0;
++    await mountSection(t, 'other_store', (a, o, id, suffix) async {
++      reads++;
++      return [entry(9, account, '6789')];
++    }, () => allowed);
++    expect(reads, 0);
++    expect(find.byType(CaseHistoryDrawer), findsOneWidget);
++    expect(find.text('求助单 $ticket'), findsOneWidget);
++    expect(find.text('门店 · Sample west'), findsOneWidget);
++    expect(find.text('其他门店 · 仅显示结案摘要'), findsOneWidget);
++    expect(
++        find.textContaining('local note 9', findRichText: true), findsNothing);
++    expect(find.textContaining('Paper check'), findsWidgets);
++    allowed = false;
++    await t.pump(const Duration(seconds: 1));
++    await t.pumpAndSettle();
++    expect(find.byType(CaseHistoryDrawer), findsNothing);
++    expect(find.text('以前类似的单子'), findsNothing);
++    await t.pumpWidget(const SizedBox());
++  });
++}
