@@ -43,16 +43,20 @@ index e98fa66..bbac98f 100644
    devices('Devices', Icons.devices_outlined),
    recent('Recent connections', Icons.history),
    favorites('Favorites', Icons.star_outline),
-@@ -399,6 +401,8 @@ class _SupportHomeState extends State<SupportHome> {
+@@ -399,6 +401,12 @@ class _SupportHomeState extends State<SupportHome> {
  
    Widget _body() {
      switch (page) {
 +      case SupportPage.today:
-+        return const TodayHost();
++        return Semantics(
++            container: true,
++            explicitChildNodes: true,
++            label: '今天概览',
++            child: const TodayHost());
        case SupportPage.devices:
        case SupportPage.recent:
        case SupportPage.favorites:
-@@ -545,8 +549,15 @@ class _SupportHomeState extends State<SupportHome> {
+@@ -545,8 +553,15 @@ class _SupportHomeState extends State<SupportHome> {
        Expanded(
            child: ListView(children: [
          for (final p in SupportPage.values)
