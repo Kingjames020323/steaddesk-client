@@ -741,6 +741,16 @@ jobs:
       if: matrix.edition == 'merchant' && env.STEADDESK_FLEET_UPDATE == 'true'
       shell: bash
       run: python3 .distribution/scripts/tests/windows-fleet/run-controller.py --repo-root .distribution --source-root .
+    - name: Prepare screenshot font on Windows images without a CJK face
+      if: matrix.edition == 'support'
+      shell: pwsh
+      run: |
+        if (!(Test-Path "$env:WINDIR/Fonts/msyh.ttc") -and !(Test-Path "$env:WINDIR/Fonts/simsun.ttc") -and !(Test-Path "$env:WINDIR/Fonts/msjh.ttc") -and !(Test-Path "$env:WINDIR/Fonts/meiryo.ttc")) {
+          $font = Join-Path $env:RUNNER_TEMP 'NotoSansSC.ttf'
+          Invoke-WebRequest 'https://raw.githubusercontent.com/google/fonts/2894aab31764f10f29c421bdfd2340d3b382d384/ofl/notosanssc/NotoSansSC%5Bwght%5D.ttf' -OutFile $font
+          if ((Get-FileHash $font).Hash -ne 'a3041811a78c361b1de50f953c805e0244951c21c5bd412f7232ef0d899af0da') { throw 'Unexpected font digest' }
+          "STEADDESK_J25_FONT=$font" >> $env:GITHUB_ENV
+        }
     - name: Test opted-in support features before restoring the installer profile
       if: matrix.edition == 'support'
       shell: bash
@@ -750,10 +760,22 @@ jobs:
           cd flutter
           flutter pub get
           flutter analyze --no-pub --no-fatal-infos --no-fatal-warnings lib/steaddesk/today lib/steaddesk/kb lib/steaddesk/fixed lib/steaddesk/toolbar lib/steaddesk/metrics lib/steaddesk/cases lib/models/model.dart lib/utils/multi_window_manager.dart lib/desktop/pages/desktop_home_page.dart lib/steaddesk/support_home.dart lib/desktop/pages/remote_page.dart lib/desktop/pages/remote_tab_page.dart lib/desktop/widgets/remote_toolbar.dart
-          STEADDESK_DIRECTORY_SHOTS="$GITHUB_WORKSPACE/directory-shots" flutter test --no-pub test/steaddesk
+          STEADDESK_DIRECTORY_SHOTS="$GITHUB_WORKSPACE/directory-shots" STEADDESK_J25_SHOTS="$GITHUB_WORKSPACE/j25-session-shots" flutter test --no-pub test/steaddesk
+          for page in session transfer case history; do
+            for mode in day night; do
+              test -s "$GITHUB_WORKSPACE/j25-session-shots/$page-$mode.png"
+            done
+          done
         )
         # Restore this run's chosen setting for the actual installer.
         bash .distribution/scripts/configure-edition.sh "$PWD" support
+    - name: Upload Windows session surface screenshots
+      if: matrix.edition == 'support'
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: Windows-J25-session-surfaces
+        path: j25-session-shots/*.png
+        if-no-files-found: error
     - name: Upload Windows device-list interaction screenshots
       if: matrix.edition == 'support'
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
