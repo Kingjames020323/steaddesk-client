@@ -1,0 +1,359 @@
+diff --git a/flutter/android/app/src/main/java/com/carriez/flutter_hbb/RemoteCursorOverlay.java b/flutter/android/app/src/main/java/com/carriez/flutter_hbb/RemoteCursorOverlay.java
+new file mode 100644
+index 0000000..8bd8c61
+--- /dev/null
++++ b/flutter/android/app/src/main/java/com/carriez/flutter_hbb/RemoteCursorOverlay.java
+@@ -0,0 +1,89 @@
++package com.carriez.flutter_hbb;
++
++import android.accessibilityservice.AccessibilityService;
++import android.graphics.PixelFormat;
++import android.os.Build;
++import android.os.Handler;
++import android.os.Looper;
++import android.util.Log;
++import android.view.Gravity;
++import android.view.WindowManager;
++
++final class RemoteCursorOverlay {
++    private final AccessibilityService service;
++    private final WindowManager windows;
++    private final Handler main = new Handler(Looper.getMainLooper());
++    private final Runnable render = this::renderLatest;
++    private int x, y;
++    private boolean clicked, scheduled, disposed;
++    // Accessed only on the main looper.
++    private RemoteCursorView view;
++
++    RemoteCursorOverlay(AccessibilityService service) {
++        this.service = service;
++        windows = (WindowManager) service.getSystemService(AccessibilityService.WINDOW_SERVICE);
++    }
++
++    synchronized void move(int x, int y, boolean click) {
++        if (disposed) return;
++        this.x = x;
++        this.y = y;
++        clicked |= click;
++        if (!scheduled) {
++            scheduled = true;
++            main.post(render);
++        }
++    }
++
++    private synchronized void renderLatest() {
++        scheduled = false;
++        boolean click = clicked;
++        clicked = false;
++        if (view == null) {
++            RemoteCursorView next = new RemoteCursorView(service);
++            WindowManager.LayoutParams p = new WindowManager.LayoutParams(
++                WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT,
++                WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
++                WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE |
++                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE |
++                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN |
++                    WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
++                PixelFormat.TRANSLUCENT);
++            p.gravity = Gravity.TOP | Gravity.LEFT;
++            if (Build.VERSION.SDK_INT >= 30) {
++                p.setFitInsetsTypes(0);
++                p.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS;
++            } else if (Build.VERSION.SDK_INT >= 28) {
++                p.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
++            }
++            try {
++                windows.addView(next, p);
++                view = next;
++            } catch (WindowManager.BadTokenException | SecurityException e) {
++                Log.w("RemoteCursor", "Accessibility overlay is unavailable", e);
++                return;
++            }
++        }
++        view.move(x, y, click);
++    }
++
++    synchronized void clear() {
++        main.removeCallbacks(render);
++        scheduled = false;
++        clicked = false;
++        if (Looper.myLooper() == main.getLooper()) removeView();
++        else main.post(this::removeView);
++    }
++
++    synchronized void dispose() {
++        disposed = true;
++        clear();
++    }
++
++    private void removeView() {
++        if (view != null) {
++            windows.removeViewImmediate(view);
++            view = null;
++        }
++    }
++}
+diff --git a/flutter/android/app/src/main/java/com/carriez/flutter_hbb/RemoteCursorState.java b/flutter/android/app/src/main/java/com/carriez/flutter_hbb/RemoteCursorState.java
+new file mode 100644
+index 0000000..e7f6530
+--- /dev/null
++++ b/flutter/android/app/src/main/java/com/carriez/flutter_hbb/RemoteCursorState.java
+@@ -0,0 +1,33 @@
++package com.carriez.flutter_hbb;
++
++/** The capture and overlay both use the display's current orientation and physical pixels. */
++final class RemoteCursorState {
++    static final long IDLE_MS = 5000;
++    static final long FADE_MS = 240;
++    static final long CLICK_MS = 320;
++    int x, y;
++    long moved = -1, clicked = -1;
++
++    static int physicalCoordinate(int capturePixel, int captureExtent, int scale) {
++        // MainService builds its virtual display from oriented width/height, then halves both
++        // dimensions if requested. Rotating these already oriented coordinates again is wrong.
++        int clamped = Math.max(0, Math.min(capturePixel, Math.max(0, captureExtent - 1)));
++        return clamped * Math.max(1, scale);
++    }
++
++    void move(int x, int y, boolean click, long now) {
++        this.x = x;
++        this.y = y;
++        moved = now;
++        if (click) clicked = now;
++    }
++
++    float opacity(long now) {
++        if (moved < 0) return 0;
++        return 1f - Math.min(1f, Math.max(0, now - moved - IDLE_MS) / (float) FADE_MS);
++    }
++
++    float clickProgress(long now) {
++        return clicked < 0 ? 1f : Math.min(1f, Math.max(0, now - clicked) / (float) CLICK_MS);
++    }
++}
+diff --git a/flutter/android/app/src/main/java/com/carriez/flutter_hbb/RemoteCursorView.java b/flutter/android/app/src/main/java/com/carriez/flutter_hbb/RemoteCursorView.java
+new file mode 100644
+index 0000000..aa9e29a
+--- /dev/null
++++ b/flutter/android/app/src/main/java/com/carriez/flutter_hbb/RemoteCursorView.java
+@@ -0,0 +1,86 @@
++package com.carriez.flutter_hbb;
++
++import android.content.Context;
++import android.graphics.Canvas;
++import android.graphics.Paint;
++import android.graphics.Path;
++import android.os.SystemClock;
++import android.view.View;
++
++final class RemoteCursorView extends View {
++    private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
++    private final Path arrow = new Path();
++    private final RemoteCursorState state = new RemoteCursorState();
++    private final float density;
++    private final Runnable startFade = this::invalidate;
++
++    RemoteCursorView(Context context) {
++        super(context);
++        setImportantForAccessibility(IMPORTANT_FOR_ACCESSIBILITY_NO);
++        density = getResources().getDisplayMetrics().density;
++        arrow.moveTo(0, 0);
++        arrow.lineTo(2, 21);
++        arrow.lineTo(7, 16);
++        arrow.lineTo(11, 24);
++        arrow.lineTo(15, 22);
++        arrow.lineTo(11, 14);
++        arrow.lineTo(18, 13);
++        arrow.close();
++        paint.setStrokeJoin(Paint.Join.ROUND);
++    }
++
++    void move(int x, int y, boolean click) {
++        state.move(x, y, click, SystemClock.uptimeMillis());
++        removeCallbacks(startFade);
++        postDelayed(startFade, RemoteCursorState.IDLE_MS);
++        postInvalidateOnAnimation();
++    }
++
++    @Override protected void onDraw(Canvas canvas) {
++        super.onDraw(canvas);
++        long now = SystemClock.uptimeMillis();
++        float opacity = state.opacity(now);
++        if (opacity <= 0) return;
++        canvas.save();
++        canvas.translate(state.x, state.y);
++        canvas.scale(density, density);
++        float progress = state.clickProgress(now);
++        if (progress < 1) {
++            float radius = 7 + 17 * progress;
++            stroke(0xff10243a, opacity * (1 - progress), 4);
++            canvas.drawCircle(0, 0, radius, paint);
++            stroke(0xff5eddbb, opacity * (1 - progress), 2);
++            canvas.drawCircle(0, 0, radius, paint);
++        }
++        // Keep the pointer body visible at the right and bottom edges; the tip stays put.
++        canvas.scale(state.x + 20 * density > getWidth() ? -1 : 1,
++                     state.y + 26 * density > getHeight() ? -1 : 1);
++        stroke(0xff10243a, opacity, 4);
++        canvas.drawPath(arrow, paint);
++        stroke(0xffffffff, opacity, 2.5f);
++        canvas.drawPath(arrow, paint);
++        paint.setStyle(Paint.Style.FILL);
++        color(0xff1f5fd6, opacity);
++        canvas.drawPath(arrow, paint);
++        canvas.restore();
++        if (progress < 1 || now - state.moved >= RemoteCursorState.IDLE_MS) {
++            postInvalidateOnAnimation();
++        }
++    }
++
++    @Override protected void onDetachedFromWindow() {
++        removeCallbacks(startFade);
++        super.onDetachedFromWindow();
++    }
++
++    private void stroke(int rgb, float opacity, float width) {
++        paint.setStyle(Paint.Style.STROKE);
++        paint.setStrokeWidth(width);
++        color(rgb, opacity);
++    }
++
++    private void color(int rgb, float opacity) {
++        paint.setColor(rgb);
++        paint.setAlpha(Math.round(255 * opacity));
++    }
++}
+diff --git a/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/InputService.kt b/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/InputService.kt
+index 70f0d34..fe083ed 100644
+--- a/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/InputService.kt
++++ b/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/InputService.kt
+@@ -79,6 +79,13 @@ class InputService : AccessibilityService() {
+         }
+     }
+ 
++    // Only the merchant edition creates the accessibility window.
++    @Volatile private var remoteCursor: RemoteCursorOverlay? = null
++
++    fun clearRemoteCursor() {
++        remoteCursor?.clear()
++    }
++
+     private val logTag = "input service"
+     private var leftIsDown = false
+     private var touchPath = Path()
+@@ -121,6 +128,18 @@ class InputService : AccessibilityService() {
+             }
+         }
+ 
++        if (mask == 0 || mask == LEFT_MOVE || mask == LEFT_DOWN || mask == RIGHT_UP) {
++            // On this protocol button messages carry no position. Use the last absolute move.
++            remoteCursor?.let { cursor ->
++                val scale = SCREEN_INFO.scale.coerceAtLeast(1)
++                cursor.move(
++                    RemoteCursorState.physicalCoordinate(mouseX / scale, SCREEN_INFO.width, scale),
++                    RemoteCursorState.physicalCoordinate(mouseY / scale, SCREEN_INFO.height, scale),
++                    mask == LEFT_DOWN || mask == RIGHT_UP
++                )
++            }
++        }
++
+         // left button down, was up
+         if (mask == LEFT_DOWN) {
+             isWaitingLongPress = true
+@@ -735,6 +754,7 @@ class InputService : AccessibilityService() {
+ 
+     override fun onServiceConnected() {
+         super.onServiceConnected()
++        if (BuildConfig.MERCHANT_EDITION) remoteCursor = RemoteCursorOverlay(this)
+         ctx = this
+         notifyInputState()
+         val info = AccessibilityServiceInfo()
+@@ -754,6 +774,8 @@ class InputService : AccessibilityService() {
+     }
+ 
+     override fun onDestroy() {
++        remoteCursor?.dispose()
++        remoteCursor = null
+         ctx = null
+         // Keep this fallback even though onUnbind usually notifies first.
+         notifyInputState()
+@@ -761,6 +783,8 @@ class InputService : AccessibilityService() {
+     }
+ 
+     override fun onUnbind(intent: Intent?): Boolean {
++        remoteCursor?.dispose()
++        remoteCursor = null
+         ctx = null
+         notifyInputState()
+         return super.onUnbind(intent)
+diff --git a/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MainService.kt b/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MainService.kt
+index 3787a9d..9200292 100644
+--- a/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MainService.kt
++++ b/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MainService.kt
+@@ -122,6 +122,7 @@ class MainService : Service() {
+     @Keep
+     fun rustSetByName(name: String, arg1: String, arg2: String) {
+         when (name) {
++            "steaddesk_cursor_end" -> InputService.ctx?.clearRemoteCursor()
+             "steaddesk_power_menu" -> {
+                 val count = arg1.toIntOrNull() ?: return
+                 if (count > 0) InputService.ctx?.requestPowerMenu(count.coerceAtMost(5))
+@@ -696,6 +697,7 @@ class MainService : Service() {
+ 
+     @Synchronized
+     fun stopCapture() {
++        InputService.ctx?.clearRemoteCursor()
+         Log.d(logTag, "Stop Capture")
+         captureRestartPending = false
+         captureRestartInVoiceCall = false
+diff --git a/flutter/lib/desktop/pages/remote_page.dart b/flutter/lib/desktop/pages/remote_page.dart
+index 854be93..10450f4 100644
+--- a/flutter/lib/desktop/pages/remote_page.dart
++++ b/flutter/lib/desktop/pages/remote_page.dart
+@@ -1073,7 +1073,8 @@ class _RemotePageState extends State<RemotePage>
+ 
+     if (!_ffi.canvasModel.cursorEmbedded) {
+       paints
+-          .add(Obx(() => _showRemoteCursor.isFalse || _remoteCursorMoved.isFalse
++          .add(Obx(() => _showRemoteCursor.isFalse || _remoteCursorMoved.isFalse ||
++                  (isWindows && _ffi.ffiModel.isPeerAndroid)
+               ? Offstage()
+               : CursorPaint(
+                   id: widget.id,
+@@ -1216,7 +1217,11 @@ class _ImagePaintState extends State<ImagePaint> {
+ 
+     bool isViewOriginal() => c.viewStyle.style == kRemoteViewStyleOriginal;
+ 
+-    mouseRegion({child}) => Obx(() {
++    // Select the Windows pointer locally, including the first frame and full-screen view.
++    Widget mouseRegion({required Widget child}) =>
++        isWindows && widget.ffi.ffiModel.isPeerAndroid
++            ? MouseRegion(cursor: SystemMouseCursors.basic, child: child)
++            : Obx(() {
+           double getCursorScale() {
+             var c = Provider.of<CanvasModel>(context);
+             if (isDesktop) {
+diff --git a/src/ui_cm_interface.rs b/src/ui_cm_interface.rs
+index 7017e85..f7391e7 100644
+--- a/src/ui_cm_interface.rs
++++ b/src/ui_cm_interface.rs
+@@ -296,6 +296,18 @@ impl<T: InvokeUiCM> ConnectionManager<T> {
+     }
+ 
+     fn remove_connection(&self, id: i32, close: bool) {
++        #[cfg(target_os = "android")]
++        if CLIENTS.read().unwrap().get(&id).is_some_and(|c| {
++            c.authorized
++                && !c.is_file_transfer
++                && !c.is_terminal
++                && !c.is_view_camera
++                && c.port_forward.is_empty()
++        }) {
++            allow_err!(scrap::android::call_main_service_set_by_name(
++                "steaddesk_cursor_end", None, None
++            ));
++        }
+         if close {
+             CLIENTS.write().unwrap().remove(&id);
+         } else {
