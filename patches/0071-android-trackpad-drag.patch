@@ -1,0 +1,588 @@
+diff --git a/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/InputService.kt b/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/InputService.kt
+index 70f0d34..b7a7bb5 100644
+--- a/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/InputService.kt
++++ b/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/InputService.kt
+@@ -225,6 +225,13 @@ class InputService : AccessibilityService() {
+     @RequiresApi(Build.VERSION_CODES.N)
+     fun onTouchInput(mask: Int, _x: Int, _y: Int) {
+         when (mask) {
++            TOUCH_SCALE -> {
++                if (!BuildConfig.MERCHANT_EDITION || leftIsDown || _x == 0) return
++                val gesture = MerchantPinch.gesture(mouseX, mouseY,
++                    SCREEN_INFO.width * SCREEN_INFO.scale,
++                    SCREEN_INFO.height * SCREEN_INFO.scale, _x) ?: return
++                dispatchGesture(gesture, null, null)
++            }
+             TOUCH_PAN_UPDATE -> {
+                 mouseX -= _x * SCREEN_INFO.scale
+                 mouseY -= _y * SCREEN_INFO.scale
+diff --git a/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MerchantPinch.kt b/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MerchantPinch.kt
+new file mode 100644
+index 0000000..607748d
+--- /dev/null
++++ b/flutter/android/app/src/main/kotlin/com/carriez/flutter_hbb/MerchantPinch.kt
+@@ -0,0 +1,32 @@
++package com.carriez.flutter_hbb
++
++import android.accessibilityservice.GestureDescription
++import android.graphics.Path
++import android.os.Build
++import androidx.annotation.RequiresApi
++import kotlin.math.min
++
++internal object MerchantPinch {
++    // The wire value is (cumulative scale - 1) * 1000. Commit one two-finger
++    // gesture on release so successive accessibility dispatches cannot cancel it.
++    @RequiresApi(Build.VERSION_CODES.N)
++    fun gesture(x: Int, y: Int, width: Int, height: Int, delta: Int): GestureDescription? {
++        if (width < 8 || height < 2 || delta == 0) return null
++        val ratio = 1f + delta.coerceIn(-750, 3000) / 1000f
++        val maxRadius = (width - 1) / 2f
++        val initial = min(min(width, height) * 0.12f, maxRadius / maxOf(1f, ratio))
++        val target = initial * ratio
++        val radius = maxOf(initial, target)
++        val center = x.toFloat().coerceIn(radius, maxOf(radius, width - 1f - radius))
++        val cy = y.coerceIn(0, height - 1).toFloat()
++        val builder = GestureDescription.Builder()
++        for (side in listOf(-1, 1)) {
++            val path = Path().apply {
++                moveTo(center + side * initial, cy)
++                lineTo(center + side * target, cy)
++            }
++            builder.addStroke(GestureDescription.StrokeDescription(path, 0, 150))
++        }
++        return builder.build()
++    }
++}
+diff --git a/flutter/lib/desktop/pages/desktop_setting_page.dart b/flutter/lib/desktop/pages/desktop_setting_page.dart
+index 86f49b0..51985b2 100644
+--- a/flutter/lib/desktop/pages/desktop_setting_page.dart
++++ b/flutter/lib/desktop/pages/desktop_setting_page.dart
+@@ -1,5 +1,7 @@
+ import 'package:flutter_hbb/steaddesk/support_appearance.dart';
+ import 'dart:async';
++import '../../models/android_trackpad_drag.dart';
++import '../../steaddesk/merchant_build.dart' show merchantEdition;
+ import 'dart:convert';
+ import 'dart:io';
+ 
+@@ -43,6 +45,12 @@ const Color _accentColor = SteadDeskTheme.action;
+ const String _kSettingPageControllerTag = 'settingPageController';
+ const String _kSettingPageTabKeyTag = 'settingPageTabKey';
+ 
++String _appearanceLabel(String english,String chinese) {
++  final saved = bind.mainGetLocalOption(key: 'lang');
++  return (saved.isEmpty ? localeName.toString() : saved).toLowerCase().startsWith('zh')
++      ? chinese : translate(english);
++}
++
+ class _TabInfo {
+   late final SettingsTabKey key;
+   late final String label;
+@@ -838,12 +846,6 @@ class _GeneralState extends State<_General> {
+     });
+   }
+ 
+-  String _appearanceLabel(String english,String chinese) {
+-    final saved = bind.mainGetLocalOption(key: 'lang');
+-    return (saved.isEmpty ? localeName.toString() : saved).toLowerCase().startsWith('zh')
+-        ? chinese : translate(english);
+-  }
+-
+   Widget language() {
+     return futureBuilder(future: () async {
+       String langs = await bind.mainGetLangs();
+@@ -1948,6 +1950,15 @@ class _DisplayState extends State<_Display> {
+       imageQuality(context),
+       codec(context),
+       if (isDesktop) trackpadSpeed(context),
++      if (isWindows && !merchantEdition)
++        SwitchListTile(
++          title: Text(_appearanceLabel('Reverse Android trackpad drag', '反向拖动安卓屏幕')),
++          value: bind.mainGetLocalOption(key: reverseAndroidTrackpadKey) == 'Y',
++          onChanged: (enabled) async {
++            await bind.mainSetLocalOption(key: reverseAndroidTrackpadKey, value: enabled ? 'Y' : 'N');
++            if (mounted) setState(() {});
++          },
++        ),
+       if (!isWeb) privacyModeImpl(context),
+       other(context),
+     ]).marginOnly(bottom: _kListViewBottomMargin);
+diff --git a/flutter/lib/desktop/pages/remote_page.dart b/flutter/lib/desktop/pages/remote_page.dart
+index 854be93..08a7419 100644
+--- a/flutter/lib/desktop/pages/remote_page.dart
++++ b/flutter/lib/desktop/pages/remote_page.dart
+@@ -520,9 +520,7 @@ class _RemotePageState extends State<RemotePage>
+     // When window loses focus, temporarily release relative mouse mode constraints
+     // to allow user to interact with other applications normally.
+     // The cursor will be re-hidden and re-centered when window regains focus.
+-    if (_ffi.inputModel.relativeMouseMode.value) {
+-      _ffi.inputModel.onWindowBlur();
+-    }
++    _ffi.inputModel.onWindowBlur();
+   }
+ 
+   @override
+@@ -641,9 +639,7 @@ class _RemotePageState extends State<RemotePage>
+       _syncMacOSKeyboardGrab();
+     }
+     // Release cursor constraints when minimized
+-    if (_ffi.inputModel.relativeMouseMode.value) {
+-      _ffi.inputModel.onWindowBlur();
+-    }
++    _ffi.inputModel.onWindowBlur();
+   }
+ 
+   @override
+diff --git a/flutter/lib/models/android_trackpad_drag.dart b/flutter/lib/models/android_trackpad_drag.dart
+new file mode 100644
+index 0000000..5dafe25
+--- /dev/null
++++ b/flutter/lib/models/android_trackpad_drag.dart
+@@ -0,0 +1,109 @@
++import 'dart:async';
++import 'dart:math' as math;
++import 'dart:ui';
++import 'package:flutter/gestures.dart';
++
++const reverseAndroidTrackpadKey = 'steaddesk-reverse-android-trackpad';
++
++/// Mouse packets consumed by session_send_mouse. Button events use the last
++/// absolute position, so every new drag starts with an unpressed move.
++class AndroidTrackpadDrag {
++  AndroidTrackpadDrag(this.send, this.canMove);
++  final void Function(Map<String, String>) send;
++  final bool Function() canMove;
++
++  static const gap = Duration(milliseconds: 100);
++  Timer? _idle;
++  Duration? _last;
++  Offset _point = Offset.zero;
++  Offset _velocity = Offset.zero;
++  Rect _bounds = Rect.zero;
++  Offset _origin = Offset.zero;
++  bool _pressed = false;
++  bool get active => _last != null;
++
++  /// Some Windows drivers expose only mouse-like scroll signals. Tiny deltas
++  /// are a heuristic in that case. Native PanZoom does not need this fallback.
++  static Offset? wheelDragDelta(PointerScrollEvent event) {
++    final delta = event.scrollDelta;
++    if (delta == Offset.zero) return null;
++    final fine = math.max(delta.dx.abs(), delta.dy.abs()) < 12;
++    return event.kind == PointerDeviceKind.trackpad || fine ? -delta : null;
++  }
++
++  void update(Offset origin, Offset delta, Rect bounds, Duration time) {
++    if (delta == Offset.zero || bounds.width < 1 || bounds.height < 1) return;
++    if (!canMove()) {
++      cancel();
++      return;
++    }
++    final last = _last;
++    if (last != null &&
++        (bounds != _bounds || time < last || time - last >= gap)) {
++      finish(inertia: bounds == _bounds && time >= last);
++    }
++    _bounds = bounds;
++    if (!active) {
++      _point = _clamp(origin);
++      _origin = _point;
++      _velocity = Offset.zero;
++    } else {
++      final ms = (time - _last!).inMicroseconds / 1000;
++      if (ms > 0) _velocity = delta / math.max(1.0, ms);
++    }
++    _last = time;
++    _move(delta);
++    _idle?.cancel();
++    _idle = Timer(gap, finish);
++  }
++
++  Offset _clamp(Offset p) => Offset(
++      p.dx.clamp(_bounds.left, _bounds.right - 1).toDouble(),
++      p.dy.clamp(_bounds.top, _bounds.bottom - 1).toDouble());
++
++  Map<String, String> _packet(String type, String buttons, Offset p) => {
++        'type': type,
++        'buttons': buttons,
++        'x': '${p.dx.round()}',
++        'y': '${p.dy.round()}'
++      };
++
++  void _move(Offset delta) {
++    final next = _clamp(_point + delta);
++    if (!_pressed) {
++      // Accumulate subpixel input without turning stationary jitter into taps.
++      if ((next - _origin).distance < 2) {
++        _point = next;
++        return;
++      }
++      send(_packet('', '', _origin));
++      send(_packet('down', 'left', Offset.zero));
++      _pressed = true;
++    }
++    if (_point.dx.round() != next.dx.round() ||
++        _point.dy.round() != next.dy.round()) {
++      send(_packet('', 'left', next));
++    }
++    _point = next;
++  }
++
++  void finish({bool inertia = true}) {
++    if (!active) return;
++    if (_pressed && inertia && canMove()) {
++      final tail = _velocity * 24;
++      if (tail.distance >= 1) {
++        _move(tail.distance > 48 ? tail * (48 / tail.distance) : tail);
++      }
++    }
++    cancel();
++  }
++
++  void cancel({bool release = true}) {
++    _idle?.cancel();
++    _idle = null;
++    if (_pressed && release) send(_packet('up', 'left', Offset.zero));
++    _pressed = false;
++    _last = null;
++    _velocity = Offset.zero;
++  }
++}
+diff --git a/flutter/lib/models/input_model.dart b/flutter/lib/models/input_model.dart
+index ca3b0b4..5d2cbe3 100644
+--- a/flutter/lib/models/input_model.dart
++++ b/flutter/lib/models/input_model.dart
+@@ -17,6 +17,8 @@ import '../../models/model.dart';
+ import '../../models/platform_model.dart';
+ import '../../models/state_model.dart';
+ import 'input_modifier_utils.dart';
++import 'android_trackpad_drag.dart';
++import '../steaddesk/merchant_build.dart' show merchantEdition;
+ import 'reconnect_input.dart';
+ import 'os_password_input.dart';
+ import 'windows_input_state_stub.dart'
+@@ -549,6 +551,7 @@ class InputModel {
+     if (locked == _reconnectInput.disconnected) return;
+     _releaseCheck?.cancel();
+     if (locked) {
++      _cancelAndroidTrackpad(release: false);
+       _reconnectInput.disconnect();
+       _sawPointerLeave = false;
+       _heldPointers.clear();
+@@ -1266,6 +1269,7 @@ class InputModel {
+   }
+ 
+   void enterOrLeave(bool enter) {
++    if (!enter) _cancelAndroidTrackpad();
+     _wantsInput = enter;
+     if (reconnectInputLocked) {
+       if (!enter) {
+@@ -1409,6 +1413,7 @@ class InputModel {
+   }
+ 
+   void disposeRelativeMouseMode() {
++    _cancelAndroidTrackpad();
+     _releaseCheck?.cancel();
+     _heldPointers.clear();
+     _relativeMouse.dispose();
+@@ -1423,6 +1428,7 @@ class InputModel {
+   }
+ 
+   void onWindowBlur() {
++    _cancelAndroidTrackpad();
+     _relativeMouse.onWindowBlur();
+   }
+ 
+@@ -1432,6 +1438,10 @@ class InputModel {
+ 
+   void onPointHoverImage(PointerHoverEvent e) {
+     if (reconnectInputLocked) return;
++    if (_androidDrag.active) {
++      if (e.delta == Offset.zero) return;
++      _androidDrag.cancel();
++    }
+     _stopFling = true;
+     if (isViewOnly && !showMyCursor) return;
+     if (e.kind != ui.PointerDeviceKind.mouse) return;
+@@ -1462,13 +1472,59 @@ class InputModel {
+     }
+   }
+ 
++  bool get _windowsAndroid => isWindows && !merchantEdition &&
++      peerPlatform == kPeerPlatformAndroid;
++  bool get _canTrackpadMove => parent.target != null && !parent.target!.closed &&
++      _windowsAndroid && keyboardPerm && !isViewOnly && !isViewCamera &&
++      _lastButtons == 0 && !relativeMouseMode.value &&
++      !parent.target!.cursorModel.isPeerControlProtected &&
++      parent.target!.cursorModel.gotMouseControl;
++  late final _androidDrag = AndroidTrackpadDrag((packet) {
++    if (!reconnectInputLocked && parent.target?.closed == false) {
++      bind.sessionSendMouse(sessionId: sessionId, msg: json.encode(packet));
++    }
++  }, () => _canTrackpadMove);
++  bool _pinching = false;
++  bool _reverseDrag = false;
++
++  Offset? _androidAnchor(Offset position) {
++    if (!_canTrackpadMove) return null;
++    final p = handlePointerDevicePos(kPointerEventKindMouse, position.dx,
++        position.dy, false, kMouseEventTypeDefault, moveCanvas: false);
++    return p == null ? null : Offset(p.x.toDouble(), p.y.toDouble());
++  }
++
++  void _androidPan(Offset position, Offset delta, Duration time) {
++    final anchor = _androidAnchor(position);
++    final rect = parent.target?.ffiModel.rect;
++    if (anchor == null || rect == null) {
++      _androidDrag.cancel();
++      return;
++    }
++    if (!_androidDrag.active) {
++      _reverseDrag = bind.mainGetLocalOption(key: reverseAndroidTrackpadKey) == 'Y';
++    }
++    final factor = _trackpadSpeedInner / parent.target!.canvasModel.scale;
++    if (factor.isFinite && factor > 0) {
++      _androidDrag.update(anchor, delta * (_reverseDrag ? -factor : factor), rect, time);
++    }
++  }
++
++  void _cancelAndroidTrackpad({bool release = true}) {
++    _androidDrag.cancel(release: release);
++    _pinching = false;
++    if (_windowsAndroid) _panZoomStarted = false;
++  }
++
+   void onPointerPanZoomStart(PointerPanZoomStartEvent e) {
+     if (reconnectInputLocked) return;
++    if (_windowsAndroid) _cancelAndroidTrackpad();
+     _panZoomStarted = true;
+     _lastScale = 1.0;
+     _stopFling = true;
+     if (isViewOnly) return;
+     if (isViewCamera) return;
++    if (_windowsAndroid) return;
+     if (peerPlatform == kPeerPlatformAndroid) {
+       handlePointerEvent('touch', kMouseEventTypePanStart, e.position);
+     }
+@@ -1480,6 +1536,17 @@ class InputModel {
+     if (_reconnectInput.generation != 0 && !_panZoomStarted) return;
+     if (isViewOnly) return;
+     if (isViewCamera) return;
++    if (_windowsAndroid) {
++      if (!_panZoomStarted || !_canTrackpadMove) return;
++      if ((e.scale - 1).abs() >= 0.025) _pinching = true;
++      if (_pinching) {
++        _androidDrag.cancel();
++        _lastScale = e.scale;
++      } else {
++        _androidPan(e.position, e.panDelta, e.timeStamp);
++      }
++      return;
++    }
+     if (peerPlatform != kPeerPlatformAndroid) {
+       final scale = ((e.scale - _lastScale) * 1000).toInt();
+       _lastScale = e.scale;
+@@ -1604,6 +1671,25 @@ class InputModel {
+   void onPointerPanZoomEnd(PointerPanZoomEndEvent e) {
+     if (reconnectInputLocked) return;
+     if (_reconnectInput.generation != 0 && !_panZoomStarted) return;
++    if (_windowsAndroid) {
++      if (!_panZoomStarted) return;
++      _panZoomStarted = false;
++      if (_pinching) {
++        final anchor = _androidAnchor(e.position);
++        final scale = ((_lastScale.clamp(0.25, 4.0) - 1) * 1000).round();
++        if (anchor != null && scale != 0) {
++          bind.sessionSendMouse(sessionId: sessionId, msg: json.encode({
++            'type': '', 'x': '${anchor.dx.round()}', 'y': '${anchor.dy.round()}'
++          }));
++          bind.sessionSendPointer(sessionId: sessionId, msg: json.encode(
++              PointerEventToRust(kPointerEventKindTouch, 'scale', scale).toJson()));
++        }
++        _pinching = false;
++      } else {
++        _androidDrag.finish();
++      }
++      return;
++    }
+     _panZoomStarted = false;
+     if (isViewCamera) return;
+     if (peerPlatform == kPeerPlatformAndroid) {
+@@ -1666,6 +1752,7 @@ class InputModel {
+   }
+ 
+   void onPointDownImage(PointerDownEvent e) {
++    _cancelAndroidTrackpad();
+     if (reconnectInputLocked) return;
+     if (_reconnectInput.generation != 0) _heldPointers.add(e.pointer);
+     debugPrint("onPointDownImage ${e.kind}");
+@@ -1819,6 +1906,21 @@ class InputModel {
+     if (reconnectInputLocked) return;
+     if (isViewOnly) return;
+     if (isViewCamera) return;
++    if (_windowsAndroid) {
++      if (e is PointerScrollInertiaCancelEvent) {
++        _androidDrag.cancel();
++        return;
++      }
++      if (e is PointerScrollEvent) {
++        if (_panZoomStarted) return;
++        final delta = AndroidTrackpadDrag.wheelDragDelta(e);
++        if (delta != null) {
++          _androidPan(e.position, delta, e.timeStamp);
++          return;
++        }
++        _androidDrag.cancel();
++      }
++    }
+     if (e is PointerScrollEvent) {
+       final rawDx = e.scrollDelta.dx;
+       final rawDy = e.scrollDelta.dy;
+diff --git a/flutter/test/steaddesk/android_trackpad_test.dart b/flutter/test/steaddesk/android_trackpad_test.dart
+new file mode 100644
+index 0000000..db231ba
+--- /dev/null
++++ b/flutter/test/steaddesk/android_trackpad_test.dart
+@@ -0,0 +1,83 @@
++import 'dart:ui';
++import 'package:flutter/gestures.dart';
++import 'package:flutter_hbb/models/android_trackpad_drag.dart';
++import 'package:flutter_test/flutter_test.dart';
++
++void main() {
++  const bounds = Rect.fromLTWH(5, 10, 100, 60);
++  const origin = Offset(10, 20);
++  final packets = <Map<String, String>>[];
++  late AndroidTrackpadDrag drag;
++  var allowed = true;
++  void pan(double x, double y, int ms) =>
++      drag.update(origin, Offset(x, y), bounds, Duration(milliseconds: ms));
++  setUp(() {
++    packets.clear();
++    allowed = true;
++    drag = AndroidTrackpadDrag(packets.add, () => allowed);
++  });
++  tearDown(() => drag.cancel());
++
++  test('fractional motion accumulates and clamps both axes including inertia',
++      () {
++    pan(2.2, 2.2, 0);
++    pan(0.4, 0.4, 8);
++    expect(packets.last, {'type': '', 'buttons': 'left', 'x': '13', 'y': '23'});
++    pan(500, -400, 16);
++    drag.finish();
++    expect(packets[packets.length - 2],
++        {'type': '', 'buttons': 'left', 'x': '104', 'y': '10'});
++    expect(packets.where((p) => p['type'] == 'up'), hasLength(1));
++  });
++
++  test('stationary edge pressure and subpixel jitter cannot synthesize a tap',
++      () {
++    drag.update(
++        const Offset(5, 10), const Offset(-12, -12), bounds, Duration.zero);
++    drag.finish();
++    pan(0.3, 0.4, 0);
++    drag.finish();
++    expect(packets, isEmpty);
++  });
++
++  test('99ms gap continues, 100ms gap releases and reanchors', () {
++    pan(0, 3, 0);
++    pan(0, 3, 99);
++    pan(-2, 0, 199);
++    expect(packets.where((p) => p['type'] == 'down'), hasLength(2));
++    expect(packets.where((p) => p['type'] == 'up'), hasLength(1));
++    expect(packets.last['x'], '8');
++  });
++
++  testWidgets(
++      'release, loss of control and disconnected cancellation stop delayed moves',
++      (tester) async {
++    pan(1, 2, 0);
++    pan(5, 10, 8);
++    allowed = false;
++    final n = packets.length;
++    await tester.pump(AndroidTrackpadDrag.gap);
++    expect(packets.length, n + 1);
++    expect(packets.last['type'], 'up');
++    pan(2, 3, 110);
++    expect(packets.length, n + 1);
++    allowed = true;
++    pan(2, 3, 120);
++    drag.cancel(release: false);
++    final afterDisconnect = packets.length;
++    await tester.pump(const Duration(seconds: 2));
++    expect(packets, hasLength(afterDisconnect));
++  });
++
++  test('ordinary wheel keeps detents while forced drag trial reaches the edge',
++      () {
++    const wheel = PointerScrollEvent(scrollDelta: Offset(0, 120));
++    expect(AndroidTrackpadDrag.wheelDragDelta(wheel), isNull);
++    drag.update(origin, -wheel.scrollDelta, bounds, Duration.zero);
++    expect(packets.last['y'], '10');
++    drag.cancel();
++    const precise = PointerScrollEvent(
++        kind: PointerDeviceKind.trackpad, scrollDelta: Offset(0, 120));
++    expect(AndroidTrackpadDrag.wheelDragDelta(precise), const Offset(0, -120));
++  });
++}
+diff --git a/flutter/test/windows_smoke/android_trackpad_test.dart b/flutter/test/windows_smoke/android_trackpad_test.dart
+new file mode 100644
+index 0000000..fc6e597
+--- /dev/null
++++ b/flutter/test/windows_smoke/android_trackpad_test.dart
+@@ -0,0 +1,37 @@
++import 'dart:ui';
++import 'package:flutter/gestures.dart';
++import 'package:flutter_test/flutter_test.dart';
++import 'package:flutter_hbb/models/android_trackpad_drag.dart';
++
++// Exercise the same signal classification, gesture timer and mouse serialization
++// that feed sessionSendMouse. No peer or platform accessibility API is required.
++void main() {
++  testWidgets('fine Windows scroll signals send one anchored left drag',
++      (tester) async {
++    final packets = <Map<String, String>>[];
++    final drag = AndroidTrackpadDrag(packets.add, () => true);
++    const position = Offset(80, 70);
++    for (var i = 0; i < 3; i++) {
++      final event = PointerScrollEvent(
++          position: position,
++          scrollDelta: const Offset(-4, 2),
++          timeStamp: Duration(milliseconds: i * 8),
++          kind: PointerDeviceKind.mouse);
++      drag.update(event.position, AndroidTrackpadDrag.wheelDragDelta(event)!,
++          const Rect.fromLTWH(0, 0, 200, 100), event.timeStamp);
++      await tester.pump(const Duration(milliseconds: 8));
++    }
++    await tester.pump(const Duration(milliseconds: 91));
++    expect(packets.last['type'], '');
++    await tester.pump(const Duration(milliseconds: 1));
++    expect(packets.map((p) => [p['type'], p['buttons'], p['x'], p['y']]), [
++      ['', '', '80', '70'],
++      ['down', 'left', '0', '0'],
++      ['', 'left', '84', '68'],
++      ['', 'left', '88', '66'],
++      ['', 'left', '92', '64'],
++      ['', 'left', '104', '58'],
++      ['up', 'left', '0', '0'],
++    ]);
++  });
++}
+diff --git a/src/server/connection.rs b/src/server/connection.rs
+index 6adf1a4..a44b727 100644
+--- a/src/server/connection.rs
++++ b/src/server/connection.rs
+@@ -3337,6 +3337,10 @@ impl Connection {
+                     #[cfg(any(target_os = "android", target_os = "ios"))]
+                     if let Err(e) = match pde.union {
+                         Some(pointer_device_event::Union::TouchEvent(touch)) => match touch.union {
++                            #[cfg(target_os = "android")]
++                            Some(touch_event::Union::ScaleUpdate(scale)) if self.peer_keyboard_enabled() => {
++                                call_main_service_pointer_input("touch", 2, scale.scale, 0)
++                            }
+                             Some(touch_event::Union::PanStart(pan_start)) => {
+                                 call_main_service_pointer_input(
+                                     "touch",
