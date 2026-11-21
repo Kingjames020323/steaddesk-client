@@ -1,0 +1,152 @@
+diff --git a/flutter/lib/steaddesk/cases/history_ui.dart b/flutter/lib/steaddesk/cases/history_ui.dart
+--- a/flutter/lib/steaddesk/cases/history_ui.dart
++++ b/flutter/lib/steaddesk/cases/history_ui.dart
+@@ -164,11 +164,27 @@
+       required this.onEditDevice,
+       this.translate = _english,
+       required this.onAppend,
+-      this.clock});
++      this.clock})
++      : ticketSummary = null;
++
++  CaseHistoryDrawer.ticket(
++      {super.key,
++      required Widget summary,
++      required List<Map<String, dynamic>> sessions,
++      required this.onClose})
++      : ticketSummary = summary,
++        data = {'device': sessions},
++        translate = _english,
++        onEditDevice = null,
++        onAppend = null,
++        clock = null;
++
++  final Widget? ticketSummary;
+   final Map<String, dynamic> data;
+   final String Function(String) translate;
+-  final VoidCallback onClose, onEditDevice;
+-  final Future<void> Function(String scope, String id, String text) onAppend;
++  final VoidCallback onClose;
++  final VoidCallback? onEditDevice;
++  final Future<void> Function(String scope, String id, String text)? onAppend;
+   final DateTime Function()? clock;
+ 
+   @override
+@@ -284,28 +300,32 @@
+                 onPressed: widget.onClose,
+                 icon: const Icon(Icons.close, size: 19))
+           ]),
+-          Text(stats, style: context.night ? context.caption : context.body),
+-          const SizedBox(height: 4),
+-          Text('只显示本机记录，团队共享记录上线后自动合并', style: context.caption),
+-          if (context.night) ...[
+-            const Divider(height: 1, color: Night.weak),
+-            Wrap(
+-                alignment: WrapAlignment.spaceBetween,
+-                crossAxisAlignment: WrapCrossAlignment.center,
+-                children: [
+-                  tabs,
+-                  filters,
+-                ]),
+-            pinnedNote,
+-          ] else ...[
+-            tabs,
+-            pinnedNote,
+-            filters
++          if (widget.ticketSummary != null)
++            widget.ticketSummary!
++          else ...[
++            Text(stats, style: context.night ? context.caption : context.body),
++            const SizedBox(height: 4),
++            Text('只显示本机记录，团队共享记录上线后自动合并', style: context.caption),
++            if (context.night) ...[
++              const Divider(height: 1, color: Night.weak),
++              Wrap(
++                  alignment: WrapAlignment.spaceBetween,
++                  crossAxisAlignment: WrapCrossAlignment.center,
++                  children: [
++                    tabs,
++                    filters,
++                  ]),
++              pinnedNote,
++            ] else ...[
++              tabs,
++              pinnedNote,
++              filters
++            ],
+           ],
+         ]));
+     final timeline = SliverPadding(
+         padding: const EdgeInsets.symmetric(horizontal: 18),
+-        sliver: visible.isEmpty
++        sliver: visible.isEmpty && widget.ticketSummary == null
+             ? SliverToBoxAdapter(
+                 child: Padding(
+                     padding: EdgeInsets.all(16),
+@@ -318,8 +338,9 @@
+                     row: row,
+                     translate: widget.translate,
+                     showDevice: scope == 'store',
+-                    onAppend: (text) =>
+-                        widget.onAppend(scope, row['id'], text));
++                    onAppend: widget.onAppend == null
++                        ? null
++                        : (text) => widget.onAppend!(scope, row['id'], text));
+               }, childCount: visible.length)));
+     return Focus(
+         autofocus: true,
+@@ -349,7 +370,8 @@
+                     child: LayoutBuilder(builder: (context, box) {
+                       // Keep the pinned note visible at desktop height. Short viewports and
+                       // large accessibility text can scroll the header along with the list.
+-                      final fixed = box.maxHeight >= 490 &&
++                      final fixed = widget.ticketSummary == null &&
++                          box.maxHeight >= 490 &&
+                           box.maxWidth >= 320 &&
+                           MediaQuery.textScalerOf(context).scale(14) <= 18;
+                       return Column(children: [
+@@ -390,7 +412,7 @@
+   final Map row;
+   final String Function(String) translate;
+   final bool showDevice;
+-  final Future<void> Function(String text) onAppend;
++  final Future<void> Function(String text)? onAppend;
+   @override
+   State<_Entry> createState() => _EntryState();
+ }
+@@ -413,7 +435,7 @@
+       error = null;
+     });
+     try {
+-      await widget.onAppend(text);
++      await widget.onAppend!(text);
+       if (!mounted) return;
+       addition.clear();
+       setState(() => writing = false);
+@@ -497,7 +519,7 @@
+           padding: const EdgeInsets.symmetric(vertical: 10),
+           child:
+               Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+-            if (!context.night) metadata,
++            if (!context.night || widget.onAppend == null) metadata,
+             if (widget.showDevice)
+               Text(row['display_name'] ?? row['device_id'],
+                   style: context.caption),
+@@ -514,7 +536,7 @@
+                   child: Text(
+                       '追加 · ${_localTime(append['at'])} · ${append['by']}\n${append['text']}',
+                       style: context.caption)),
+-            if (context.night)
++            if (context.night && widget.onAppend != null)
+               Wrap(
+                   spacing: 8,
+                   crossAxisAlignment: WrapCrossAlignment.center,
+@@ -524,7 +546,7 @@
+                         style: context.caption),
+                     actions,
+                   ])
+-            else
++            else if (widget.onAppend != null)
+               actions,
+             if (writing) ...[
+               TextField(
