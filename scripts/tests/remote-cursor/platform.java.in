@@ -1,0 +1,63 @@
+// Minimal deterministic main looper and window recorder. Real Android SDK compilation is separate.
+package android.accessibilityservice;
+public class AccessibilityService {
+    public static final String WINDOW_SERVICE = "window";
+    public final android.view.WindowManager windows = new android.view.WindowManager();
+    public Object getSystemService(String name) { return windows; }
+}
+package android.graphics;
+public class PixelFormat { public static final int TRANSLUCENT = -3; }
+package android.os;
+public class Build { public static class VERSION { public static final int SDK_INT = 34; } }
+package android.os;
+public class Looper {
+    public static final Looper MAIN = new Looper();
+    public static Looper getMainLooper() { return MAIN; }
+    public static Looper myLooper() { return null; }
+}
+package android.os;
+public class Handler {
+    static final java.util.ArrayDeque<Runnable> queue = new java.util.ArrayDeque<>();
+    private final Looper looper;
+    public Handler(Looper looper) { this.looper = looper; }
+    public Looper getLooper() { return looper; }
+    public void post(Runnable work) { queue.add(work); }
+    public void removeCallbacks(Runnable work) { queue.removeIf(work::equals); }
+    public static void drain() { while (!queue.isEmpty()) queue.remove().run(); }
+}
+package android.util;
+public class Log { public static void w(String tag, String text, Throwable err) {} }
+package android.view;
+public class Gravity { public static final int TOP = 48, LEFT = 3; }
+package android.view;
+public class WindowManager {
+    public static class BadTokenException extends RuntimeException {}
+    public static class LayoutParams {
+        public static final int MATCH_PARENT = -1, TYPE_ACCESSIBILITY_OVERLAY = 2032,
+            FLAG_NOT_TOUCHABLE = 16, FLAG_NOT_FOCUSABLE = 8, FLAG_LAYOUT_IN_SCREEN = 256,
+            FLAG_LAYOUT_NO_LIMITS = 512, LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS = 3,
+            LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES = 1;
+        public int gravity, layoutInDisplayCutoutMode, flags, type;
+        public LayoutParams(int width, int height, int type, int flags, int format) {
+            this.type = type; this.flags = flags;
+        }
+        public void setFitInsetsTypes(int types) {}
+    }
+    public com.carriez.flutter_hbb.RemoteCursorView view;
+    public LayoutParams params;
+    public void addView(com.carriez.flutter_hbb.RemoteCursorView view, LayoutParams p) {
+        if (this.view != null) throw new AssertionError();
+        this.view = view; params = p;
+    }
+    public void removeViewImmediate(com.carriez.flutter_hbb.RemoteCursorView view) {
+        if (this.view != view) throw new AssertionError();
+        this.view = null;
+    }
+}
+package com.carriez.flutter_hbb;
+public class RemoteCursorView {
+    public int x;
+    public boolean clicked;
+    public RemoteCursorView(android.accessibilityservice.AccessibilityService service) {}
+    public void move(int x, int y, boolean click) { this.x = x; this.clicked = click; }
+}
