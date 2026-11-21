@@ -340,7 +340,7 @@ jobs:
             ANDROID_TARGET=x86
           ;;
         esac
-        if ! ./flutter/build_android_deps.sh "${ANDROID_TARGET}"; then
+        if ! bash .distribution/scripts/retry-vcpkg-download.sh ./flutter/build_android_deps.sh "${ANDROID_TARGET}"; then
           find "${VCPKG_ROOT}/" -name "*.log" | while read -r _1; do
             echo "$_1:"
             echo "======"
@@ -722,7 +722,7 @@ jobs:
       env:
         VCPKG_DEFAULT_HOST_TRIPLET: "${{ matrix.job.vcpkg-triplet }}"
       run: |
-        if ! $VCPKG_ROOT/vcpkg \
+        if ! bash .distribution/scripts/retry-vcpkg-download.sh "$VCPKG_ROOT/vcpkg" \
           install \
           --triplet ${{ matrix.job.vcpkg-triplet }} \
           --x-install-root="$VCPKG_ROOT/installed"; then
