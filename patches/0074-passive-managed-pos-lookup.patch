@@ -1,0 +1,339 @@
+diff --git a/flutter/lib/steaddesk/quick/managed_pos_lookup.dart b/flutter/lib/steaddesk/quick/managed_pos_lookup.dart
+new file mode 100644
+index 0000000..ebb586e
+--- /dev/null
++++ b/flutter/lib/steaddesk/quick/managed_pos_lookup.dart
+@@ -0,0 +1,156 @@
++import 'package:flutter/material.dart';
++
++import '../ops_health.dart' show HealthFailure;
++import 'check.dart' show Json;
++import 'managed_inventory.dart';
++
++typedef _PosMatch = ({InventoryDraft draft, bool registered});
++
++typedef _Observation = ({DateTime time, List<_PosMatch> rows});
++
++_Observation? _parse(Json data, String storeId) {
++  if (data['store_id'] != storeId || !data.containsKey('observation')) {
++    throw const FormatException();
++  }
++  final observation = data['observation'];
++  if (observation == null) return null;
++  if (observation
++      case {
++        'observed_at': int at,
++        'message': 'POS 端口清单未配置',
++        'rows': List matches,
++      }) {
++    final time = DateTime.fromMillisecondsSinceEpoch(at * 1000);
++    if (DateTime.now().difference(time) >= const Duration(days: 7)) return null;
++    final seen = <String>{};
++    final rows = <_PosMatch>[];
++    for (final match in matches) {
++      if (match is! Json || match['registered'] is! bool) {
++        throw const FormatException();
++      }
++      final draft = managedSuggestions([match], []).singleOrNull;
++      if (draft == null) throw const FormatException();
++      if (seen.add(draft.ip)) {
++        rows.add((draft: draft, registered: match['registered'] as bool));
++      }
++    }
++    return (time: time, rows: rows);
++  }
++  throw const FormatException();
++}
++
++class ManagedPosLookup extends StatefulWidget {
++  final String storeId;
++  final bool readLatestOnMount;
++  final List<Json> entries;
++  final bool Function() canView;
++  final Future<Json> Function(bool start) request;
++  final VoidCallback onOpen;
++  final ValueChanged<InventoryDraft> onAdd;
++
++  const ManagedPosLookup({
++    super.key,
++    required this.storeId,
++    required this.readLatestOnMount,
++    required this.entries,
++    required this.canView,
++    required this.request,
++    required this.onOpen,
++    required this.onAdd,
++  });
++
++  @override
++  State<ManagedPosLookup> createState() => _ManagedPosLookupState();
++}
++
++class _ManagedPosLookupState extends State<ManagedPosLookup> {
++  bool busy = false, opened = false;
++  String? error;
++  _Observation? observation;
++
++  @override
++  void initState() {
++    super.initState();
++    if (widget.readLatestOnMount) read(false);
++  }
++
++  Future<void> read(bool start, {InventoryDraft? add}) async {
++    if (busy || !widget.canView()) return;
++    final previous = observation?.time;
++    widget.onOpen();
++    setState(() {
++      busy = opened = true;
++      observation = null;
++      error = null;
++    });
++    InventoryDraft? selection;
++    try {
++      final data = await widget.request(start);
++      if (!mounted || !widget.canView()) return;
++      final latest = _parse(data, widget.storeId);
++      observation = latest;
++      if (latest != null &&
++          latest.time == previous &&
++          add != null &&
++          latest.rows.any((row) => row.draft == add && !row.registered) &&
++          !widget.entries.any((entry) => entry['ip'] == add.ip)) {
++        selection = add;
++      }
++    } catch (e) {
++      if (!mounted || !widget.canView()) return;
++      error = switch (e) {
++        HealthFailure(status: 401 || 403) => '当前没有查询权限或门店未批准。',
++        HealthFailure(status: 409) => '设备已暂停、已停止或状态过期。请确认门店状态后重试。',
++        HealthFailure(status: 429) => '本店最近已查询，请在十分钟后重试。',
++        HealthFailure(status: 404) => '此服务暂不支持 POS 自报地址查询。',
++        _ => '无法取得 POS 查询结果，请刷新后重试。',
++      };
++    } finally {
++      if (mounted) setState(() => busy = false);
++    }
++    if (mounted && widget.canView() && selection != null) {
++      widget.onAdd(selection);
++    }
++  }
++
++  @override
++  Widget build(BuildContext context) {
++    if (!widget.canView()) return const SizedBox.shrink();
++    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
++      Wrap(children: [
++        TextButton(
++            onPressed: busy ? null : () => read(true),
++            child: const Text('找 POS 设备')),
++        TextButton(
++            onPressed: busy ? null : () => read(false),
++            child: const Text('查看最近 POS 查询')),
++      ]),
++      const Text('POS 端口清单未配置。仅匹配本店已管理设备的自报地址，不探测网络。'),
++      if (busy)
++        const LinearProgressIndicator()
++      else if (error != null)
++        Text(error!)
++      else if (opened && observation == null)
++        const Text('暂无有效 POS 查询记录。')
++      else if (observation case final result?) ...[
++        Text(
++            '查询时间 ${result.time.toLocal().toString().split('.').first} · 在线状态未经验证'),
++        if (result.rows.isEmpty) const Text('没有匹配的自报地址。'),
++        for (final row in result.rows)
++          ListTile(
++            contentPadding: EdgeInsets.zero,
++            title: Text('已管理设备：${row.draft.name}'),
++            subtitle: Text(row.draft.ip),
++            trailing: row.registered ||
++                    widget.entries.any((entry) => entry['ip'] == row.draft.ip)
++                ? const Text('已登记')
++                : TextButton(
++                    onPressed: widget.entries.length < 32
++                        ? () => read(false, add: row.draft)
++                        : null,
++                    child: const Text('添加')),
++          ),
++      ],
++    ]);
++  }
++}
+diff --git a/flutter/lib/steaddesk/quick/support.dart b/flutter/lib/steaddesk/quick/support.dart
+index de81de0..12dc69b 100644
+--- a/flutter/lib/steaddesk/quick/support.dart
++++ b/flutter/lib/steaddesk/quick/support.dart
+@@ -4,6 +4,7 @@ import 'check.dart';
+ import 'result_line.dart';
+ import 'inventory_observation.dart';
+ import 'managed_inventory.dart';
++import 'managed_pos_lookup.dart';
+ 
+ const supportQuickEnabled = true;
+ Widget storeInventory(HealthStore store, String device,
+@@ -30,7 +31,7 @@ class _StoreViewState extends State<_StoreView> {
+   String get language => widget.language.isEmpty
+       ? Localizations.localeOf(context).languageCode
+       : widget.language;
+-  bool busy = true, reviewOpen = false;
++  bool busy = true, reviewOpen = false, posOpened = false;
+   late final int scopeRevision;
+   String? error;
+   String get path => 'devices/${widget.device}';
+@@ -174,6 +175,20 @@ class _StoreViewState extends State<_StoreView> {
+                     onPressed: entries.length < 32 ? () => edit() : null,
+                     icon: const Icon(Icons.add),
+                     label: const Text('新增设备'))),
++          if (editable && validId(policy['store_id']))
++            ManagedPosLookup(
++              key: ValueKey(policy['store_id']),
++              storeId: policy['store_id'],
++              readLatestOnMount: posOpened,
++              entries: entries,
++              canView: () => editable,
++              onOpen: () => posOpened = true,
++              request: (start) => widget.store.resource(
++                  start ? 'POST' : 'GET',
++                  '$path/managed-pos-lookup',
++                  start ? <String, dynamic>{} : null),
++              onAdd: (draft) => edit(draft: draft),
++            ),
+           if (editable && suggestions.isNotEmpty) ...[
+             Text(inventoryLabel('suggestions', language),
+                 style: Theme.of(context).textTheme.titleMedium),
+diff --git a/flutter/test/steaddesk/inventory_observation_test.dart b/flutter/test/steaddesk/inventory_observation_test.dart
+index b33fde7..3c6daa3 100644
+--- a/flutter/test/steaddesk/inventory_observation_test.dart
++++ b/flutter/test/steaddesk/inventory_observation_test.dart
+@@ -34,12 +34,19 @@ Json snapshot(List<Json> rows, {bool partial = false}) => {
+ class _Api implements HealthApi {
+   bool admin = true;
+   int reads = 0;
++  Future<Json> Function(bool start)? posLookup;
++  final posMethods = <String>[];
+   String inventoryStore = 'demo';
+   List<Json>? managed;
+   final entries = <Json>[], writes = <Json>[];
+   Future<Json> Function() observe = () async => {'observation': null};
+   @override
+   Future<Json> request(String method, String route, [Json? body]) async {
++    if (route == '$base/managed-pos-lookup') {
++      posMethods.add(method);
++      expect(body, method == 'POST' ? isEmpty : isNull);
++      return posLookup!(method == 'POST');
++    }
+     switch ('$method $route') {
+       case 'GET $base/check-policy':
+         return {'can_edit': admin, 'store_id': 'demo'};
+@@ -230,6 +237,110 @@ void main() {
+     expect(find.text('Suggested devices'), findsNothing);
+   });
+ 
++  testWidgets(
++      'passive POS reads current results and manually adds a single device',
++      (t) async {
++    final api = _Api();
++    final at = DateTime.now().millisecondsSinceEpoch ~/ 1000;
++    api.posLookup = (_) async => {
++          'store_id': 'demo',
++          'observation': {
++            'observed_at': at,
++            'message': 'POS 端口清单未配置',
++            'rows': [
++              {
++                'name': 'Kitchen',
++                'ip': '10.2.1.4',
++                'type': 'kds',
++                'registered': api.entries.isNotEmpty
++              },
++              {
++                'name': 'Spare',
++                'ip': '10.2.1.6',
++                'type': '',
++                'registered': true
++              },
++            ]
++          }
++        };
++    await _showInventory(t, api);
++    expect(api.posMethods, isEmpty);
++    await tap(t, find.text('找 POS 设备'));
++    expect(find.text('已管理设备：Kitchen'), findsOneWidget);
++    expect(find.textContaining('不探测网络'), findsOneWidget);
++    expect(find.text('已登记'), findsOneWidget);
++    expect(api.writes, isEmpty);
++    await tap(t, find.text('添加'));
++    expect(api.posMethods, ['POST', 'GET']);
++    expect(
++        t.widget<TextFormField>(find.byType(TextFormField).first).initialValue,
++        'Kitchen');
++    await tap(t, find.text('保存'));
++    expect(api.writes.single['ip'], '10.2.1.4');
++    expect(api.writes.single['type'], 'kds');
++    expect(find.text('已登记'), findsNWidgets(2));
++    expect(find.text('添加'), findsNothing);
++    expect(api.posMethods.where((method) => method == 'POST'), hasLength(1));
++  });
++
++  testWidgets('passive lookup clears blocked, stale and superseded results',
++      (t) async {
++    final api = _Api()..admin = false;
++    final store = await _showInventory(t, api);
++    expect(find.text('找 POS 设备'), findsNothing);
++    api.admin = true;
++    await tap(t, find.text('刷新设备表'));
++    final at = DateTime.now().millisecondsSinceEpoch ~/ 1000;
++    Json reply(int timestamp) => {
++          'store_id': 'demo',
++          'observation': {
++            'observed_at': timestamp,
++            'message': 'POS 端口清单未配置',
++            'rows': [
++              {
++                'ip': '192.168.20.5',
++                'type': '',
++                'name': 'Unconfirmed',
++                'registered': false
++              }
++            ]
++          }
++        };
++    api.posLookup = (_) async => reply(at - 8 * 86400);
++    await tap(t, find.text('查看最近 POS 查询'));
++    expect(find.text('暂无有效 POS 查询记录。'), findsOneWidget);
++    api.posLookup = (_) async => reply(at);
++    await tap(t, find.text('查看最近 POS 查询'));
++    api.posLookup = (_) async => reply(at - 1);
++    await tap(t, find.text('添加'));
++    expect(find.byType(TextFormField), findsNothing);
++    for (final failure in {
++      403: '当前没有查询权限',
++      409: '设备已暂停',
++      429: '本店最近已查询',
++      404: '此服务暂不支持',
++      0: '无法取得 POS 查询结果'
++    }.entries) {
++      api.posLookup = (_) async => throw HealthFailure(failure.key);
++      await tap(t, find.text('找 POS 设备'));
++      expect(find.textContaining(failure.value), findsOneWidget);
++      expect(find.textContaining('Unconfirmed'), findsNothing);
++    }
++    api.posLookup = (_) async => {...reply(at), 'store_id': 'other'};
++    await tap(t, find.text('查看最近 POS 查询'));
++    expect(find.textContaining('Unconfirmed'), findsNothing);
++    expect(find.textContaining('无法取得 POS 查询结果'), findsOneWidget);
++    final pending = Completer<Json>();
++    api.posLookup = (_) => pending.future;
++    await t.tap(find.text('查看最近 POS 查询'));
++    await t.pump();
++    store.changeScope();
++    pending.complete(reply(at));
++    await t.pumpAndSettle();
++    expect(find.textContaining('Unconfirmed'), findsNothing);
++    expect(api.writes, isEmpty);
++  });
++
+   testWidgets('only admins can request the latest observation', (t) async {
+     final api = _Api()..admin = false;
+     await _showInventory(t, api);
