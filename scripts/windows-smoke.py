@@ -156,6 +156,30 @@ send_keys("{ESC}")
 
 # Exercise the packaged directory and its explicit action without dialing a peer.
 wait_for("support directory", lambda: by_name(window, "Devices"))
+wait_for("device list status column on startup", lambda: by_name(window, "Status"))
+if os.environ.get("STEADDESK_TODAY") == "true":
+    # Navigation labels and page content have different roles. A visible rail
+    # button alone does not prove that its page was actually opened.
+    def nav_button(*labels):
+        return next((c for c in controls(window, labels.__contains__)
+                     if c.element_info.control_type == "Button"), None)
+
+    # Invoke the same semantic tap exposed to Windows assistive technology.
+    # A nav button's midpoint can lie behind the rail tooltip on the runner.
+    today_nav = wait_for("Today navigation button", lambda: nav_button("今天", "Today"))
+    today_nav.invoke()
+    page = wait_for("Today page content", lambda: by_name(window, "今天概览"))
+    frame, rect = window.rectangle(), page.rectangle()
+    # Only the Today body of this fresh, network-isolated test account is public.
+    # Keep the account, local ID, and the rest of the desktop masked.
+    body = (max(0, rect.left - frame.left), max(0, rect.top - frame.top),
+            min(frame.width(), rect.right - frame.left), min(frame.height(), rect.bottom - frame.top))
+    if body[2] <= body[0] or body[3] <= body[1]:
+        raise RuntimeError("Today page has no visible content bounds")
+    save_evidence(window, "support-today", [today_nav], [body])
+    wait_for("Devices navigation button", lambda: nav_button("Devices")).invoke()
+    wait_for("device list status column after Today", lambda: by_name(window, "Status"))
+
 send_keys("^k")
 if recent_fixture:
     heading = wait_for("recent search heading", lambda: by_name(window, "Recent searches"))
