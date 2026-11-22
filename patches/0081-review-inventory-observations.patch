@@ -1,0 +1,381 @@
+diff --git a/flutter/lib/steaddesk/quick/inventory_observation.dart b/flutter/lib/steaddesk/quick/inventory_observation.dart
+new file mode 100644
+index 0000000..4951ada
+--- /dev/null
++++ b/flutter/lib/steaddesk/quick/inventory_observation.dart
+@@ -0,0 +1,140 @@
++import 'package:flutter/material.dart';
++import '../ops_health.dart' show HealthFailure;
++import 'check.dart' show Json, privateV4;
++
++class InventoryCandidate {
++  final String ip, hostname;
++  final bool ping, router, registered;
++  final List<int> ports;
++
++  InventoryCandidate._(this.ip, this.hostname, this.ping, this.router,
++      this.registered, this.ports);
++
++  factory InventoryCandidate.from(Object? raw) {
++    if (raw
++        case {
++          'ip': String ip,
++          'hostname': String hostname,
++          'ping': bool ping,
++          'router': bool router,
++          'registered': bool registered,
++          'ports': List ports,
++        } when privateV4(ip) && ports.every(const {515, 631, 9100}.contains)) {
++      return InventoryCandidate._(
++          ip, hostname, ping, router, registered, List<int>.from(ports));
++    }
++    throw const FormatException();
++  }
++}
++
++// Read a previously recorded snapshot for the selected device.
++class InventoryObservationReview extends StatefulWidget {
++  final Future<Json> Function() read;
++  final bool Function() canView;
++  final List<Json> entries;
++  final ValueChanged<InventoryCandidate> onAdd;
++  const InventoryObservationReview(
++      {super.key,
++      required this.read,
++      required this.canView,
++      required this.entries,
++      required this.onAdd});
++
++  @override
++  State<InventoryObservationReview> createState() => _ReviewState();
++}
++
++class _ReviewState extends State<InventoryObservationReview> {
++  bool loading = true, partial = false;
++  String? error;
++  DateTime? observed;
++  List<InventoryCandidate> rows = [];
++
++  @override
++  void initState() {
++    super.initState();
++    read();
++  }
++
++  Future<void> read() async {
++    if (!widget.canView()) return;
++    setState(() {
++      loading = true;
++      observed = null;
++      rows = [];
++      partial = false;
++      error = null;
++    });
++    try {
++      final data = await widget.read();
++      if (!mounted || !widget.canView()) return;
++      switch (data) {
++        case {'observation': null}:
++          break;
++        case {
++            'observation': {
++              'observed_at': int at,
++              'partial': bool incomplete,
++              'rows': List items
++            }
++          }:
++          final timestamp = DateTime.fromMillisecondsSinceEpoch(at * 1000);
++          final candidates = items.map(InventoryCandidate.from).toList();
++          observed = timestamp;
++          partial = incomplete;
++          rows = candidates;
++        default:
++          throw const FormatException();
++      }
++    } catch (e) {
++      if (!mounted || !widget.canView()) return;
++      error = switch (e) {
++        HealthFailure(status: 404) => '此设备的观测记录不可用。',
++        HealthFailure(status: 403 || 401) => '已无权查看设备观测。',
++        _ => '无法读取设备观测，请重试。',
++      };
++    } finally {
++      if (mounted) setState(() => loading = false);
++    }
++  }
++
++  @override
++  Widget build(BuildContext context) {
++    if (!widget.canView()) return const SizedBox.shrink();
++    final registered = {for (final entry in widget.entries) entry['ip']};
++    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
++      Text('最近设备观测', style: Theme.of(context).textTheme.titleMedium),
++      if (loading)
++        const LinearProgressIndicator()
++      else ...[
++        if (error != null)
++          Text(error!)
++        else if (observed == null)
++          const Text('暂无设备观测记录')
++        else ...[
++          Text('观测时间 ${observed.toString().split('.').first}'),
++          if (partial) const Text('未扫完，仅显示已获得的结果。'),
++          if (rows.isEmpty) const Text('本次观测没有设备'),
++          for (final row in rows)
++            ListTile(
++                contentPadding: EdgeInsets.zero,
++                title: Text(row.router ? '${row.ip} · 路由器' : row.ip),
++                subtitle: Text([
++                  if (row.hostname.isNotEmpty) row.hostname,
++                  row.ping ? '回应 ping' : '未回应 ping',
++                  '打印端口 ${row.ports.isEmpty ? '无' : row.ports.join('、')}',
++                ].join(' · ')),
++                trailing: row.registered || registered.contains(row.ip)
++                    ? const Text('已登记')
++                    : TextButton(
++                        onPressed: widget.entries.length < 32
++                            ? () => widget.onAdd(row)
++                            : null,
++                        child: const Text('添加'))),
++          const Text('打印机建议在门店路由器上固定 IP，否则换 IP 后检查会失败。'),
++        ],
++        TextButton(onPressed: read, child: const Text('刷新观测记录')),
++      ],
++    ]);
++  }
++}
+diff --git a/flutter/lib/steaddesk/quick/support.dart b/flutter/lib/steaddesk/quick/support.dart
+index 6dea0b4..8b279ca 100644
+--- a/flutter/lib/steaddesk/quick/support.dart
++++ b/flutter/lib/steaddesk/quick/support.dart
+@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
+ import '../ops_health.dart';
+ import 'check.dart';
+ import 'result_line.dart';
++import 'inventory_observation.dart';
+ import 'managed_inventory.dart';
+ import '../check_categories.dart';
+ import '../ops_health_widgets.dart' show HealthDeviceView;
+@@ -33,7 +34,7 @@ class _StoreViewState extends State<_StoreView> {
+   String get language => widget.language.isEmpty
+       ? Localizations.localeOf(context).languageCode
+       : widget.language;
+-  bool busy = true;
++  bool busy = true, reviewOpen = false;
+   late final int scopeRevision;
+   String? error;
+   String get path => 'devices/${widget.device}';
+@@ -211,6 +212,23 @@ class _StoreViewState extends State<_StoreView> {
+                           : null,
+                       child: Text(inventoryLabel('add', language)))),
+           ],
++          if (editable && !reviewOpen)
++            Align(
++                alignment: Alignment.centerLeft,
++                child: TextButton(
++                    onPressed: () => setState(() => reviewOpen = true),
++                    child: const Text('查看最近设备观测'))),
++          if (editable && reviewOpen)
++            InventoryObservationReview(
++                read: () => widget.store
++                    .resource('GET', '$path/inventory-observations'),
++                canView: () => editable,
++                entries: entries,
++                onAdd: (candidate) => edit(draft: (
++                      ip: candidate.ip,
++                      name: '',
++                      type: candidate.ports.isEmpty ? null : 'printer',
++                    ))),
+           if (entries.isEmpty) const Text('暂无已登记设备'),
+           for (final row in entries)
+             ListTile(
+diff --git a/flutter/test/steaddesk/inventory_observation_test.dart b/flutter/test/steaddesk/inventory_observation_test.dart
+new file mode 100644
+index 0000000..c7b895e
+--- /dev/null
++++ b/flutter/test/steaddesk/inventory_observation_test.dart
+@@ -0,0 +1,184 @@
++import 'dart:async';
++import 'package:flutter/material.dart';
++import 'package:flutter_test/flutter_test.dart';
++import 'package:flutter_hbb/steaddesk/ops_health.dart';
++import 'package:flutter_hbb/steaddesk/quick/check.dart' show Json;
++import 'package:flutter_hbb/steaddesk/quick/support.dart';
++
++const base = 'devices/demo';
++Json row(int octet,
++        {List<int> ports = const [],
++        bool registered = false,
++        bool router = false,
++        String hostname = ''}) =>
++    {
++      'ip': '192.168.2.$octet',
++      'ping': true,
++      'hostname': hostname,
++      'registered': registered,
++      'ports': ports,
++      'router': router,
++    };
++Json snapshot(List<Json> rows, {bool partial = false}) => {
++      'observation': {
++        'observed_at': 1800000000,
++        'partial': partial,
++        'rows': rows
++      },
++    };
++
++class _Api implements HealthApi {
++  bool admin = true;
++  int reads = 0;
++  final entries = <Json>[], writes = <Json>[];
++  Future<Json> Function() observe = () async => {'observation': null};
++  @override
++  Future<Json> request(String method, String route, [Json? body]) async {
++    switch ('$method $route') {
++      case 'GET $base/check-policy':
++        return {'can_edit': admin, 'store_id': 'demo'};
++      case 'GET $base/inventory':
++        return {'entries': entries};
++      case 'GET $base/inventory-observations':
++        reads++;
++        return observe();
++      case 'POST $base/inventory':
++        writes.add(body!);
++        entries.add({...body, 'id': 'i_${entries.length + 1}'});
++        return {};
++      default:
++        throw StateError('Unexpected request');
++    }
++  }
++
++  @override
++  Stream<String> changes() => const Stream.empty();
++  @override
++  void close() {}
++}
++
++class _Store extends HealthStore {
++  _Store(super.api) : super(isCurrent: () => true);
++  void changeScope() {
++    scopeRevision++;
++    notifyListeners();
++  }
++}
++
++Future<_Store> showInventory(WidgetTester t, _Api api) async {
++  final store = _Store(api);
++  store.devices['demo'] = DeviceHealth.from(
++      {'device_id': 'demo', 'status': 'normal', 'reasons': []});
++  await t.pumpWidget(MaterialApp(
++      home: Scaffold(body: storeInventory(store, 'demo', language: 'zh'))));
++  await t.pumpAndSettle();
++  return store;
++}
++
++Future<void> tap(WidgetTester t, Finder target) async {
++  await t.ensureVisible(target);
++  await t.tap(target);
++  await t.pumpAndSettle();
++}
++
++void main() {
++  testWidgets('only admins can request the latest observation', (t) async {
++    final api = _Api()..admin = false;
++    await showInventory(t, api);
++    expect(find.text('查看最近设备观测'), findsNothing);
++    expect(api.reads, 0);
++  });
++
++  testWidgets('distinguishes missing, empty, unavailable and forbidden records',
++      (t) async {
++    final api = _Api();
++    await showInventory(t, api);
++    await tap(t, find.text('查看最近设备观测'));
++    expect(find.text('暂无设备观测记录'), findsOneWidget);
++    api.observe = () async => snapshot([]);
++    await tap(t, find.text('刷新观测记录'));
++    expect(find.text('本次观测没有设备'), findsOneWidget);
++    expect(find.textContaining('观测时间'), findsOneWidget);
++    api.observe = () async => throw const HealthFailure(404);
++    await tap(t, find.text('刷新观测记录'));
++    expect(find.text('此设备的观测记录不可用。'), findsOneWidget);
++    api.observe = () async => throw const HealthFailure(403);
++    await tap(t, find.text('刷新观测记录'));
++    expect(find.text('已无权查看设备观测。'), findsOneWidget);
++    expect(find.textContaining('观测时间'), findsNothing);
++  });
++
++  testWidgets(
++      'registers one reviewed printer and requires an explicit type for other candidates',
++      (t) async {
++    final api = _Api()
++      ..observe = (() async => snapshot([
++            row(7, ports: [9100, 631], hostname: 'receipt.local'),
++            row(1, router: true),
++            row(8, registered: true),
++          ], partial: true));
++    await showInventory(t, api);
++    await tap(t, find.text('查看最近设备观测'));
++    expect(find.textContaining('未扫完'), findsOneWidget);
++    expect(find.textContaining('receipt.local · 回应 ping · 打印端口 9100、631'),
++        findsOneWidget);
++    expect(find.text('已登记'), findsOneWidget);
++    expect(find.text('添加'), findsNWidgets(2));
++    expect(find.textContaining('打印机建议在门店路由器上固定 IP'), findsOneWidget);
++    await tap(t, find.text('添加').first);
++    final fields = find.byType(TextFormField);
++    expect(t.widget<TextFormField>(fields.at(0)).initialValue, isEmpty);
++    expect(t.widget<TextFormField>(fields.at(1)).initialValue, '192.168.2.7');
++    await tap(t, find.text('保存'));
++    expect(find.text('请输入设备名称'), findsOneWidget);
++    expect(api.writes, isEmpty);
++    await t.enterText(fields.first, 'Receipt printer');
++    await tap(t, find.text('保存'));
++    expect(api.writes.single, {
++      'ip': '192.168.2.7',
++      'name': 'Receipt printer',
++      'type': 'printer',
++      'model': '',
++      'no_ping': false,
++    });
++    expect(find.text('已登记'), findsNWidgets(2));
++    expect(find.text('192.168.2.1 · 路由器'), findsOneWidget);
++    await tap(t, find.text('添加'));
++    await t.enterText(fields.first, 'Router');
++    await tap(t, find.text('保存'));
++    expect(find.text('请选择设备类型'), findsOneWidget);
++    expect(api.writes.length, 1);
++    await tap(t, find.byType(DropdownButtonFormField<String>));
++    await tap(t, find.text('其他').last);
++    await tap(t, find.text('保存'));
++    expect(api.writes.last['type'], 'other');
++    expect(api.writes.last['ip'], '192.168.2.1');
++  });
++
++  testWidgets('scope changes discard delayed observation and dialog results',
++      (t) async {
++    final pending = Completer<Json>();
++    final api = _Api()..observe = (() => pending.future);
++    final store = await showInventory(t, api);
++    await t.tap(find.text('查看最近设备观测'));
++    await t.pump();
++    store.scopeRevision++;
++    pending.complete(snapshot([row(7)]));
++    await t.pumpAndSettle();
++    expect(find.text('192.168.2.7'), findsNothing);
++
++    api.observe = () async => snapshot([
++          row(7, ports: [9100])
++        ]);
++    final nextStore = await showInventory(t, api);
++    await tap(t, find.text('查看最近设备观测'));
++    await tap(t, find.text('添加'));
++    await t.enterText(find.byType(TextFormField).first, 'Printer');
++    nextStore.changeScope();
++    await t.pumpAndSettle();
++    expect(find.text('已无权编辑此设备表。'), findsOneWidget);
++    expect(find.byType(TextFormField), findsNothing);
++    await tap(t, find.text('关闭'));
++    expect(api.writes, isEmpty);
++  });
++}
